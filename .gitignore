@@ -1,6 +1,7 @@
 /.gradle/
 /.kotlin/
 /.idea/
+/.codegraph/
 **/build/
 local.properties
 google-services.json
