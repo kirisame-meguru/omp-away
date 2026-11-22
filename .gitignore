@@ -3,3 +3,4 @@
 /plugin/
 /.superpowers/
 /.codegraph/
+/tools/acceptance/__pycache__/

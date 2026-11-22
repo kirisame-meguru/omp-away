@@ -11,7 +11,7 @@ def check(ok):
         raise ValueError('invalid, incomplete or unsupported stream')
 
 
-def unframe(raw, client):
+def unframe(raw, client, prefix=False, boundaries=None):
     end = raw.find(b'\r\n\r\n',0,32768)
     check(end > 0)
     headers = raw[:end].split(b'\r\n')
@@ -20,14 +20,17 @@ def unframe(raw, client):
     pos, fragmented, closed = end+4, False, False
     body = bytearray()
     while pos < len(raw):
+        if prefix and pos+2>len(raw): break
         a,b = raw[pos:pos+2]; pos += 2
         fin, op, size = bool(a&128), a&15, b&127
         check(not closed and a&112 == 0 and bool(b&128) == client)
         if size >= 126:
             n = 2 if size == 126 else 8
+            if prefix and pos+n>len(raw): break
             check(pos+n <= len(raw)); size = int.from_bytes(raw[pos:pos+n],'big'); pos += n
         key = raw[pos:pos+4] if client else None
         if client: pos += 4
+        if prefix and pos+size>len(raw): break
         check(pos+size <= len(raw))
         payload = memoryview(raw)[pos:pos+size]; pos += size
         if op in (8,9,10):
@@ -38,7 +41,9 @@ def unframe(raw, client):
             body.extend(x ^ key[i%4] for i,x in enumerate(payload))
         else:
             body.extend(payload)
-    check(not fragmented and body)
+        if boundaries is not None and (not boundaries or boundaries[-1][0]!=len(body)):
+            boundaries.append((len(body),pos))
+    check((prefix or not fragmented) and body)
     return body
 
 
@@ -65,12 +70,15 @@ def hello13(h, client):
     return found
 
 
-def records(data, client):
+def records(data, client, prefix=False):
     pos, count, total = 0,0,0
     handshake = bytearray()
     while pos < len(data):
+        if prefix and pos+5>len(data): break
         check(pos+5<=len(data)); kind = data[pos]; size = int.from_bytes(data[pos+3:pos+5],'big')
-        check(data[pos+1] == 3 and data[pos+2] in (1,3) and 0 < size <= 16640 and pos+5+size<=len(data))
+        check(data[pos+1] == 3 and data[pos+2] in (1,3) and 0 < size <= 16640)
+        if prefix and pos+5+size>len(data): break
+        check(pos+5+size<=len(data))
         pos+=5
         if kind == 22:
             check(count == 0 and len(handshake)+size <= 131072); handshake.extend(data[pos:pos+size])
@@ -78,22 +86,30 @@ def records(data, client):
             count+=1; total+=size
         else: check(kind==20 and size==1 and data[pos]==1)  # dummy change_cipher_spec
         pos+=size
-    return {'tls13':hello13(handshake,client),'applicationRecords':count,'applicationBytes':total}
+    result={'tls13':hello13(handshake,client),'applicationRecords':count,'applicationBytes':total}
+    if prefix: result['validatedBytes']=pos
+    return result
 
 
-def project(root, uplink, downlink):
-    run = json.loads((root/'scenario.json').read_text(encoding='utf-8'))['run']
+def summarize(run, uplink, downlink):
     canary = ('AWAY-CHECK-'+run).encode('ascii')
     summary = {'run':run,'scope':'/v1/phone','canarySha256':hashlib.sha256(canary).hexdigest(),'canaryHits':0}
     digest = hashlib.sha256()
-    for path, key, client in ((uplink,'phone',True),(downlink,'desktop',False)):
-        check(0<path.stat().st_size<=128*1024*1024)
-        data = unframe(path.read_bytes(), client)
+    for raw, key, client in ((uplink,'phone',True),(downlink,'desktop',False)):
+        data = unframe(raw, client)
         summary['canaryHits'] += data.count(canary)
         summary[key] = records(data,client)
         # Only ciphertext bytes are hashed, never HTTP credentials or mask keys.
         digest.update(len(data).to_bytes(8,'big')); digest.update(data)
     summary['streamSha256'] = digest.hexdigest()
+    return summary
+
+
+def project(root, uplink, downlink):
+    run = json.loads((root/'scenario.json').read_text(encoding='utf-8'))['run']
+    for path in (uplink, downlink):
+        check(0 < path.stat().st_size <= 128*1024*1024)
+    summary = summarize(run, uplink.read_bytes(), downlink.read_bytes())
     with (root/'relay.json').open('x',encoding='utf-8') as f:
         json.dump(summary,f,indent=2); f.write('\n')
 

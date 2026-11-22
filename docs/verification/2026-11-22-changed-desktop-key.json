@@ -1,0 +1,23 @@
+{
+  "source": "Orchestrator-supplied real changed-key test and test-runner observations",
+  "observedDate": "2026-11-22",
+  "changedKey": {
+    "setup": "Separate disposable desktop state and key in private scratch; fresh pairing ticket created but not transferred; actual TLS attempt through production relay",
+    "phone": "Previously pinned Android rejected secure_channel_rejected",
+    "isolatedHelper": "phone_disconnected",
+    "privateInboxOrListExposed": false,
+    "audioOpened": false,
+    "productionDesktopStateChanged": false,
+    "temporaryStateDeleted": true
+  },
+  "testRunnerAndRepairing": {
+    "gradleConnectedTestsPassed": 9,
+    "appUninstalledAfterSuite": true,
+    "identicalVerifiedApkRestored": true,
+    "freshPhoneIdentity": true,
+    "manualComparisonAtBothEnds": true,
+    "matchingEmojis": 12,
+    "authenticatedListObserved": true
+  },
+  "scope": "Changed desktop key rejected; fresh phone identity required a new explicit pairing. Not a positive paid voice run."
+}

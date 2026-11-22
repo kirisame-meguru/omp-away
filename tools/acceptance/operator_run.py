@@ -11,12 +11,6 @@ from pathlib import Path
 
 PKG = 'ru.eleven.ompaway'
 AVD = 'Pixel_10_Pro_XL_99'
-ADJECTIVES = ('silver','golden','velvet','quiet','gentle','frosty','merry','misty')
-NOUNS = ('falcon','willow','garden','lantern','forest','meadow','canyon','robin')
-
-
-def phrase():
-    return secrets.choice(ADJECTIVES) + ' ' + secrets.choice(NOUNS)
 
 
 def save(path, obj):
@@ -26,10 +20,7 @@ def save(path, obj):
 
 def init(path):
     path.mkdir(mode=0o700)  # require new directory under a private parent
-    marker, note = phrase(), phrase()
-    while marker == note:
-        note = phrase()
-    save(path / 'scenario.json', {'run':secrets.token_hex(16),'marker':marker,'note':note})
+    save(path / 'scenario.json', {'run':secrets.token_hex(16),'note':'retry tomorrow'})
     print('Created nonsecret scenario. Do not show the voice-only note to the coding session.')
 
 
@@ -84,7 +75,7 @@ def live(root, adb, serial, audio_source):
         require(re.search(r'mCurrentFocus=[^\n]*\b'+re.escape(PKG)+r'/',w), 'Away is not the focused activity')
     witness('Confirm the lease, private workspace, paired pins, actual Codex login, Google Play services, enabled audio, and both capture points. Leave Away in background; do not force-stop.')
     require(not keys(), 'Start with no outstanding invitations'); mark('baseline')
-    print('Give the DESKTOP the single runbook prompt now (not the voice note). Name of Blue lane disposable test environment:',sc['marker'],'; look for this inbox project marker: AWAY-CHECK-'+sc['run'])
+    print('Give the DESKTOP the runbook prompt now (not the voice-only note). Look for this project in the authenticated inbox: work-AWAY-CHECK-'+sc['run'])
     witness('See the native Ask open, untouched, and the real OS shade notification: Desktop request / Open your inbox to review. No private question or options.')
     active = keys(); require(len(active)==1, 'Expected exactly one active request notification'); data['request']=active[0]; mark('invite')
     witness('Tap Not now on the notification. Verify the invitation vanishes, the native Ask remains, no call starts.')
@@ -95,14 +86,14 @@ def live(root, adb, serial, audio_source):
     focused(); mark('joined')
     witness('Hear the actual question and brief through the emulator audio output, not from desktop TTS. Desktop Ask is still open.')
     mark('heardBrief')
-    input('Before speaking, press Enter. Then ask aloud: What is the name of the disposable test environment for Blue lane? '); mark('askClarification')
-    words = input('After the spoken reply, type ONLY the two-word environment name you actually HEARD: ').strip().lower()
-    require(words == sc['marker'],'Spoken clarification did not name the correct Blue test environment'); data['heardMarker']=words; mark('heardClarification')
-    input('Desktop form still pending? Press Enter BEFORE speaking; then say: My answer is Blue lane; my test note is '+sc['note']+'. '); mark('propose')
-    words = input('After hearing the COMPLETE readback including Blue lane and the random challenge, type only the note actually read back: ').strip().lower()
-    require(words == sc['note'], 'Audible readback mismatch'); data['observedReadback']=words; mark('heardReadback')
-    witness('The original desktop form is STILL open. Do not touch it. You have not confirmed yet.'); mark('confirm')
-    witness('Now speak the exact requested affirmative and the fresh challenge. Hear/see the call end. Verify the original form closes, Codex reports both values, the composer returns and the refreshed authenticated inbox no longer contains the request.')
+    input('Press Enter before asking naturally whether Blue would keep your test data until tomorrow. '); mark('askClarification')
+    witness('Hear the reply explain that the Blue database resets each night; any equivalent wording is fine. Do not supply this fact yourself.')
+    data['heardClarification']='nightly-reset'; mark('heardClarification')
+    input('Press Enter before proposing Blue and the note “retry tomorrow” in your own words. No prefix is required. '); mark('propose')
+    witness('Hear both actual values read back accurately: Blue and the note “retry tomorrow”. Ignore harmless variations in surrounding wording. If a field is wrong, missing or contradicted, stop.')
+    data['observedReadback']={'mode':'blue','note':'retry tomorrow'}; mark('heardReadback')
+    witness('The readback has finished playing on the phone, the original form is still open, and you have not yet agreed.'); mark('confirm')
+    witness('Now answer naturally, e.g. “yes”. Verify the original form closes once, Codex reports both values, the composer returns and the refreshed inbox no longer contains the request.')
     focused(); mark('finished')
     save(root/'android.json',data)
     print('Recorded serial-bound snapshots and human observations; not a pass by itself.')

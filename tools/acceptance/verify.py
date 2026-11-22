@@ -35,10 +35,20 @@ def verify(root):
     invite = load(root / 'invite.json')
     require(set(invite) == {'run','request','status'} and invite['status'] == 204 and invite['run'] == sc['run'] and invite['request'] == device['request'], 'fresh invite exchange does not match OS notification')
     decisions = load(root / 'decision.ndjson', True)
-    require([d['event'] for d in decisions] == ['readback','provisional','mark','played'], 'missing, duplicate or unordered confirmation transitions')
-    require(all(set(d) == {'event','at','request','mark'} and type(d['at']) is int and d['request'] == device['request'] and re.fullmatch('[0-9a-f]{64}', d['mark']) for d in decisions), 'invalid request-scoped confirmation trace')
-    require(len({d['mark'] for d in decisions}) == 1 and [d['at'] for d in decisions] == sorted(d['at'] for d in decisions), 'readback replaced or out of order')
-    require(set(sc) == {'run','marker','note'} and all(re.fullmatch('[a-z]+ [a-z]+',sc[k]) for k in ('marker','note')) and sc['marker'] != sc['note'], 'invalid scenario markers')
+    stages_with_mark = ['readback','verified','mark','presented','played']
+    stages_with_utterance = ['speech-start','user-final','accepted']
+    require([d['event'] for d in decisions] == stages_with_mark + stages_with_utterance, 'missing, duplicate or unordered confirmation transitions')
+    for d in decisions:
+        identity = 'mark' if d['event'] in stages_with_mark else 'utterance'
+        keys = {'event','at','request',identity}
+        if d['event'] == 'readback':
+            keys.add('draftValues')
+        if d['event'] == 'presented':
+            keys |= {'targetFrames','presentedFrames'}
+            require(type(d['targetFrames']) is int and type(d['presentedFrames']) is int and 0 < d['targetFrames'] <= d['presentedFrames'], 'handset did not present all marked frames')
+        require(set(d) == keys and type(d['at']) is int and d['request'] == device['request'] and re.fullmatch('[0-9a-f]{64}', d[identity]), 'invalid scoped transition identity')
+    require(len({d['mark'] for d in decisions[:5]}) == 1 and len({d['utterance'] for d in decisions[5:]}) == 1 and [d['at'] for d in decisions] == sorted(d['at'] for d in decisions), 'broken readback or affirmative chain')
+    require(set(sc) == {'run','note'} and sc['note'] == 'retry tomorrow', 'wrong staging decision scenario')
     require(set(net) == {'run','startMs','endMs','dropped','uidCoverage','ipCoverage','unclassified','flows','fcmAcceptedMs','fcmRequest','liveModel','liveObservation','pairing','relayStartMs','relayEndMs','relayDrops','relayStreams'}, 'unexpected network evidence fields')
     run = sc['run']
     require(re.fullmatch(r'[0-9a-f]{32}', run) and all(v['run'] == run for v in [device, net, wire, *log]), 'mixed runs')
@@ -50,28 +60,36 @@ def verify(root):
         rows = [e for e in log if e['event'] == kind]
         require(len(rows) == 1, 'expected exactly one ' + kind)
         return rows[0]
-    expected = {'session','agent-start','ask-start','offered','model-asked','native-end','model-received','agent-end','shutdown','brief','consult','extract'}
+    expected = {'session','agent-start','ask-start','offered','model-asked','native-end','model-received','agent-end','shutdown','brief','consult','extract','verify'}
+    if any(r['event'] == 'confirm' for r in log):
+        expected.add('confirm')  # Some natural affirmatives need an additional decision-side turn.
     require({r['event'] for r in log} == expected, 'unexpected or missing host events')
-    events = {k: one(k) for k in expected}
+    repeatable = {'consult','extract'}
+    events = {k: one(k) for k in expected - repeatable}
     h = lambda k: events[k]['at']
     require(len({r['session'] for r in log}) == 1 and re.fullmatch('[0-9a-f]{64}', one('session')['session']), 'host session changed')
     tool = one('offered')['tool']
     require(re.fullmatch('[0-9a-f]{64}', tool) and all(one(k)['tool'] == tool for k in ['ask-start','model-asked','native-end']), 'not the original Ask')
     require(one('ask-start')['builtin'] is True and one('session')['canary'] is True, 'missing native form or project canary')
     require(one('model-asked')['paidCodex'] is True and one('model-received')['paidCodex'] is True, 'not desktop Codex')
-    require(one('native-end')['values'] == {'mode':'blue','note':sc['note']} and one('native-end')['ok'] is True, 'wrong native HTML field values or timeout')
+    values = one('native-end')['values']
+    require(type(values) is dict and set(values) == {'mode','note'} and values['mode'] == 'blue' and type(values['note']) is str and re.fullmatch(r'retry tomorrow[.!]?',values['note'],re.I | re.ASCII), 'wrong native HTML field values')
+    require(one('native-end')['ok'] is True and decisions[0]['draftValues'] == values, 'native result differs from actual proposed draft or timed out')
     require(one('model-received')['echo'] is True, 'main coding model did not report the returned values')
     require(h('agent-start') <= h('ask-start') <= h('offered') <= h('native-end') <= h('model-received') <= h('agent-end') <= h('shutdown'), 'main lifecycle out of order')
-    require(len({one(k)['entry'] for k in ['brief','consult','extract']}) == 3 and all(one(k)['paidCodex'] is True and one(k)['ok'] is True for k in ['brief','consult','extract']), 'missing distinct settled side turns')
-    require(one('brief')['marker'] is False and one('consult')['marker'] is True, 'clarification marker missing or leaked by brief')
+    turns = [r for r in log if r['event'] in ('brief','consult','extract','verify','confirm')]
+    require(len({r['entry'] for r in turns}) == len(turns) and all(r['paidCodex'] is True and r['ok'] is True and h('offered') <= r['at'] <= h('native-end') for r in turns), 'missing distinct settled decision turns')
     p = device['steps']
     stages = ['baseline','invite','dismissed','inbox','joined','heardBrief','askClarification','heardClarification','propose','heardReadback','confirm','finished']
     require(list(p) == stages and all(type(t) is int and t > 0 for t in p.values()) and list(p.values()) == sorted(p.values()), 'missing or unordered operator stages')
     require(p['baseline'] <= h('ask-start') <= h('offered') <= p['invite'] and device['request'] == one('offered')['request'] and re.fullmatch('[0-9a-f]{64}', device['request']), 'notification not bound to this offer')
-    require(device['activeInviteCounts'] == [0,1,0] and device['heardMarker'] == sc['marker'] and device['observedReadback'] == sc['note'], 'notification lifecycle or acoustic observation failed')
-    require(h('offered') <= h('brief') <= p['heardBrief'] and p['askClarification'] <= h('consult') <= p['heardClarification'] and p['propose'] <= h('extract') <= p['heardReadback'], 'side turns not in their live voice windows')
+    require(device['activeInviteCounts'] == [0,1,0] and device['heardClarification'] == 'nightly-reset' and device['observedReadback'] == {'mode':'blue','note':'retry tomorrow'}, 'notification lifecycle or heard decision meaning failed')
+    require(h('offered') <= h('brief') <= p['heardBrief'] and any(r['event']=='consult' and p['askClarification']<=r['at']<=p['heardClarification'] for r in turns), 'no separate consultation in the relevant question/reply window')
     require(p['confirm'] < h('native-end') <= p['finished'], 'native answer early or absent at completion')
-    require(h('extract') <= decisions[0]['at'] <= p['heardReadback'] and p['confirm'] <= decisions[1]['at'] <= decisions[-1]['at'] <= h('native-end'), 'confirmation trace outside human and native result boundaries')
+    require(any(r['event']=='extract' and p['propose']<=r['at']<=decisions[0]['at'] for r in turns) and decisions[0]['at']<=h('verify')<=decisions[1]['at'] and decisions[0]['at']<=p['heardReadback'], 'no value-verified readback for this proposal')
+    require(p['confirm'] <= decisions[5]['at'] and decisions[4]['at'] <= decisions[5]['at'] <= decisions[6]['at'] <= h('native-end') <= decisions[7]['at'] <= h('shutdown'), 'affirmative or accepted result out of handset/native lifecycle order')
+    if 'confirm' in expected:
+        require(decisions[6]['at'] <= h('confirm') <= h('native-end'), 'misbound confirmation side turn')
     require(net['startMs'] <= p['baseline'] and net['endMs'] >= p['finished'] and net['dropped'] == 0 and type(net['dropped']) is int, 'incomplete capture interval')
     require(net['uidCoverage'] == 'app+gms' and net['ipCoverage'] == 'all-enabled-families' and net['unclassified'] == 0 and type(net['unclassified']) is int, 'unattributed or unclassified egress')
     allowed = {'firebaseinstallations.googleapis.com':{443},'fcmregistrations.googleapis.com':{443},'android.clients.google.com':{443},'mtalk.google.com':{443,5228,5229,5230}}

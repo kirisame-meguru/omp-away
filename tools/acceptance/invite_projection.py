@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 
-def project(root, req, res):
-    if any(not 0 < p.stat().st_size <= 65536 for p in (req,res)):
+def summarize(run, req, res):
+    if any(not 0 < len(p) <= 65536 for p in (req,res)):
         raise ValueError()
-    header, body = req.read_bytes().split(b'\r\n\r\n',1)
-    status, extra = res.read_bytes().split(b'\r\n\r\n',1)
+    header, body = req.split(b'\r\n\r\n',1)
+    status, extra = res.split(b'\r\n\r\n',1)
     if (header.splitlines()[0] != b'POST /v1/invites HTTP/1.1' or
         not re.fullmatch(rb'HTTP/1\.1 204(?: [^\r\n]*)?',status.splitlines()[0]) or extra):
         raise ValueError()
@@ -21,9 +21,16 @@ def project(root, req, res):
         return d
     payload=json.loads(body,object_pairs_hook=unique)
     if set(payload)!={'deviceId','requestId'} or not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',payload['requestId']): raise ValueError()
+    return {'run':run,'request':hashlib.sha256(payload['requestId'].encode()).hexdigest(),'status':204}
+
+
+def project(root, req, res):
+    if any(not 0 < p.stat().st_size <= 65536 for p in (req,res)):
+        raise ValueError()
     run=json.loads((root/'scenario.json').read_text(encoding='utf-8'))['run']
+    result=summarize(run, req.read_bytes(), res.read_bytes())
     with (root/'invite.json').open('x',encoding='utf-8') as f:
-        json.dump({'run':run,'request':hashlib.sha256(payload['requestId'].encode()).hexdigest(),'status':204},f); f.write('\n')
+        json.dump(result,f); f.write('\n')
 
 
 if __name__=='__main__':

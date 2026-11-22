@@ -1,0 +1,39 @@
+{
+  "observedDate": "2026-11-22",
+  "source": "Orchestrator-supplied, sanitized projections for the same successful paid natural-confirmation call",
+  "featureObservation": "2026-11-22-paid-natural-confirmation-success.json",
+  "joinUtc": "2026-11-22T07:18:07.371Z",
+  "authenticatedInboxVerifiedEmptyByUtc": "2026-11-22T07:20:40.587Z",
+  "handset": {
+    "method": "Local PCAPdroid metadata CSV; UID-attributed records intersecting this run's baseline through finish",
+    "csvStartUtc": "2026-11-22T07:00:41.751Z",
+    "csvEndUtc": "2026-11-22T07:21:19.506Z",
+    "awayApp": {
+      "https": {"host": "away.example.invalid", "port": 443, "records": 2, "bytesSent": 7364164, "bytesReceived": 4282243},
+      "dns": {"queriedName": "away.example.invalid", "resolverPort": 53, "records": 2},
+      "observedOpenAIConnections": 0
+    },
+    "googlePlayServices": [
+      {"type": "DNS query", "name": "mtalk.google.com", "records": 4},
+      {"type": "TLS", "host": "mtalk.google.com", "port": 5228, "records": 3},
+      {"type": "DNS query", "name": "play.googleapis.com", "records": 2},
+      {"type": "QUIC", "host": "play.googleapis.com", "port": 443, "records": 3}
+    ],
+    "unattributedRecordsInPositiveWindow": 0,
+    "outsideWindow": "One earlier failed unattributed TCP/853 record; not part of the positive-call window."
+  },
+  "relay": {
+    "scope": "Dedicated backend after outer HTTPS termination, contiguous /v1/phone TLS prefix for successful call",
+    "captureBytes": 23407341,
+    "kernelPacketsDropped": 0,
+    "phoneDirection": {"tlsVersion": "1.3", "applicationRecords": 6933, "applicationRecordBytes": 6802209},
+    "desktopDirection": {"tlsVersion": "1.3", "applicationRecords": 3803, "applicationRecordBytes": 3721646},
+    "plaintextCanaryHitsInPrefix": 0,
+    "prefixBracketsJoinThroughNativeResult": true,
+    "orderlyTwoFinCloseEstablished": false,
+    "currentInvite": {"accepted": true, "requestDigestMatchedAndroidNotificationTag": true},
+    "otherInvite": "Non-204 for obsolete test registration; distinct from accepted current invite.",
+    "rawCaptureDeletedAfterProjection": true
+  },
+  "limits": "App attribution and absence of the plaintext canary apply only to the stated sources and intervals. Counts are not whole-device lifetime traffic or proof of a complete closed stream. No strict offline verifier pass claimed."
+}

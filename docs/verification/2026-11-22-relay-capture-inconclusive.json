@@ -1,0 +1,13 @@
+{
+  "source": "Orchestrator-supplied observations from private tcpdump and initial offline projection",
+  "observedDate": "2026-11-22",
+  "captureSizeApproxMb": 35,
+  "kernelPacketsDropped": 0,
+  "tcpStreams": 9,
+  "preexistingUnclassified": 0,
+  "incompleteStreams": 2,
+  "shortPhoneStream": {"tlsVersion": "1.3", "applicationRecordsPhone": 4, "applicationRecordsDesktop": 10, "canaryHits": 0},
+  "invite": {"successfulExchangesObserved": 1, "httpStatus": 204, "requestMatchedAndroidNotificationTag": true},
+  "cleanup": {"callHungUp": true, "appBackgrounded": true, "helperHostStopped": true},
+  "result": "Inconclusive. This projection does not identify the short stream as the complete call, diagnose the two incomplete streams, or prove whole-call relay opacity."
+}

@@ -1,0 +1,22 @@
+{
+  "source": "Orchestrator-supplied local metadata-only CSV projection; private CSV not published",
+  "scope": "First natural-confirmation call only; different run from the later partial relay capture",
+  "captureStartUtc": "2026-11-22T07:00:41Z",
+  "joinUtc": "2026-11-22T07:04:22Z",
+  "captureEndUtc": "2026-11-22T07:07:40Z",
+  "totalRecords": 34,
+  "awayApp": {
+    "records": 12,
+    "https443ToAway": {"host": "away.example.invalid", "ip": "203.0.113.10", "records": 8},
+    "dnsToConfiguredResolver": {"queriedName": "away.example.invalid", "records": 4},
+    "observedOpenAIConnections": 0
+  },
+  "googlePlayServices": {
+    "records": 21,
+    "dnsQueries": [{"name": "mtalk.google.com", "records": 12}, {"name": "android.googleapis.com", "records": 2}],
+    "connections": [{"host": "mtalk.google.com", "protocol": "TLS", "port": 5228, "records": 6}, {"host": "android.googleapis.com", "protocol": "QUIC", "port": 443, "records": 1}]
+  },
+  "unattributed": {"records": 1, "transport": "TCP", "port": 853, "outcome": "failed connection"},
+  "limits": "No app-attributed OpenAI connection in this CSV; the unknown failed connection remains unattributed. Not an exhaustive all-UID or no-unknown proof. Do not correlate these rows with a different call's relay capture.",
+  "retention": "Orchestrator reports no authorization-bearing raw pcap remains from either early run. Only private metadata CSV retained."
+}

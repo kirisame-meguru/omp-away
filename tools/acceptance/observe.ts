@@ -11,14 +11,14 @@ const codex = (m: {provider?: string; api?: string}) => m.provider === 'openai-c
 export default function observe(pi: ExtensionAPI) {
   const dir = process.env.AWAY_ACCEPT_DIR;
   if (!dir || !isAbsolute(dir)) throw Error('Acceptance observer requires a dedicated absolute directory');
-  const {run, marker, note} = JSON.parse(readFileSync(join(dir,'scenario.json'), 'utf8'));
-  if (!/^[0-9a-f]{32}$/.test(run) || ![marker,note].every(s => /^[a-z]+ [a-z]+$/.test(s))) throw Error('Invalid acceptance scenario');
+  const {run, note} = JSON.parse(readFileSync(join(dir,'scenario.json'), 'utf8'));
+  if (!/^[0-9a-f]{32}$/.test(run) || note !== 'retry tomorrow') throw Error('Invalid acceptance scenario');
   let session = '', fd: number | undefined;
   let sawEnd = false;
+  let nativeNote: string | undefined;
   const record = (event: string, data: Record<string, unknown> = {}, at = Date.now()) => {
     if (fd !== undefined) writeSync(fd, JSON.stringify({run, session, event, at, ...data})+'\n');
   };
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ');
   pi.on('session_start', (_,ctx) => {
     if (ctx.agent.kind !== 'main' || ctx.mode !== 'tui') return;
     fd = openSync(join(dir, 'host.ndjson'), 'wx', 0o600);
@@ -38,8 +38,8 @@ export default function observe(pi: ExtensionAPI) {
       if (block.type === 'toolCall' && block.name === 'ask') record('model-asked',{tool:digest(block.id),paidCodex:codex(m)});
     }
     if (sawEnd && m.stopReason === 'stop') {
-      const text = norm(m.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(' '));
-      record('model-received',{echo:text.includes('blue') && text.includes(note),paidCodex:codex(m)});
+      const text = m.content.flatMap(b => b.type === 'text' ? [b.text] : []).join(' ');
+      record('model-received',{echo:nativeNote !== undefined && /\bblue\b/i.test(text) && text.includes(nativeNote),paidCodex:codex(m)});
     }
   });
   pi.on('tool_execution_start',(e,ctx) => {
@@ -58,7 +58,10 @@ export default function observe(pi: ExtensionAPI) {
       try {
         const v = JSON.parse(block.text.slice(prefix.length).split('\nOption notes:\n',1)[0]);
         // No unrecognized result contents go to disk.
-        if (v && Object.keys(v).length === 2 && v.mode === 'blue' && v.note === note) values = {mode:v.mode,note:v.note};
+        if (v && Object.keys(v).length === 2 && v.mode === 'blue' && typeof v.note === 'string' && /^retry tomorrow[.!]?$/i.test(v.note) && !/[\r\n\u2028\u2029]/.test(v.note)) {
+          nativeNote = v.note;
+          values = {mode:v.mode,note:v.note}; // retain the observed value, not the fixture spelling
+        }
       } catch { /* report mismatch without logging private output */ }
     }
     record('native-end',{tool:digest(e.toolCallId),ok:!e.isError && !result?.details?.timedOut && Array.isArray(result?.details?.answers),values});
@@ -67,9 +70,9 @@ export default function observe(pi: ExtensionAPI) {
   pi.on('agent_end', (_,ctx) => {
     if (ctx.agent.kind !== 'main') return;
     for (const e of ctx.sessionManager.getEntries()) {
-      if (e.type !== 'model_usage' || !['away-brief','away-consult','away-extract'].includes(e.purpose)) continue;
+      if (e.type !== 'model_usage' || !['away-brief','away-consult','away-extract','away-verify','away-confirm'].includes(e.purpose)) continue;
       const reply = e.completion?.reply ?? '';
-      record(e.purpose.slice(5), {entry:digest(e.id),paidCodex:codex(e),ok:e.stopReason === 'stop' && !!reply.trim(),marker:norm(reply).includes(marker)}, Date.parse(e.timestamp));
+      record(e.purpose.slice(5), {entry:digest(e.id),paidCodex:codex(e),ok:e.stopReason === 'stop' && !!reply.trim()}, Date.parse(e.timestamp));
     }
     record('agent-end');
   });
