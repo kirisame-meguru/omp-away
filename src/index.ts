@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { type Adapter, startAdapter } from "./collab/adapter";
 import { createResponder, type Responder } from "./collab/responder";
+import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
 
 type Values = Record<string, string | number | boolean | string[]>;
 type Delivery = "accepted" | "stale";
@@ -17,6 +18,8 @@ export interface PendingAsk {
 interface Call {
 	id: string;
 	html: string;
+	ctx: ExtensionContext;
+	firstTicket?: number;
 	tagged: string;
 	responder: Responder;
 	native: PromiseWithResolvers<unknown>;
@@ -55,6 +58,9 @@ export default function away(pi: ExtensionAPI): void {
 	let session: string | undefined;
 	let generation = 0;
 	let adapter: Adapter | undefined;
+	let admin: Admin | undefined;
+	let opening: Promise<void> | undefined;
+	let mobileConfigured = false;
 	let ready = false;
 	let activeId: string | undefined;
 	const approvals = new Set<string>();
@@ -66,6 +72,7 @@ export default function away(pi: ExtensionAPI): void {
 		if (!call) return;
 		calls.delete(key);
 		if (activeId === key) activeId = undefined;
+		admin?.end(call.id);
 		call.native.resolve(data);
 		call.responder.clear();
 	}
@@ -78,9 +85,9 @@ export default function away(pi: ExtensionAPI): void {
 		ready = false;
 		approvals.clear();
 		discard();
-		const old = adapter;
-		adapter = undefined;
-		await old?.close();
+		const old = adapter, mobile = admin, starting = opening;
+		adapter = undefined; admin = undefined; opening = undefined;
+		await Promise.all([old?.close(), mobile?.close(), starting]);
 	}
 
 	function offer(toolCallId: string, call: Call) {
@@ -99,7 +106,13 @@ export default function away(pi: ExtensionAPI): void {
 				} finally { call.submitting = false; }
 			},
 		};
-		pi.events.emit("omp-away:pending-ask", pending);
+		if (mobileConfigured) admin?.offer(pending, call.ctx);
+		else pi.events.emit("omp-away:pending-ask", pending); // isolated local-gate integration only
+		// Observe only after delivery; no capability, question, or session context crosses this boundary.
+		queueMicrotask(() => {
+			try { pi.events.emit("omp-away:offer-observed", Object.freeze({ toolCallId, requestId })); }
+			catch { /* A broken observer must not interrupt the native Ask. */ }
+		});
 	}
 
 	async function start(ctx: ExtensionContext) {
@@ -115,6 +128,13 @@ export default function away(pi: ExtensionAPI): void {
 		}
 		const sessionId = ctx.sessionManager.getSessionId();
 		session = sessionId;
+		mobileConfigured = gatewayConfigured();
+		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle()).then(async mobile => {
+			if (epoch === generation) admin = mobile;
+			else await mobile?.close();
+		}).catch(() => {
+			if (epoch === generation) ctx.ui.notify("Away mobile unavailable: check the HTTPS gateway, private token/state paths, routing preferences and tunnel Python. Desktop Ask remains available.", "error");
+		});
 		try {
 			const next = await startAdapter(port, sessionId, {
 				ready() {
@@ -129,10 +149,17 @@ export default function away(pi: ExtensionAPI): void {
 				request(request) {
 					if (epoch !== generation || !ready || approvals.size || !activeId) return;
 					const call = calls.get(activeId);
-					if (call?.responder.accept(request) && !call.offered) offer(activeId, call);
+					if (!call) return;
+					if (call.responder.accept(request) && !call.offered) {
+						call.firstTicket = request.reqId;
+						offer(activeId, call);
+					} else if (call.offered && !call.submitting) finish(activeId);
 				},
 				end(reqId) {
-					if (epoch === generation && activeId) calls.get(activeId)?.responder.end(reqId);
+					if (epoch !== generation || !activeId) return;
+					const call = calls.get(activeId);
+					call?.responder.end(reqId);
+					if (call?.firstTicket === reqId && !call.submitting) finish(activeId);
 				},
 			});
 			if (epoch === generation) adapter = next;
@@ -146,6 +173,15 @@ export default function away(pi: ExtensionAPI): void {
 		}
 	}
 
+	pi.registerCommand("away", {
+		description: "Toggle immediate mobile invites, configure fallback, or pair a phone",
+		handler: async (args, ctx) => {
+			if (!owns(ctx) || ctx.mode !== "tui") return;
+			if (!admin) { ctx.ui.notify("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide.", "error"); return; }
+			await admin.command(args);
+		},
+	});
+	pi.on("agent_start", (_, ctx) => { if (owns(ctx)) admin?.cancelEnrollment(); });
 	pi.on("session_start", (_, ctx) => start(ctx));
 	pi.on("session_switch", (_, ctx) => start(ctx));
 	pi.on("session_branch", (_, ctx) => start(ctx));
@@ -170,7 +206,7 @@ export default function away(pi: ExtensionAPI): void {
 				? link.reply(reqId, value) : Promise.resolve(false));
 		const tagged = responder.prepare(id, html);
 		if (tagged === html) return;
-		calls.set(key, { id, html, tagged, responder, native: Promise.withResolvers(), offered: false, submitting: false });
+		calls.set(key, { id, html, ctx, tagged, responder, native: Promise.withResolvers(), offered: false, submitting: false });
 		return { input: { ...event.input, html: tagged } };
 	});
 	pi.on("tool_execution_start", (event, ctx) => {

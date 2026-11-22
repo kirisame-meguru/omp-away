@@ -15,12 +15,12 @@ export interface MediaPeer {
 
 /** The only spawned executable is the plugin's preprovisioned media venv. No command shell,
  * uv sync, inherited environment, credentials, cwd of the Ask or user-selected interpreter. */
-export function spawnPeer(onAudio: (pcm: Uint8Array) => void, onFailure: () => void): MediaPeer {
+export function spawnPeer(onAudio: (pcm: Uint8Array) => void, onFailure: () => void, traceCategory?: (category: unknown) => void): MediaPeer {
 	const win = process.platform === 'win32';
 	const python = join(DIR, '.venv', ...(win ? ['Scripts', 'python.exe'] : ['bin', 'python']));
 	const env: NodeJS.ProcessEnv = {};
 	if (win && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
-	const child = spawn(python, ['-I', '-u', join(DIR, 'peer.py')], {
+	const child = spawn(python, ['-I', '-u', join(DIR, 'peer.py'), ...(traceCategory ? ['--trace-types'] : [])], {
 		cwd: DIR, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
 	});
 	const offer = Promise.withResolvers<string>(), ready = Promise.withResolvers<void>();
@@ -52,6 +52,9 @@ export function spawnPeer(onAudio: (pcm: Uint8Array) => void, onFailure: () => v
 			return;
 		}
 		const msg = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data));
+		if (traceCategory && msg.type === 'trace' && (phase === 'connecting' || phase === 'ready')) {
+			traceCategory(msg.category); return;
+		}
 		if (phase === 'offer' && msg.type === 'offer' && typeof msg.sdp === 'string' && msg.sdp.startsWith('v=0')) {
 			phase = 'answer'; offer.resolve(msg.sdp);
 		} else if (phase === 'connecting' && msg.type === 'ready') {

@@ -48,7 +48,7 @@ test("missed invites and hanging up preserve silenced inbox item; fresh join has
 });
 test("only an uninterrupted completed readback and its fresh affirmative can submit; replay is inert", async () => {
 	const f=fixture(); f.offer("A"); const c=f.core.join("A")!; await c.brief(); const first=readback(await speak(c,proposal));
-	expect(first.text).toContain("Production"); expect(first.text).toContain("3"); c.speechStarted("early"); c.played(first.mark);
+	expect(first.text.split(" Your words")[0]).toBe("Release lane: Production. Field Replicas: three."); c.speechStarted("early"); c.played(first.mark);
 	expect((await c.speechFinished("early",first.phrase)).kind).not.toBe("accepted"); const second=readback(await speak(c,"Repeat the readback"));
 	c.played(first.mark); expect((await speak(c,second.phrase)).kind).not.toBe("accepted"); const third=readback(await speak(c,"Repeat the readback"));
 	c.played(third.mark); expect((await speak(c,"Yes, that sounds interesting.")).kind).not.toBe("accepted"); expect(f.writes).toEqual([]);
@@ -159,4 +159,52 @@ test("synchronous native end during provider startup rejects without awaiting th
 		expect(await Promise.race([outcome,nextTurn("still waiting")])).toBe("consult-unavailable");
 		expect(c.signal.aborted).toBe(true); expect(f.core.list()).toEqual([]);
 	} finally { slow.resolve("Late answer"); f.core.close(); }
+});
+
+test("marked readbacks distinguish case, punctuation and unicode even after cosmetic ASR normalization",async()=>{
+	const f=fixture(), form=`<form><label>Note<input name="note" required></label></form>`;
+	f.core.offer({...f.ask("X"),html:form},f.ctx,"project"); const c=f.core.join("X")!;
+	expect((await c.brief()).toLowerCase()).toContain("yes submit");
+	const scripts=new Set<string>();
+	for(const value of ["a","A","a!","a?","a a","a  a","a-a","a.a","á","a\u0301","🐈","α","Alpha"]) {
+		f.setReply(()=>JSON.stringify({fields:[{name:"note",value,evidence:value}]}));
+		const r=readback(await speak(c,`My answer is ${value}`));
+		const body=r.text.split(" Your words")[0]!;
+		expect(body).toMatch(/^[A-Za-z ,:.]+$/);
+		scripts.add(body.toLowerCase().match(/[a-z]+/g)!.join(" "));
+	}
+	expect(scripts.size).toBe(13); f.core.close();
+});
+test("duplicate normalized option labels require their exact native value in the readback",async()=>{
+	const f=fixture(), form=`<form><label>Lane<select name="lane"><option value="A">Blue</option><option value="a">BLUE!</option></select></label></form>`;
+	f.core.offer({...f.ask("X"),html:form},f.ctx,"project"); const c=f.core.join("X")!; await c.brief();
+	const scripts=[];
+	for(const value of ["A","a"]) {
+		f.setReply(()=>JSON.stringify({fields:[{name:"lane",value,evidence:value}]}));
+		const r=readback(await speak(c,`My answer is ${value}`)); scripts.push(r.text.split(" Your words")[0]!.toLowerCase());
+	}
+	expect(scripts).toEqual(["lane: value spelled capital alpha.","lane: value spelled alpha."]); f.core.close();
+});
+test("the multi-choice delimiter cannot be confused with one label containing the same words",async()=>{
+	const f=fixture(), form=`<form><p>Teams</p><label><input type="checkbox" name="team" value="a">Red</label><label><input type="checkbox" name="team" value="b">Blue</label><label><input type="checkbox" name="team" value="c">Red also Blue</label></form>`;
+	f.core.offer({...f.ask("X"),html:form},f.ctx,"project"); const c=f.core.join("X")!; await c.brief();
+	const scripts=[];
+	for(const value of [["a","b"],["c"]]) {
+		const evidence="Red also Blue";
+		f.setReply(()=>JSON.stringify({fields:[{name:"team",value,evidence}]})); const r=readback(await speak(c,`My answer is ${evidence}`));
+		scripts.push(r.text.split(" Your words")[0]!.toLowerCase().match(/[a-z]+/g)!.join(" "));
+	}
+	expect(scripts).toEqual(["teams red also blue","teams value spelled charlie"]); f.core.close();
+});
+
+test("plain lowercase words stay compact, but reserved boundaries and altered casing stay distinguishable",async()=>{
+	const f=fixture(), form=`<form><label>Reason<input name="why"></label></form>`;
+	f.core.offer({...f.ask("X"),html:form},f.ctx,"project"); const c=f.core.join("X")!; await c.brief();
+	for(const [value,compact] of [["ship the canary",true],["Ship the canary",false],["your words are",false],["field reason",false],["ship  the canary",false]] as const) {
+		f.setReply(()=>JSON.stringify({fields:[{name:"why",value,evidence:value}]}));
+		const r=readback(await speak(c,"My answer is "+value)); const body=r.text.split(" Your words")[0]!;
+		if(compact) expect(body).toBe("Reason: text ship the canary.");
+		else expect(body).toStartWith("Reason: spelled ");
+	}
+	f.core.close();
 });

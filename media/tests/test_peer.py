@@ -5,7 +5,7 @@ import struct
 
 import pytest
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCRtpSender, RTCSessionDescription
-from peer import MicrophoneTrack, Peer, PHONE_BYTES, read_frame, receive_pcm
+from peer import MicrophoneTrack, Peer, PHONE_BYTES, read_frame, receive_pcm, trace_wire_category
 
 
 def tone(hz, frame):
@@ -72,3 +72,17 @@ def test_backlog_discards_old_microphone_and_never_bursts_to_catch_up():
 def test_rejects_invalid_or_truncated_pipe_frame(wire):
     with pytest.raises(ValueError):
         read_frame(io.BytesIO(wire))
+
+
+@pytest.mark.parametrize(('wire', 'category'), [
+    ('{"type":"turn.done","turn":{"role":"user","transcript":"PRIVATE"}}', 'turn.user.valid'),
+    ('{"type":"turn.done","turn":{"role":"assistant","text":"PRIVATE"}}', 'turn.assistant.missing_transcript'),
+    ('{"type":"turn.done","turn":{"role":"SECRET"}}', 'turn.other_role'),
+    ('{"type":"turn.done","transcript":"SECRET"}', 'turn.missing_turn'),
+    ('{"type":"SECRET","credentials":"SECRET"}', 'other'),
+    (b'PRIVATE', 'binary'), ('{' * 65537, 'oversize'),
+    ('{"type":"conversation.item.input_audio_transcription.completed","transcript":"SECRET"}', 'conversation.item.input_audio_transcription.completed'),
+], ids=['user-turn', 'missing-transcript', 'other-role', 'missing-turn',
+        'unknown-event', 'binary', 'oversize', 'transcription-completed'])
+def test_wire_trace_classifies_without_forwarding_payload(wire, category):
+    assert trace_wire_category(wire) == category

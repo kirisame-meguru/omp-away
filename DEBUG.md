@@ -43,7 +43,42 @@ Across the three deliberate user messages, require exactly **three** `agent_star
 
 ## Host delivery boundary
 
-Trusted in-process extension code may listen on `pi.events.on("omp-away:pending-ask", ...)`. Its `PendingAsk` has original `html`, `requestId`, `toolCallId` and `submitConfirmed(requestId, values)`. Only publish to a real device through a separately authenticated, confirmation-aware integration; do not serialize the function or expose this as an agent tool. There is no arbitrary frame, shell, UI control, or network submission endpoint. Unrelated dialogs and approvals are ineligible. An old capability cannot affect a later Ask. `accepted` requires dispatch of the confirmed guest steps **and** an exact match to this call's native result; the host protocol does not distinguish two sides submitting identical data. This gate uses distinguishable values and deliberate ordering for that reason.
+Only when **no gateway settings** are present, a trusted in-process local fixture may listen on `pi.events.on("omp-away:pending-ask", ...)`. With a gateway configured, the extension passes the capability directly to the session coordinator; it never publishes it on the event bus. `PendingAsk` contains original `html`, `requestId`, `toolCallId` and `submitConfirmed(requestId, values)`. Never serialize this function or expose it as an agent tool. Unrelated dialogs and approvals are ineligible. An old capability cannot affect a later Ask. `accepted` requires dispatch of the confirmed guest steps **and** an exact match to this call's native result; the host cannot distinguish identical desktop and phone submissions. The fixture uses distinct values and deliberate ordering for that reason.
+
+## Connect an actual phone
+
+Use **one** stock interactive omp 19.1.0 main session, the normal desktop Codex login, Bun 1.4.4+, a CA-trusted HTTPS gateway, and two preprovisioned Python environments. The isolated scripted fixture above deliberately has **no gateway settings**: it tests the local Ask boundary, not a mobile call. Do not copy any login, Firebase credential, cloud identity or session file into the fixture, the phone or this repository.
+
+1. From `plugin/`, provision the helper environments once: `uv sync --project tunnel --python 3.12` and `uv sync --project media --python 3.12`. The tunnel interpreter must have the `omp_away_tunnel` package and its dependencies installed for `python -I -m omp_away_tunnel`. The media bridge always starts `media/.venv/Scripts/python.exe` (Unix: `media/.venv/bin/python`); no interpreter is selected by a request and nothing is installed during a call.
+2. Set these **paths and origin only**, in the shell launching the real desktop session (PowerShell, from `plugin/`):
+
+   ```powershell
+   $env:OMP_AWAY_URL = 'https://away.example.invalid'
+   $env:OMP_AWAY_TOKEN_FILE = Join-Path $env:LOCALAPPDATA 'omp-away\desktop.token'
+   $env:OMP_AWAY_STATE_DIR = Join-Path $env:LOCALAPPDATA 'omp-away\private-state'
+   $env:OMP_AWAY_TUNNEL_PYTHON = (Resolve-Path 'tunnel\.venv\Scripts\python.exe').Path
+   ```
+
+   The token file is provisioned separately by the operator: the relay's **desktop** 32-byte bearer encoded as unpadded base64url, optional final newline, readable only by the current desktop account. Never put it in a URL, prompt, shell command line, repo, clipboard or screenshot. Verify ACLs without displaying contents. State must be an absolute path to a dedicated private local directory, not source, a junction, or a shared/cloud-synced folder. Prefer a **nonexistent** final directory: the helper creates it with a noninherited current-user-only ACL (Unix: mode 0700). Give each desktop its own state and run only one gateway owner. On Unix set equivalent absolute paths; use `tunnel/.venv/bin/python` and an owner-only mode 0600 token file. Without `OMP_AWAY_TUNNEL_PYTHON`, `python` on Windows or `python3` on Unix must already refer to the provisioned tunnel environment.
+3. Use a **per-run** `--config` YAML overlay on the normal authenticated desktop profile. Do not replace global settings, reuse an existing nonlocal Collab room, publish a Collab port, or use a remote shell with clipboard forwarding. The three native settings are:
+
+   ```yaml
+   collab:
+     relayUrl: ws://127.0.0.1:18475
+     autoStart: control
+   ask:
+     timeout: 0
+   ```
+
+   Choose a free loopback port. Launch from the project with `omp --config <absolute-overlay-path> -e <absolute-plugin-directory>` (replace both placeholders). Wait for **Away: local guest ready** and **Away: secure mobile gateway ready** before opening a mobile Ask. Run `/away status` to inspect routing. If mobile setup is unavailable, correct the paths, ACLs, HTTPS service or duplicate desktop connection; restart the session. Local Ask remains authoritative.
+4. From an **idle local composer**, enter `/away pair`. This copies a one-time JSON payload to the system clipboard; it is never printed, entered into the composer, or emitted to the model. Disable third-party clipboard managers, syncing and capture; do not paste into a chat or online QR service. Paste into the trusted phone enrollment screen, or display a QR using a trusted **offline** renderer. Clear both clipboards and close the renderer immediately. The Windows writer opts out of clipboard history and roaming; the payload is valid for at most ten minutes. A new invitation invalidates the previous one.
+5. Compare **all twelve** emoji in order on **both** devices. For an exact match, approve on the phone and enter the local widget's `/away approve CODE` on the desktop. Otherwise `/away deny CODE`. `CODE` identifies this comparison only; it is not the enrollment secret. There is no approval dialog over a native Ask. Starting work cancels a pending comparison; pair again from idle. Failure or timeout is not success. A changed phone key must not regain requests addressed to its predecessor.
+
+### Routing and call behavior
+
+`/away` toggles immediate ringing; `/away on` and `/away off` set it explicitly. `/away fallback 90` enables normal-mode escalation after 90 seconds from request creation; `/away fallback off` disables it. The allowed interval is 1–2,147,483 whole seconds. `/away status` shows both settings. Defaults: immediate off, fallback off. Preferences persist in `routing.json` in private state; neither setting expires or auto-submits a native form. Turning off immediate mode does **not** turn off a configured fallback. Ringing sends only the opaque request ID to the enrolled device route.
+
+Pair **before** starting the native Ask. A newly enrolled device does not inherit open requests. The paired inbox reconciles on connect; **Not now** suppresses ringing for that request; **Hang up** or disconnect closes voice but leaves the Ask pending. Only joining opens desktop Codex voice. For a draft, say “My answer is …” with a choice for every editable field. A clarification, a draft, or a bare “yes” does not submit. Listen to the exact readback, then speak its requested affirmative with its fresh four-word suffix. The handset must attest physical playout over the same authenticated call. Interruptions, revoked IDs, old marks and repeated acknowledgments cannot answer another Ask. A desktop answer removes the request from the inbox and closes its audio. If the side turn, signaling, playout or confirmation fails, complete the existing desktop form; never enter answers into slash commands.
 
 ## Recording evidence
 

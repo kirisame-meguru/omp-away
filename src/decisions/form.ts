@@ -2,9 +2,41 @@ import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-tui/htm
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { type FormValues, planAnswers, tagForm, type PreparedForm } from "../collab/form";
 
-export interface DecisionForm { native: PreparedForm; questions: Map<string,string>; description: string; question: string }
+export interface DecisionForm { native: PreparedForm; speech: Map<string,{title:string; labels:Map<string,string>}>; description: string; question: string }
 export interface Draft { values: FormValues; spoken: string }
 const budget = (text: string, bytes: number) => Buffer.byteLength(text) <= bytes;
+const alphabet="alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu".split(" ");
+const digits="zero one two three four five six seven eight nine".split(" ");
+const punctuation:Record<string,string>={" ":"space","-":"dash","_":"underscore",".":"period",",":"comma",":":"colon","!":"exclamation","?":"question","/":"slash","\\":"backslash","\n":"newline","\r":"return","\t":"tab","'":"apostrophe",'"':"quote","@":"at","+":"plus","=":"equals"};
+const numericPunctuation:Record<string,string>={"-":"minus","+":"plus",".":"point","e":"exponent"};
+const reserved=/\b(?:also|field|value|other|none|spelled|your|words)\b/i;
+/** Self-delimiting even after punctuation and capitalization are removed from ASR. */
+function spell(text:string):string {
+	if(!text) return "empty";
+	const tokens:string[]=[];
+	for(const ch of text) {
+		const n=ch.codePointAt(0)!;
+		if(n>=97 && n<=122) tokens.push(alphabet[n-97]!);
+		else if(n>=65 && n<=90) tokens.push("capital",alphabet[n-65]!);
+		else if(n>=48 && n<=57) tokens.push(digits[n-48]!);
+		else if(punctuation[ch]) tokens.push(punctuation[ch]);
+		else tokens.push("unicode",...String(n).split("").map(v=>digits[Number(v)]!),"end");
+	}
+	return tokens.join(" ");
+}
+// Reserve the grammar, including the acoustic tail, across every user-controlled label.
+// Punctuation-only differences must not make a label unique under the media matcher.
+function uniqueLabels(labels:string[]):Map<string,string> {
+	const counts=new Map<string,number>();
+	const keys=labels.map(s=>s.toLowerCase().match(/[a-z]+/g)?.join(" ") ?? "");
+	for(const k of keys) counts.set(k,(counts.get(k)??0)+1);
+	const usable=new Map<string,string>();
+	for(const [i,label] of labels.entries()) {
+		if(counts.get(keys[i]!)===1 && /^[A-Za-z]{2,}(?: [A-Za-z]{2,})*$/.test(label)
+			&& !/\b[A-Z]{2,}\b/.test(label) && !reserved.test(label)) usable.set(label,label);
+	}
+	return usable;
+}
 export function prepare(html: string): DecisionForm | undefined {
 	if (!budget(html,65_536)) return;
 	const native = tagForm(html);
@@ -19,7 +51,18 @@ export function prepare(html: string): DecisionForm | undefined {
 	});
 	const description = JSON.stringify({context:formContext(parsed),fields});
 	if (!budget(description,16_384)) return;
-	return {native,questions,description,question:fields.map(f=>f.question).join("; ").slice(0,256)};
+	const titleLabels=uniqueLabels(fields.map(f=>f.question ?? ""));
+	const speech:DecisionForm["speech"]=new Map();
+	for(const f of fields) {
+		const title=titleLabels.get(f.question ?? "") ?? `name spelled ${spell(f.name)}`;
+		const labels=new Map<string,string>();
+		if("options" in f && f.options) {
+			const usable=uniqueLabels(f.options.map(o=>o.label));
+			for(const o of f.options) if(usable.has(o.label)) labels.set(o.value,o.label);
+		}
+		speech.set(f.name,{title,labels});
+	}
+	return {native,speech,description,question:fields.map(f=>f.question).join("; ").slice(0,256)};
 }
 const record = (x:unknown): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const key = (s:string) => s.toLowerCase().normalize("NFC").replace(/\s+/g," ").trim();
@@ -42,6 +85,7 @@ export function extractDraft(form: DecisionForm, utterance: string, json: string
 	for (const item of form.native.fields) {
 		const {field} = item, row = rows.get(field.name);
 		if (!row) return;
+		const {title,labels}=form.speech.get(field.name)!;
 		const {value,evidence} = row;
 		if (value !== null && typeof value !== "number" && typeof value !== "string" && !(Array.isArray(value) && value.every(v=>typeof v === "string"))) return;
 		if (value !== null) values[field.name]=value;
@@ -51,18 +95,27 @@ export function extractDraft(form: DecisionForm, utterance: string, json: string
 				if(typeof v!=="string") return;
 				const option=item.enabled.find(o=>o.value===v);
 				const label = (option && spansText(option.label).trim()) || v;
-				if (!mentioned(evidence,label) && !mentioned(evidence,v)) return;
-				pieces.push(label === v ? JSON.stringify(v) : `${JSON.stringify(label)}, value ${JSON.stringify(v)}`);
+				if (!(option ? mentioned(evidence,label) || mentioned(evidence,v) : evidence.includes(v))) return;
+				pieces.push(labels.get(v) ?? `${option ? "value" : "other"} spelled ${spell(v)}`);
 			}
 		} else {
 			if(typeof value!=="string" && typeof value!=="number") return;
 			if(typeof value==="string" && value && !evidence.includes(value)) return;
-			pieces.push(value===""?"empty text":JSON.stringify(value));
+			if(typeof value==="string") {
+				// The text prefix denotes literal lowercase ASCII, one space between words.
+				const literal=/^[a-z]+(?: [a-z]+)*$/.test(value) && !reserved.test(value);
+				pieces.push(literal ? `text ${value}` : `spelled ${spell(value)}`);
+			}
+			else {
+				if(!Number.isFinite(value) || Object.is(value,-0)) return;
+				pieces.push([...String(value)].map(ch=>numericPunctuation[ch] ?? digits[Number(ch)]!).join(" "));
+			}
 		}
-		lines.push(`${form.questions.get(field.name)} (${field.name}): ${pieces.length ? pieces.join("; ") : "none selected"}.`);
+		// "Field" separates clauses and "also" separates answers when ASR omits punctuation.
+		lines.push(`${lines.length ? "Field " : ""}${title}: ${pieces.length ? pieces.join(" also ") : "none selected"}.`);
 	}
 	if (!planAnswers(form.native,values)) return;
 	const spoken=lines.join(" ");
-	if (!budget(spoken,3_000) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(spoken)) return;
+	if (!budget(spoken,3_000)) return;
 	return {values,spoken};
 }

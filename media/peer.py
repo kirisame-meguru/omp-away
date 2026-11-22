@@ -64,8 +64,45 @@ async def receive_pcm(track, emit):
             emit(bytes(memoryview(frame.planes[0])[:PHONE_BYTES]))
 
 
+# Matches a small diagnostics vocabulary, not a second live-protocol handler. No message,
+# text, ID, unknown key or arbitrary server-supplied type is sent to the parent.
+TRACE_TYPES = frozenset('''
+session.started session.updated session.created output_audio.delta input_transcript.added output_transcript.added delegation.created error
+input_audio_buffer.speech_started input_audio_buffer.speech_stopped input_audio_buffer.committed output_audio_buffer.started output_audio_buffer.stopped output_audio_buffer.cleared
+conversation.item.input_audio_transcription.completed conversation.item.input_audio_transcription.delta conversation.item.input_audio_transcription.failed
+response.output_audio_transcript.done response.output_audio_transcript.delta response.audio_transcript.done response.audio_transcript.delta
+response.output_audio.done response.output_audio.delta response.output_item.done conversation.item.done conversation.item.created response.created response.done response.cancelled turn.interrupted
+'''.split())
+
+
+def trace_wire_category(data):
+    if not isinstance(data, str):
+        return 'binary'
+    if len(data) > CONTROL_MAX:
+        return 'oversize'
+    try:
+        msg = json.loads(data)
+    except (ValueError, RecursionError):
+        return 'invalid'
+    if not isinstance(msg, dict) or not isinstance(msg.get('type'), str):
+        return 'invalid'
+    kind = msg['type']
+    if kind == 'turn.done':
+        turn = msg.get('turn')
+        if not isinstance(turn, dict):
+            return 'turn.missing_turn'
+        role = turn.get('role')
+        if role not in ('user', 'assistant'):
+            return 'turn.other_role'
+        return f"turn.{role}.{'valid' if isinstance(turn.get('transcript'), str) else 'missing_transcript'}"
+    if kind in ('input_transcript.added', 'output_transcript.added'):
+        if not isinstance(msg.get('item'), dict) or not isinstance(msg['item'].get('text'), str):
+            return 'transcript.missing_text'
+    return kind if kind in TRACE_TYPES else 'other'
+
+
 class Peer:
-    def __init__(self, emit, failed):
+    def __init__(self, emit, failed, trace=None):
         if sys.byteorder != 'little':
             raise RuntimeError('s16 little endian required')
         self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
@@ -81,6 +118,8 @@ class Peer:
         # The authenticated SDK sideband is the sole owner of events; never bridge SCTP to the phone.
         self.opened = asyncio.Event()
         self.events.on('open', self.opened.set)
+        if trace is not None:
+            self.events.on('message', lambda msg: trace(trace_wire_category(msg)))
 
         @self.pc.on('track')
         def track(remote):
@@ -164,7 +203,11 @@ async def main():
         while True:
             kind, data = await out.get()
             await asyncio.to_thread(write_frame, sys.stdout.buffer, kind, data)
-    peer = Peer(lambda pcm: emit(PCM, pcm), failure.set)
+    def trace(category):
+        # Trace must never displace audio from the bounded stdio queue.
+        if out.qsize() < 4:
+            control({'type': 'trace', 'category': category})
+    peer = Peer(lambda pcm: emit(PCM, pcm), failure.set, trace if sys.argv[1:] == ['--trace-types'] else None)
     async def reader():
         control({'type': 'offer', 'sdp': await peer.offer()})
         answered = False

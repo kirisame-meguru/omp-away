@@ -56,7 +56,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 		issuedTails.add(tail);
 		const mark=randomUUID(), phrase=`yes submit ${tail}`;
 		reading={mark,phrase,draft,phase:"waiting"};
-		return {kind:"say",text:`Your proposed answer is: ${draft.spoken} To confirm, say yes, submit, followed by these words. Your words are ${tail}.`,mark,confirmationPhrase:phrase};
+		return {kind:"say",text:`${draft.spoken} Your words are ${tail}.`,mark,confirmationPhrase:phrase};
 	}
 	async function submit(r:Readback):Promise<DecisionReply> {
 		if(submitting || life.signal.aborted || proposal!==r.draft) return stale;
@@ -72,7 +72,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 			const brief=await untilAbort(opt.brief,life.signal);
 			if(life.signal.aborted) throw Error("call-ended");
 			briefReady=true;
-			return brief + " To propose a complete answer, say ‘My answer is’ followed by your choice for every field. To hear the current proposal again, say ‘Repeat the readback’.";
+			return brief + " To propose an answer, say My answer is, then your choice for every field. Listen to the entire readback. To confirm, say yes submit followed by the four words at the end. To hear it again, say Repeat the readback.";
 		},
 		async consult(question) {
 			if(!briefReady || life.signal.aborted || submitting) throw Error("call-unavailable");
