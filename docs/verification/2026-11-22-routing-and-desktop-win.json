@@ -1,0 +1,10 @@
+{
+  "source": "Orchestrator-supplied real-host observations",
+  "observedDate": "2026-11-22",
+  "paidReadbackDiagnostic": {"paidUserFinalObserved": true, "canonicalReadbackMatched": false, "originalFormRemainedOpen": true},
+  "hangupThenDesktopWin": {"afterHangupDesktopAskPending": true, "afterHangupSameQuestionInInbox": true, "desktopSelected": "Blue", "codingModelReportedValue": "blue", "handsetReportedRequestNoLongerPending": true, "handsetInboxEmpty": true},
+  "disabledEscalation": {"immediate": "off", "fallback": "off", "formOpen": true, "inviteObserved": false, "observationWindow": "short; duration not supplied"},
+  "delayedEscalation": {"configuredSeconds": 8, "invitePresentAtFormOpen": false, "secondsFromFormOpenToAndroidNotification": 8.6},
+  "notNowOnDelayedInvite": {"androidNotificationRemoved": true, "originalNativeFormOpen": true, "authenticatedInboxSameQuestion": true, "inboxState": "Silenced"},
+  "notEstablished": ["voice-confirmed native submission", "exactly-once voice result", "permanent absence of disabled invites", "complete paid end-to-end acceptance"]
+}

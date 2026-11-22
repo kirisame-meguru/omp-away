@@ -1,0 +1,12 @@
+{
+  "observedDate": "2026-11-22",
+  "source": "Orchestrator-supplied observations of a separate real Ask run",
+  "host": {"version": "19.1.0", "stock": true, "bundledSdkLoaded": true, "awayImmediate": true},
+  "nativeAskQuestion": "Which release lane?",
+  "realFcmFromOriginalAsk": true,
+  "handset": {"pendingProjectAndQuestionMatched": true, "microphonePermissionGrantedViaOs": true, "callOpened": true},
+  "voice": {"spokenQuestionTopic": "sandbox versus production", "codexReplyCapturedAtEmulatorSpeaker": true, "freeformGreenCommentHeard": true},
+  "afterFreeformComment": {"nativeFormStillOpen": true},
+  "afterHandsetHangup": {"nativeAskPending": true, "handsetItemPending": true},
+  "notEstablished": ["distinct tool-free coding-session consultation", "canonical readback", "bound confirmation", "exactly one native structured result", "complete paid end-to-end acceptance"]
+}
