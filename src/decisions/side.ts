@@ -4,8 +4,9 @@ import type { DecisionForm } from "./form";
 export interface SideContext {
 	runEphemeralTurn?(options:{promptText:string;tools:false;signal:AbortSignal;purpose:string;dedupeReply:false;maxContextBytes:number;onTextDelta:(text:string)=>void}):Promise<{replyText:string;assistantMessage:{stopReason:string}}>;
 }
-type SidePurpose="brief"|"consult"|"extract"|"verify"|"confirm";
-const prompts = Object.fromEntries(["brief","consult","extract","verify","confirm"].map(key=>[key,readFileSync(new URL(`../../prompts/decisions/${key}.md`,import.meta.url),"utf8").trim()]));
+const purposes=["brief","consult","extract","verify","confirm","speech"] as const;
+type SidePurpose=typeof purposes[number];
+const prompts = Object.fromEntries(purposes.map(key=>[key,readFileSync(new URL(`../../prompts/decisions/${key}.md`,import.meta.url),"utf8").trim()]));
 export type Exchange = {question:string; answer:string};
 export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):Promise<T> {
 	signal.throwIfAborted();

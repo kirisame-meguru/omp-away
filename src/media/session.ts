@@ -7,11 +7,12 @@ export interface VoiceCallbacks {
 	onSpeechStarted(utteranceId: string): void;
 	onInterrupt(): void;
 	onAudio(pcm: Uint8Array): void | Promise<void>;
+	onSpeech(expected: string, actual: string): boolean | Promise<boolean>;
 	onReadback(mark: string, actualAssistantFinal: string): boolean | Promise<boolean>;
 	onMark(mark: string): void;
 }
 interface Reading {
-	mark: string;
+	target: {mark:string} | {text:string};
 	phase: 'sending' | 'awaiting' | 'verifying' | 'verified' | 'marked' | 'played' | 'confirming';
 	expires: number;
 	frames: { pcm: Uint8Array; received: number }[];
@@ -31,6 +32,9 @@ const FRAME_MS = 20, QUIET_FRAMES = 30, INACTIVE_MS = 1200;
 const FIRST_VOICE_MS = 10_000;
 export class NoVoiceAudioError extends Error {
 	constructor() { super('No voice audio received from the voice service') }
+}
+export class UngroundedSpeechError extends Error {
+	constructor() { super('Voice response did not match the desktop question or answer') }
 }
 // At most 45 seconds / 2.16 MB of decoded PCM; total readback lifetime
 // includes verification, paced replay, physical receipt and the caller's reply.
@@ -58,14 +62,13 @@ export class VoiceSession {
 	#quietInput = 0;
 	#cutOutput = false;
 	#revision = 0;
-	#output?: Promise<void>;
-	#queued = 0;
+	#writing = false;
 	#sending = false;
 	#seen = new Set<string>();
 	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace) {}
 
 	#clearReadback() {
-		clearTimeout(this.#expiry); this.#clearWake();
+		clearTimeout(this.#expiry); this.#clearAudioDeadline(); this.#clearWake();
 		if (this.#reading) this.#reading.frames.length = 0;
 		this.#reading = undefined;
 	}
@@ -73,7 +76,6 @@ export class VoiceSession {
 		clearTimeout(this.#awaitingAudio); this.#awaitingAudio = undefined;
 	}
 	stop() {
-		this.#clearAudioDeadline();
 		this.#live = false; this.#onset = undefined; this.#seen.clear(); this.#clearReadback();
 	}
 	#interrupt() {
@@ -116,7 +118,7 @@ export class VoiceSession {
 		this.#wake.unref();
 	}
 	#pump(r: Reading) {
-		if (this.#reading !== r || r.phase !== 'verified' || this.#queued || this.#onset || r.audibleFrames < 5) return;
+		if (this.#reading !== r || r.phase !== 'verified' || this.#writing || this.#onset || r.audibleFrames < 5) return;
 		const now = performance.now();
 		if (now >= r.expires) { this.#interrupt(); return }
 		// When silence continues indefinitely, fence its first complete tail.
@@ -127,7 +129,10 @@ export class VoiceSession {
 			if (!tail && now < gapAt) { this.#wakeAtTime(r, gapAt); return }
 			this.trace?.step(tail ? 'rtp.end.quiet_frames' : now - r.lastFrameAt >= INACTIVE_MS ? 'rtp.end.receive_gap' : 'rtp.end.quiet_gap');
 			this.#clearWake(); r.frames.length = 0;
-			r.phase = 'marked'; this.cb.onMark(r.mark); this.trace?.step('mark.emitted'); return;
+			if ('mark' in r.target) {
+				r.phase = 'marked'; this.cb.onMark(r.target.mark); this.trace?.step('mark.emitted');
+			} else this.#clearReadback();
+			return;
 		}
 		if (r.playStart === undefined) { r.playStart = now; this.trace?.step('rtp.replay.started') }
 		const frame = r.frames[r.cursor];
@@ -135,54 +140,43 @@ export class VoiceSession {
 		const due = Math.max(r.nextFrameAt, r.playStart + (frame.received - r.frames[0].received));
 		if (due > now) { this.#wakeAtTime(r, due); return }
 		++r.cursor; r.nextFrameAt = now + FRAME_MS;
-		this.#forward(frame.pcm);
-		if (!this.#queued) this.#pump(r);
+		const write = this.cb.onAudio(frame.pcm);
+		if (!write) { this.#pump(r); return }
+		this.#writing = true;
+		void write.then(() => {
+			this.#writing = false;
+			if (this.#reading && this.#live) this.#pump(this.#reading);
+		}, () => { if (this.#live) { this.stop(); this.fail(new Error('Handset audio delivery failed')) } });
 	}
 	played(mark: string) {
 		const r = this.#reading;
-		if (!this.#live || !r || r.phase !== 'marked' || performance.now() >= r.expires || this.#onset || this.#inputHot || r.mark !== mark) return false;
+		if (!this.#live || !r || r.phase !== 'marked' || performance.now() >= r.expires || this.#onset || this.#inputHot || !('mark' in r.target) || r.target.mark !== mark) return false;
 		r.phase = 'played'; this.trace?.step('mark.played'); return true;
 	}
 	rtp(pcm: Uint8Array) {
 		if (!this.#live) return;
 		if (pcm.length !== 960) throw new Error('Invalid voice output');
 		const r = this.#reading;
-		if (this.#cutOutput) return;
-		if (r) {
-			const voiced = energy(pcm) >= 64 ** 2;
-			if (r.phase === 'marked' || r.phase === 'played' || r.phase === 'confirming') {
-				if (voiced) this.#interrupt(); return;
-			}
-			if (r.frames.length >= BUFFER_FRAMES || performance.now() >= r.expires) {
-				this.trace?.step('rtp.replay.limit'); this.#interrupt(); return;
-			}
-			// The peer transfers a distinct immutable buffer per decoded frame.
-			// Capture from the append itself: a gap is not a reliable start marker.
-			const received = performance.now(); r.lastFrameAt = received;
-			r.frames.push({pcm, received});
-			if (voiced) {
-				if (++r.audibleFrames === 1) this.trace?.step('rtp.first_voiced');
-				r.lastVoicedAt = received; r.quietFrames = 0;
-			} else if (r.audibleFrames) ++r.quietFrames;
-			this.#pump(r); return;
+		if (this.#cutOutput || !r) return; // No desktop-owned turn: never stream speculative audio.
+		const voiced = energy(pcm) >= 64 ** 2;
+		if (r.phase === 'marked' || r.phase === 'played' || r.phase === 'confirming') {
+			if (voiced) this.#interrupt(); return;
 		}
-		if (this.#awaitingAudio && energy(pcm) >= 64 ** 2) {
-			this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline();
+		if (r.frames.length >= BUFFER_FRAMES || performance.now() >= r.expires) {
+			this.trace?.step('rtp.replay.limit'); this.#interrupt();
+			if ('text' in r.target) this.fail(new UngroundedSpeechError());
+			return;
 		}
-		this.#forward(pcm);
-	}
-	#forward(pcm: Uint8Array) {
-		if (this.#queued >= 12) { this.stop(); this.fail(new Error('Handset audio stalled')); return }
-		const revision = this.#revision;
-		const deliver = () => { if (this.#live && revision === this.#revision) return this.cb.onAudio(pcm) };
-		const op = this.#output ? this.#output.then(deliver) : deliver();
-		if (!op) return;
-		++this.#queued;
-		const tail = this.#output = op.catch(() => { if (this.#live) { this.stop(); this.fail(new Error('Handset audio delivery failed')) } });
-		void tail.then(() => {
-			--this.#queued; if (this.#output === tail) this.#output = undefined;
-			if (this.#reading && this.#live) this.#pump(this.#reading);
-		});
+		// The peer transfers a distinct immutable buffer per decoded frame.
+		// Capture from the append itself: a gap is not a reliable start marker.
+		const received = performance.now(); r.lastFrameAt = received;
+		r.frames.push({pcm, received});
+		if (voiced) {
+			if (this.#awaitingAudio) { this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline() }
+			if (++r.audibleFrames === 1) this.trace?.step('rtp.first_voiced');
+			r.lastVoicedAt = received; r.quietFrames = 0;
+		} else if (r.audibleFrames) ++r.quietFrames;
+		this.#pump(r);
 	}
 	sendSpeakable(text: string, mark?: string) {
 		return this.#speak(text, mark, true);
@@ -192,18 +186,19 @@ export class VoiceSession {
 		this.#clearAudioDeadline();
 		if (this.#reading) this.#interrupt();
 		const revision = this.#revision;
-		let r: Reading | undefined;
-		if (mark !== undefined) {
-			if (!bounded(mark, 128) || this.#onset || this.#ambiguous) throw new Error('Cannot bind voice readback');
-			const now = performance.now();
-			r = this.#reading = { mark, phase: 'sending', expires: now + READBACK_LIFETIME,
-				frames: [], cursor: 0, nextFrameAt: 0, lastVoicedAt: -Infinity, audibleFrames: 0, quietFrames: 0, lastFrameAt: -Infinity };
-			this.#expiry = setTimeout(() => { if (r === this.#reading) this.#interrupt() }, READBACK_LIFETIME); this.#expiry.unref();
-		}
+		if (mark !== undefined && (!bounded(mark, 128) || this.#onset || this.#ambiguous)) throw new Error('Cannot bind voice readback');
+		const now = performance.now();
+		const r:Reading = this.#reading = { target:mark === undefined ? {text} : {mark}, phase:'sending', expires:now + READBACK_LIFETIME,
+			frames:[], cursor:0, nextFrameAt:0, lastVoicedAt:-Infinity, audibleFrames:0, quietFrames:0, lastFrameAt:-Infinity };
+		this.#expiry = setTimeout(() => {
+			if (r !== this.#reading) return;
+			this.#interrupt();
+			if ('text' in r.target) this.fail(new UngroundedSpeechError());
+		}, READBACK_LIFETIME); this.#expiry.unref();
 		this.#cutOutput = false; this.#sending = true;
 		// A successful context append is not audio. Retry only unmarked speech;
 		// never replay or authorize a decision readback from this timer.
-		if (!r) {
+		if (mark === undefined) {
 			this.#awaitingAudio = setTimeout(() => {
 				this.#awaitingAudio = undefined;
 				if (!retry || this.#sending) { this.trace?.step('speakable.no_audio'); this.fail(new NoVoiceAudioError()); return }
@@ -218,7 +213,7 @@ export class VoiceSession {
 				await this.send(buildSessionContextAppend(chunk, 'speakable'));
 			}
 			if (!this.#live || revision !== this.#revision) return;
-			if (r) r.phase = 'awaiting'; this.trace?.step(r ? 'readback.sent' : 'speakable.sent');
+			r.phase = 'awaiting'; this.trace?.step(mark === undefined ? 'speakable.sent' : 'readback.sent');
 		} catch (error) { if (r && this.#reading === r) this.#interrupt(); throw error }
 		finally { this.#sending = false }
 	}
@@ -258,14 +253,21 @@ export class VoiceSession {
 				if (r.phase !== 'awaiting' || this.#onset || this.#ambiguous) { this.#interrupt(); return }
 				r.phase = 'verifying';
 				let valid = false;
-				try { valid = await this.cb.onReadback(r.mark, transcript) } catch { /* No decision-owner approval. */ }
+				try {
+					if ('mark' in r.target) valid = await this.cb.onReadback(r.target.mark, transcript);
+					else valid = await this.cb.onSpeech(r.target.text, transcript);
+				} catch { /* No decision-owner approval. */ }
 				if (!this.#live || this.#reading !== r) return;
-				if (valid !== true) { this.trace?.step('readback.rejected'); this.#interrupt(); return }
+				if (!valid) {
+					this.trace?.step('readback.rejected'); this.#interrupt();
+					if ('text' in r.target) this.fail(new UngroundedSpeechError());
+					return;
+				}
 				r.phase = 'verified'; this.trace?.step('readback.verified');
 				if (this.trace) {
 					this.trace.step(!r.audibleFrames ? 'rtp.voice.none' : r.audibleFrames < 5 ? 'rtp.voice.partial' : 'rtp.voice.enough');
 					this.trace.step(!r.quietFrames ? 'rtp.quiet.none' : r.quietFrames < QUIET_FRAMES ? 'rtp.quiet.partial' : 'rtp.quiet.enough');
-					this.trace.step(this.#queued ? 'rtp.writes.pending' : 'rtp.writes.drained');
+					this.trace.step(this.#writing ? 'rtp.writes.pending' : 'rtp.writes.drained');
 					this.trace.step(performance.now() - r.lastFrameAt >= INACTIVE_MS ? 'rtp.receive.idle' : 'rtp.receive.recent');
 				}
 				this.#pump(r); return;

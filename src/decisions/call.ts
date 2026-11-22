@@ -9,6 +9,7 @@ export interface DecisionCall {
 	readonly signal: AbortSignal;
 	brief():Promise<string>;
 	consult(question:string):Promise<string>;
+	verifySpeech(expected:string,actual:string):Promise<boolean>;
 	speechStarted(utteranceId:string):void;
 	speechFinished(utteranceId:string, transcript:string):Promise<DecisionReply>;
 	interrupt():void;
@@ -62,6 +63,12 @@ export function createCall(opt:CallOptions):DecisionCall {
 		if(!currentBrief || life.signal.aborted || submitting) throw Error("call-unavailable");
 		invalidate();
 		if(typeof question!=="string" || !question.trim() || Buffer.byteLength(question)>2048) throw Error("consult-unavailable");
+		const [field]=opt.form.native.fields;
+		if(opt.form.native.fields.length===1 && field.kind==="choice" &&
+			/^what (?:are (?:the|my) (?:options|choices)|can I (?:choose|pick))[?!.]?$/i.test(question.trim())) {
+			const menu=`The options are: ${field.rows.join("; ")}.`;
+			if(menu.length<=8192) return menu;
+		}
 		const token=work=new AbortController();
 		try {
 			const answer=await side(opt.ctx,opt.form,"consult",{question,history:opt.history},token.signal);
@@ -80,6 +87,15 @@ export function createCall(opt:CallOptions):DecisionCall {
 			return brief + " Tell me what you would like, or ask a question. I'll read the proposed answer back before you decide whether to submit it.";
 		},
 		consult,
+		async verifySpeech(expected,actual) {
+			if(life.signal.aborted || submitting || work) return false;
+			const token=work=new AbortController();
+			try {
+				const verdict=await side(opt.ctx,opt.form,"speech",{expected,actual},token.signal);
+				return !token.signal.aborted && !life.signal.aborted && isDeepStrictEqual(JSON.parse(verdict),{faithful:true});
+			} catch {return false}
+			finally {if(work===token) work=undefined}
+		},
 		interrupt:invalidate,
 		speechStarted(id) {
 			if(life.signal.aborted || submitting) return;

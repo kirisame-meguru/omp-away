@@ -15,6 +15,7 @@ function harness(verify = async (_m: string, text: string) => text === summary, 
 	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [], verified: string[][] = [];
 	const marked = Promise.withResolvers<void>();
 	const session = new VoiceSession({ onTranscript: (...args) => { transcripts.push(args); if (args[0] === 'user' && args[2]) return 'deciding' },
+		onSpeech:(expected,actual)=>expected===actual,
 		onReadback: async (m, text) => { verified.push([m, text]); return verify(m, text) }, onSpeechStarted: id => { starts.push(id); events.push('speech') },
 		onAudio: frame => { audio.push(frame); return write?.() }, onMark: mark => { marks.push(mark); events.push('mark'); marked.resolve() },
 		onInterrupt: () => { events.push('interrupt') } }, async m => { sent.push(m) }, e => { failures.push(e) });
@@ -29,7 +30,7 @@ async function readback({session:s,marked}: ReturnType<typeof harness>) {
 test('silent output after join retries the brief once, then signals failure rather than hanging', async () => {
 	vi.useFakeTimers();
 	const sent: LiveClientMessage[] = [], failures:Error[]=[];
-	const session=new VoiceSession({onAudio(){},onMark(){},onInterrupt(){},onReadback:()=>false,onSpeechStarted(){},onTranscript(){}},
+	const session=new VoiceSession({onAudio(){},onMark(){},onInterrupt(){},onSpeech:()=>false,onReadback:()=>false,onSpeechStarted(){},onTranscript(){}},
 		async message=>{sent.push(message)},error=>{failures.push(error)});
 	try {
 		await session.sendSpeakable('Which lane should we use?');
@@ -50,6 +51,24 @@ test.each(['audible','caller','closed'] as const)('no silent-opening retry after
 		vi.advanceTimersByTime(30_000);
 		expect(h.sent).toHaveLength(1); expect(h.failures).toEqual([]);
 	} finally {h.session.stop();vi.useRealTimers()}
+});
+test('an invented add-in or a switch to tea is not played as a list of options',async()=>{
+	const h=harness(); try {
+		await h.session.sendSpeakable('The options are tea and coffee.');
+		frames(h.session,speech,10);
+		await h.session.event(final('assistant','Coffee sounds good. Want anything in it?'));
+		frames(h.session,speech,10);
+		await h.session.event(final('assistant','We can go with tea instead.'));
+		expect(h.audio).toHaveLength(0); expect(h.marks).toEqual([]);
+	} finally {h.session.stop()}
+});
+test('faithful option audio is replayed only after verification and never arms confirmation',async()=>{
+	const h=harness(), menu='The options are tea and coffee.';
+	try {
+		await h.session.sendSpeakable(menu); frames(h.session,speech,10);
+		expect(h.audio).toHaveLength(0); await h.session.event(final('assistant',menu));
+		expect(h.audio[0]).toBe(speech); expect(h.marks).toEqual([]); expect(h.session.played('anything')).toBe(false);
+	} finally {h.session.stop()}
 });
 test('natural paraphrase, actual audio drain, handset ACK, then a fresh yes', async () => {
 	const h=harness(); await readback(h);
@@ -111,9 +130,9 @@ test('contiguous prior speech does not clip the start of the independently verif
 	const append=h.session.sendSpeakable('Confirm green.', 'm');
 	h.session.rtp(first); await append; frames(h.session,speech,8);
 	const pending=h.session.event(final('assistant',summary)); h.session.rtp(last);
-	expect(h.audio).toEqual([before]); verify.resolve(true); await pending;
+	expect(h.audio).toEqual([]); verify.resolve(true); await pending;
 	frames(h.session,silence,30); await h.marked;
-	expect(h.audio).toEqual([before,first,...Array(8).fill(speech),last,...Array(30).fill(silence)]);
+	expect(h.audio).toEqual([first,...Array(8).fill(speech),last,...Array(30).fill(silence)]);
 });
 test('rejecting a readback discards its entire unplayed buffer', async () => {
 	const h=harness(); await h.session.sendSpeakable('Confirm green.','m');
@@ -172,9 +191,11 @@ test('untrusted delegation never triggers work or injects its content into a rep
 	expect(h.sent[0]).toMatchObject({type:'delegation.context.append',delegation_item_id:'d',channel:'commentary'});
 	expect(JSON.stringify(h.sent)).not.toContain('PRIVATE'); expect(h.events).toEqual([]);
 });
-test('stalled output bounds pending writes and never replays queued frames', async () => {
-	const gate=Promise.withResolvers<void>(), h=harness(undefined,()=>gate.promise); frames(h.session,speech,80); gate.resolve();
-	await gate.promise; expect(h.failures).toHaveLength(1); expect(h.audio).toHaveLength(1);
+test('a stalled verified audio write cannot release more audio after disconnect', async () => {
+	const gate=Promise.withResolvers<void>(), h=harness(undefined,()=>gate.promise);
+	await h.session.sendSpeakable(summary); frames(h.session,speech,80);
+	await h.session.event(final('assistant',summary)); expect(h.audio).toHaveLength(1);
+	h.session.stop(); gate.resolve(); await gate.promise; expect(h.audio).toHaveLength(1); expect(h.marks).toEqual([]);
 });
 test('packaged transport honors cancellation before authentication or native peer setup', async () => {
 	const reason=new Error('cancelled'); const transport=new LiveTransport({get authStorage():never{throw Error('Read credentials')},sessionId:'cancelled',voice:'sol',instructions:'Test.',sdpOffer:'v=0\r\n',signal:AbortSignal.abort(reason),callbacks:{onEvent(){},onOutputLevel(){}}});

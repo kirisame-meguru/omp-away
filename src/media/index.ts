@@ -33,7 +33,7 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 	let cleanup: Promise<void> | undefined;
 	const abort = () => { void close() };
 	let timer = setTimeout(() => { void close(new Error('Desktop voice setup timed out')) }, 60_000);
-	const session = new VoiceSession({ onTranscript, onAudio, onMark, onReadback, onInterrupt, onSpeechStarted }, message => {
+	const session = new VoiceSession({ onTranscript, onAudio, onMark, onReadback, onSpeech:options.onSpeech, onInterrupt, onSpeechStarted }, message => {
 		if (!transport || controller.signal.aborted) return Promise.reject(new Error('Voice is closed'));
 		return transport.send(message);
 	}, reason => { void close(reason) }, trace);

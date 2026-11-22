@@ -194,6 +194,16 @@ test("verified playback before a conditional reply, question or correction never
 	}
 });
 
+test("speech approval is exact, cancellable, and cannot confirm a choice",async()=>{
+	const f=fixture(); try {
+		f.offer("A"); const c=f.core.join("A")!; const brief=await c.brief();
+		f.setReply(()=>'{"faithful":"true"}'); expect(await c.verifySpeech(brief,brief)).toBe(false);
+		f.setReply(()=>'{"faithful":true}'); expect(await c.verifySpeech(brief,brief)).toBe(true);
+		const slow=Promise.withResolvers<string>(); f.setReply(()=>slow.promise);
+		const pending=c.verifySpeech(brief,"Earlier turn"); c.speechStarted("interrupt"); slow.resolve('{"faithful":true}');
+		expect(await pending).toBe(false); await c.speechFinished("interrupt","Yes."); expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
 test("a natural clarification routes only its real user transcript to a tool-free consultation",async()=>{
 	const f=fixture(); f.offer("A"); const c=f.core.join("A")!; await c.brief();
 	const question="Há alguma vantagem para o projeto?";

@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type DecisionCall, type Preferences, type SideContext } from "../decisions";
 import { openVoice, type VoiceCall, type VoiceOptions } from "../media";
-import { NoVoiceAudioError } from "../media/session";
+import { NoVoiceAudioError, UngroundedSpeechError } from "../media/session";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
 
 export type AskContext = SideContext & VoiceOptions["ctx"] & { cwd:string };
@@ -112,6 +112,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				onAudio(pcm) {
 					if (current(call) && call.streaming) return gateway!.sendPcm(device,pcm).catch(()=>fail(call));
 				},
+				onSpeech:(expected,actual)=>current(call) && call.streaming && decision.verifySpeech(expected,actual),
 				async onReadback(mark,text) {
 					const readback=call.readback;
 					if (!current(call) || !call.streaming || !readback || readback.mark!==mark || readback.phase!=="summarizing") return false;
@@ -130,6 +131,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				},
 				onEnd:reason=>{
 					if (current(call) && reason instanceof NoVoiceAudioError) report("No speech audio arrived from the voice service");
+					if (current(call) && reason instanceof UngroundedSpeechError) report("The voice reply did not match the desktop form");
 					fail(call);
 				},
 			});

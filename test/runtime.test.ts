@@ -156,6 +156,16 @@ async function realVoiceFixture(){
 	f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
 	return {...f,session,sent,failures};
 }
+test("asking for the options lists the enabled native labels without favoring one or proposing a change",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
+		const v=f.voices[0]; v.onSpeechStarted("proposal"); v.onTranscript("user","Blue.","proposal"); await tick();
+		v.onSpeechStarted("q"); v.onTranscript("user","What are the options?","q"); await tick();
+		expect(f.spoken.at(-1)).toEqual({text:"The options are: Blue; Red.",mark:undefined});
+		v.onSpeechStarted("yes"); v.onTranscript("user","Yes.","yes"); await tick();
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
 test("real voice and decision state machines require a new utterance after a handset playout acknowledgment",async()=>{
 	const f=await realVoiceFixture(), speech=new Uint8Array(960).fill(8);
 	try {
