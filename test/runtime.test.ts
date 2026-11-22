@@ -73,8 +73,9 @@ test("disconnect, hangup and desktop win fence old media and marks; reconnect re
 test("a greeting after joining repeats the pending question without proposing or submitting",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
+		expect(f.spoken).toEqual([{text:"Private lane?",mark:undefined}]);
 		const v=f.voices[0]; v.onSpeechStarted("g"); v.onTranscript("user","Hello, hello.","g"); await tick();
-		expect(f.spoken.slice(1)).toEqual([{text:expect.stringContaining("Which lane should we use?"),mark:undefined}]);
+		expect(f.spoken.slice(1)).toEqual([{text:"Private lane?",mark:undefined}]);
 		v.onSpeechStarted("y"); v.onTranscript("user","Yes.","y"); await tick();
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
@@ -206,7 +207,9 @@ test("real VoiceSession preserves the local mic onset across an invalid delegati
 		await tick();
 		expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
 		expect(f.consultations[0].promptText).toContain(question);
-		expect(sent.slice(initial).filter(m=>"channel" in m && m.channel==="speakable")).toEqual([{type:"session.context.append",channel:"speakable",content:[{type:"input_text",text:"The private handover is silver maple."}]}]);
+		const spoken=sent.slice(initial).filter(m=>m.type==="session.context.append" && m.channel==="speakable");
+		expect(spoken).toHaveLength(1);
+		expect(spoken[0]).toMatchObject({content:[{type:"input_text",text:expect.stringContaining(JSON.stringify("The private handover is silver maple."))}]});
 		expect(failures).toEqual([]); expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });

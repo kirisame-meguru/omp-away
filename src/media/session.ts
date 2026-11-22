@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
 import { buildDelegationContextAppend, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import type { VoiceTrace } from './trace';
+const narrate = readFileSync(new URL('../../prompts/narrate.md', import.meta.url), 'utf8');
 
 export interface VoiceCallbacks {
 	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void | 'consulting' | 'deciding';
@@ -12,7 +14,7 @@ export interface VoiceCallbacks {
 	onMark(mark: string): void;
 }
 interface Reading {
-	target: {mark:string} | {text:string};
+	target: {mark:string} | {text:string; retry:boolean};
 	phase: 'sending' | 'awaiting' | 'verifying' | 'verified' | 'marked' | 'played' | 'confirming';
 	expires: number;
 	frames: { pcm: Uint8Array; received: number }[];
@@ -201,7 +203,7 @@ export class VoiceSession {
 		const revision = this.#revision;
 		if (mark !== undefined && (!bounded(mark, 128) || this.#onset || this.#ambiguous)) throw new Error('Cannot bind voice readback');
 		const now = performance.now();
-		const r:Reading = this.#reading = { target:mark === undefined ? {text} : {mark}, phase:'sending', expires:now + READBACK_LIFETIME,
+		const r:Reading = this.#reading = { target:mark === undefined ? {text,retry} : {mark}, phase:'sending', expires:now + READBACK_LIFETIME,
 			frames:[], cursor:0, nextFrameAt:0, lastVoicedAt:-Infinity, audibleFrames:0, quietFrames:0, lastFrameAt:-Infinity };
 		this.#expiry = setTimeout(() => {
 			if (r !== this.#reading) return;
@@ -221,7 +223,8 @@ export class VoiceSession {
 			this.#awaitingAudio.unref();
 		}
 		try {
-			for (const chunk of chunkLiveContext(text)) {
+			const message = mark === undefined ? narrate + JSON.stringify(text) : text;
+			for (const chunk of chunkLiveContext(message)) {
 				if (!this.#live || revision !== this.#revision) return;
 				await this.send(buildSessionContextAppend(chunk, 'speakable'));
 			}
@@ -273,7 +276,12 @@ export class VoiceSession {
 				if (!this.#live || this.#reading !== r) return;
 				if (!valid) {
 					this.trace?.step('readback.rejected'); this.#interrupt();
-					if ('text' in r.target) this.fail(new UngroundedSpeechError());
+					if ('text' in r.target) {
+						// A speculative reply to the microphone can finish before the
+						// narration we requested. Drop it entirely, then ask once more.
+						if (r.target.retry) await this.#speak(r.target.text, undefined, false);
+						else this.fail(new UngroundedSpeechError());
+					}
 					return;
 				}
 				r.phase = 'verified'; this.trace?.step('readback.verified');

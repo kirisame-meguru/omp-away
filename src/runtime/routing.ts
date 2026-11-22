@@ -141,7 +141,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			await gateway.sendControl(device,{type:"joined",requestId:id});
 			if (!current(call)) return;
 			call.streaming=true;
-			await voice.sendSpeakable(brief);
+			await voice.sendSpeakable(decision.opening());
 		} catch {fail(call)}
 	}
 	gateway=await transports.gateway({...settings,onError:report,

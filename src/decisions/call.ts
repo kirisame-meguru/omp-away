@@ -8,6 +8,7 @@ export type DecisionReply = {kind:"say"; text:string; mark?:string; draft?:Spoke
 export interface DecisionCall {
 	readonly signal: AbortSignal;
 	brief():Promise<string>;
+	opening():string;
 	consult(question:string):Promise<string>;
 	verifySpeech(expected:string,actual:string):Promise<boolean>;
 	speechStarted(utteranceId:string):void;
@@ -83,9 +84,14 @@ export function createCall(opt:CallOptions):DecisionCall {
 			if(life.signal.aborted) throw Error("call-ended");
 			const brief=await untilAbort(opt.brief,life.signal);
 			if(life.signal.aborted) throw Error("call-ended");
-			currentBrief=brief;
-			return brief + " Tell me what you would like, or ask a question. I'll read the proposed answer back before you decide whether to submit it.";
+			const [first]=opt.form.native.fields;
+			const title=first && opt.form.questions.get(first.field.name);
+			// The session rationale belongs in voice context. Lead with the native
+			// question instead of making the caller wait through a monologue.
+			currentBrief=opt.form.native.fields.length===1 && title ? title : brief;
+			return brief;
 		},
+		opening:()=>currentBrief,
 		consult,
 		async verifySpeech(expected,actual) {
 			if(life.signal.aborted || submitting || work) return false;

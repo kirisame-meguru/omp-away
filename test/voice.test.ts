@@ -68,12 +68,16 @@ test('an invented add-in or a switch to tea is not played as a list of options',
 		frames(h.session,speech,10);
 		await h.session.event(final('assistant','We can go with tea instead.'));
 		expect(h.audio).toHaveLength(0); expect(h.marks).toEqual([]);
+		expect(h.sent).toHaveLength(2); expect(h.failures).toHaveLength(1);
 	} finally {h.session.stop()}
 });
 test('faithful option audio is replayed only after verification and never arms confirmation',async()=>{
 	const h=harness(), menu='The options are tea and coffee.';
 	try {
-		await h.session.sendSpeakable(menu); frames(h.session,speech,10);
+		await h.session.sendSpeakable(menu); frames(h.session,new Uint8Array(960).fill(3),10);
+		await h.session.event(final('assistant','I would choose coffee.'));
+		expect(h.audio).toHaveLength(0); expect(h.failures).toEqual([]);
+		frames(h.session,speech,10);
 		expect(h.audio).toHaveLength(0); await h.session.event(final('assistant',menu));
 		expect(h.audio[0]).toBe(speech); expect(h.marks).toEqual([]); expect(h.session.played('anything')).toBe(false);
 	} finally {h.session.stop()}
