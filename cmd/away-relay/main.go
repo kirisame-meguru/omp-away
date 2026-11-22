@@ -49,8 +49,11 @@ func desktopCredential() (string, error) {
 		return "", errors.New(message)
 	}
 	defer f.Close()
-	info, err = f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 45 {
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Size() > 45 {
+		return "", errors.New(message)
+	}
+	if opened.Mode().Perm()&0077 != 0 && !managedCredential(name, opened) {
 		return "", errors.New(message)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 46))
