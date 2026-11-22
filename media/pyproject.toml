@@ -1,0 +1,13 @@
+# From plugin/: `uv lock --project media`, then `uv run --locked --project media pytest media/tests`.
+# Production provisioning: `uv sync --locked --no-dev --project media`; calls do not run uv or install anything.
+[project]
+name = "omp-away-media"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = ["aiortc==1.14.0", "av==16.0.1"]
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
