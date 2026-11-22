@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 export class Enrollment {
 	#pending?: {code:string; finish(accept:boolean):void};
 	constructor(private readonly show:(text:string|undefined)=>void) {}
+	get comparisonCode(): string | undefined { return this.#pending?.code }
 	compare(emoji:string):Promise<boolean> {
 		if (this.#pending) return Promise.resolve(false);
 		const {promise,resolve}=Promise.withResolvers<boolean>();

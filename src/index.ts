@@ -3,6 +3,7 @@ import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { type Adapter, startAdapter } from "./collab/adapter";
 import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
+import { awayHelp, awaySuggestions } from "./runtime/commands";
 
 type Values = Record<string, string | number | boolean | string[]>;
 type Delivery = "accepted" | "stale";
@@ -174,9 +175,12 @@ export default function away(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("away", {
-		description: "Toggle immediate mobile invites, configure fallback, or pair a phone",
+		description: "Pair a phone (/away pair) and control mobile Ask invitations",
+		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode),
 		handler: async (args, ctx) => {
-			if (!owns(ctx) || ctx.mode !== "tui") return;
+			if (ctx.agent.kind !== "main" || ctx.mode !== "tui") return;
+			if (args.trim()==="help") { ctx.ui.notify(awayHelp,"info"); return; }
+			if (!owns(ctx)) return;
 			if (!admin) { ctx.ui.notify("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide.", "error"); return; }
 			await admin.command(args);
 		},

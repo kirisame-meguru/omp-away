@@ -13,3 +13,4 @@ node_modules/
 *.pfx
 /.away-fixture/
 /away-ask-*/
+/.codegraph/

@@ -12,6 +12,7 @@ import { VoiceSession } from "../src/media/session";
 import type { openVoice, VoiceOptions } from "../src/media";
 import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
+import { awaySuggestions } from "../src/runtime/commands";
 
 const pcm = new Uint8Array(960);
 const blueFields='{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}';
@@ -234,7 +235,9 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 			idle=false;await admin!.command("pair");expect(pairs).toBe(0);expect(await confirm("phone","🐶".repeat(12))).toBe(false);
 			idle=true;await admin!.command("pair");expect(copied).toEqual(['{"secret":"test-only-enrollment"}']);
 			const comparison=confirm("phone","🐶".repeat(12));expect(widgets.at(-1)?.join(" ")).toContain("/away approve");
+			expect(awaySuggestions("app",admin!.comparisonCode)?.map(item=>item.value)).toEqual([widgets.at(-1)![1].match(/\/away (approve [0-9a-f]+)/)![1]]);
 			admin!.cancelEnrollment();expect(await comparison).toBe(false);expect(widgets.at(-1)).toBeUndefined();
+			expect(awaySuggestions("app",admin!.comparisonCode)).toBeNull();
 			expect(JSON.stringify([notices,widgets])).not.toContain("test-only-enrollment");
 		} finally {await admin?.close()}
 	} finally {await rm(dir,{recursive:true,force:true})}
