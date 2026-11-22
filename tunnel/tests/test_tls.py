@@ -2,7 +2,9 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+from aiohttp import WSMsgType
 from OpenSSL import SSL, crypto
 from cryptography.hazmat.primitives import serialization
 from omp_away_tunnel.identity import IdentityStore
@@ -15,8 +17,8 @@ class Pipe:
         self.capture = bytearray()
         self.tamper = False
 
-    async def receive_bytes(self):
-        return await self.inbox.get()
+    async def receive(self):
+        return SimpleNamespace(type=WSMsgType.BINARY, data=await self.inbox.get())
 
     async def send_bytes(self, data):
         self.capture.extend(data)
@@ -76,6 +78,18 @@ class TunnelTest(unittest.IsolatedAsyncioTestCase):
             server, client, _, _ = self.endpoints(self.phone, wrong_desktop, send_cert)
             with self.assertRaises(SSL.Error):
                 await self.handshake(server, client, self.phone.pin)
+
+    async def test_clean_tls_close_is_eof_but_truncated_frames_are_protocol_errors(self):
+        for data, error in [(b'', EOFError), (b'\x01\x00', ProtocolError), (b'\x01\x00\x00\x00\x03x', ProtocolError)]:
+            with self.subTest(data=data):
+                server, client, _, _ = self.endpoints(self.phone)
+                await self.handshake(server, client, self.phone.pin)
+                if data:
+                    client.conn.send(data)
+                client.conn.shutdown()
+                await client._flush()
+                with self.assertRaises(error):
+                    await asyncio.wait_for(server.read_frame(), 2)
 
     def test_pairing_pin_survives_restart_and_cannot_be_rebound(self):
         self.desktop.register('phone-1', self.phone.pin)

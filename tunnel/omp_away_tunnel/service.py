@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
 import aiohttp
+from OpenSSL import SSL
 from .identity import IdentityStore, ROUTE, digest_bytes
 from .ipc import Stdio
 from .transport import ProtocolError, SecureStream, object_json, server_context
@@ -215,9 +216,16 @@ class Service:
                         message = object_json(data)
                         phone.incoming(message)
                         await self.ipc.event(event='message', deviceId=device, ref=phone.ref, message=message)
+        except EOFError:
+            pass  # A normal phone/background close still emits 'lost' below.
+        except (ValueError, SSL.Error):
+            # Malformed framing/JSON/UTF-8 and TLS failures are not routine closes.
+            await self.ipc.event(event='error', code='phone_protocol_error')
+        except (ConnectionError, TimeoutError, aiohttp.ClientError):
+            await self.ipc.event(event='error', code='phone_disconnected')
         except Exception:
             # Never forward raw exception strings, TLS buffers, tokens or application data.
-            await self.ipc.event(event='error', code='phone_disconnected')
+            await self.ipc.event(event='error', code='phone_connection_failed')
         finally:
             removed = self.phones.pop(device, None)
             if removed is not None:

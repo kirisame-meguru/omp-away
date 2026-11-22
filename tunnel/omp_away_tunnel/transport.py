@@ -3,6 +3,7 @@ import hmac
 import json
 import struct
 
+from aiohttp import WSMsgType
 from OpenSSL import SSL
 from .identity import pin_of
 
@@ -78,7 +79,14 @@ class SecureStream:
 
     async def _receive(self):
         await self._flush()
-        block = await self.ws.receive_bytes()
+        message = await self.ws.receive()
+        if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING):
+            raise EOFError
+        if message.type == WSMsgType.ERROR:
+            raise ConnectionError('tunnel receive failed')
+        if message.type != WSMsgType.BINARY:
+            raise ProtocolError('expected binary TLS fragment')
+        block = message.data
         if not block or len(block) > 131072:
             raise ProtocolError('invalid TLS fragment')
         self.conn.bio_write(block)
@@ -104,18 +112,23 @@ class SecureStream:
 
     async def _read_exact(self, size):
         parts = bytearray()
-        while len(parts) < size:
-            try:
-                part = self.conn.recv(size - len(parts))
-            except SSL.WantReadError:
-                await self._receive()
-                continue
-            except SSL.WantWriteError:
-                await self._flush()
-                continue
-            if not part:
-                raise EOFError
-            parts.extend(part)
+        try:
+            while len(parts) < size:
+                try:
+                    part = self.conn.recv(size - len(parts))
+                except SSL.WantReadError:
+                    await self._receive()
+                    continue
+                except SSL.WantWriteError:
+                    await self._flush()
+                    continue
+                if not part:
+                    raise EOFError
+                parts.extend(part)
+        except (EOFError, SSL.ZeroReturnError):
+            if parts:
+                raise ProtocolError('truncated inner frame') from None
+            raise EOFError from None
         return bytes(parts)
 
     async def read_frame(self):
@@ -123,7 +136,10 @@ class SecureStream:
             raise ProtocolError('handshake required')
         kind, size = HEADER.unpack(await self._read_exact(HEADER.size))
         check_frame(kind, size)
-        return kind, await self._read_exact(size)
+        try:
+            return kind, await self._read_exact(size)
+        except EOFError:
+            raise ProtocolError('truncated inner frame') from None
 
     async def send_frame(self, kind, data):
         if not self.ready:

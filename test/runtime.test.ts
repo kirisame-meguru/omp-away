@@ -265,6 +265,38 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 	} finally {await rm(dir,{recursive:true,force:true})}
 });
 
+test("recoverable mobile conditions and command guidance warn, while protocol failures remain errors",async()=>{
+	const dir=await mkdtemp(join(tmpdir(),"away-notices-")), tokenFile=join(dir,"token");
+	const notices:{text:string;type:string}[]=[];
+	const ctx={ui:{notify:(text:string,type:string)=>notices.push({text,type}),setWidget(){}}} as unknown as ExtensionContext;
+	let report!:(code:string)=>void, idle=false;
+	try {
+		await writeFile(tokenFile,Buffer.alloc(32,7).toString("base64url"),{mode:0o600});
+		const admin=await openAdmin(ctx,()=>true,()=>idle,{
+			env:{OMP_AWAY_URL:"https://example.invalid",OMP_AWAY_STATE_DIR:dir,OMP_AWAY_TOKEN_FILE:tokenFile},
+			copy:async()=>{},
+			async connect(_options,_preferences,onReport) {
+				report=onReport;
+				return {offer(){},end(){},configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
+			},
+		});
+		try {
+			notices.length=0;
+			for (const code of ["phone_disconnected","relay_disconnected","unsupported-form","invite-unavailable","phone-control-unavailable"]) report(code);
+			expect(notices.map(n=>n.type)).toEqual(["warning","warning","warning","warning","warning"]);
+			report("phone_protocol_error"); report("secure_helper_protocol_error"); report("unexpected-failure");
+			expect(notices.slice(-3).map(n=>n.type)).toEqual(["error","error","error"]);
+			await admin!.command("pair");
+			expect(notices.at(-1)?.type).toBe("warning");
+			idle=true;
+			await admin!.command("approve 0123456789ab");
+			expect(notices.at(-1)?.type).toBe("warning");
+			await admin!.command("fallback invalid");
+			expect(notices.at(-1)?.type).toBe("warning");
+		} finally {await admin?.close()}
+	} finally {await rm(dir,{recursive:true,force:true})}
+});
+
 test("unset gateway keeps fixture local; partial, relative or missing credentials cannot start a transport",async()=>{
 	const dir=await mkdtemp(join(tmpdir(),"away-config-"));
 	let network=0;

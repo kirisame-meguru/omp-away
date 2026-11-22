@@ -8,6 +8,14 @@ import { loadPreferences, savePreferences, type Preferences } from "../decisions
 import { Enrollment } from "./enrollment";
 import { connectRuntime, type MobileRuntime } from "./routing";
 
+const runtimeWarnings: Readonly<Record<string,string>> = {
+	phone_disconnected: "Phone connection was interrupted",
+	relay_disconnected: "Relay disconnected; reconnecting",
+	"phone-control-unavailable": "Could not update the phone",
+	"unsupported-form": "This form is not supported by Away voice",
+	"invite-unavailable": "Could not send the phone invitation",
+};
+
 export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"close"> {
 	readonly comparisonCode?: string;
 	command(args:string):Promise<void>;
@@ -50,7 +58,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	if (!isCurrent()) return;
 	let live=true, prefs=initial, writes=Promise.resolve(), nextPair=0, expires=0, pairing=false;
 	const current=()=>live && isCurrent();
-	const notify=(text:string,type:"info"|"error"="info")=>{if (current()) ctx.ui.notify(text,type)};
+	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(text,type)};
 	const enrollment=new Enrollment(text=>ctx.ui.setWidget("omp-away-pairing",text?.split("\n")));
 	function cancelEnrollment() {++nextPair; expires=0; enrollment.cancel()}
 	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,
@@ -60,7 +68,10 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			const accepted=await enrollment.compare(emoji);
 			return accepted && current() && idle();
 		},
-	},prefs,code=>notify(`Away: ${code}. The desktop form stays available.`,"error"));
+	},prefs,code=>{
+		const warning=Object.hasOwn(runtimeWarnings,code) ? runtimeWarnings[code] : undefined;
+		notify(`Away: ${warning ?? code}. The desktop form stays available.`,warning===undefined?"error":"warning");
+	});
 	if (!current()) {await runtime.close();return}
 	notify("Away: secure mobile gateway ready");
 	return {
@@ -70,11 +81,11 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			if (!current()) return;
 			const args=raw.trim(), decision=/^(approve|deny) ([a-f0-9]{12})$/.exec(args);
 			if (decision) {
-				if (!idle() || !enrollment.decide(decision[1]==="approve",decision[2])) notify("No matching idle local comparison.","error");
+				if (!idle() || !enrollment.decide(decision[1]==="approve",decision[2])) notify("No matching idle local comparison.","warning");
 				return;
 			}
 			if (args==="pair") {
-				if (!idle() || pairing) {notify("Pair only from the idle desktop composer.","error");return}
+				if (!idle() || pairing) {notify("Pair only from the idle desktop composer.","warning");return}
 				cancelEnrollment();const epoch=nextPair;pairing=true;
 				try {
 					const payload=await runtime.pair();
@@ -90,7 +101,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			if (args==="status") {notify(`Away immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`);return}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
 			if (args!=="" && args!=="on" && args!=="off" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
-				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair]", "error");return;
+				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair]", "warning");return;
 			}
 			// Serialize read-modify-write, including concurrent toggles and session shutdown.
 			writes=writes.then(async()=>{

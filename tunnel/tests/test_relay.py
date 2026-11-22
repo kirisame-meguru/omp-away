@@ -130,6 +130,17 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
             await self.service.connect('/redirect')
         self.assertFalse(self.redirected)
 
+    async def test_invalid_tunnel_frame_remains_a_protocol_error_not_a_routine_disconnect(self):
+        phone = IdentityStore(self.root / 'phone')
+        self.service.identity.register('phone_1', phone.pin)
+        control = await self.control_ready.get()
+        await control.send_json({'type':'connect','deviceId':'phone_1','connectionId':'connection_1'})
+        ws = await asyncio.wait_for(self.desktop_ready.get(), 4)
+        await ws.send_str('not a binary TLS frame')
+        await ws.close()
+        self.assertEqual(await self.host.expect('error'), {'event':'error', 'code':'phone_protocol_error'})
+        self.assertFalse(self.service.phones)
+
     async def test_private_inbox_only_after_proved_route_and_both_confirmations(self):
         unknown = await self.host.command('ring', deviceId='phone_1', requestId='request_1')
         self.assertFalse(unknown['ok'])
@@ -143,10 +154,11 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
             async def send_bytes(self, block):
                 capture.extend(block)
                 await ws.send_bytes(block)
-            async def receive_bytes(self):
-                block = await ws.receive_bytes(timeout=4)
-                capture.extend(block)
-                return block
+            async def receive(self):
+                message = await ws.receive(timeout=4)
+                if message.type == aiohttp.WSMsgType.BINARY:
+                    capture.extend(message.data)
+                return message
         phone_key = IdentityStore(self.root / 'phone')
         ctx = SSL.Context(SSL.TLS_CLIENT_METHOD)
         ctx.set_min_proto_version(SSL.TLS1_3_VERSION)
@@ -190,7 +202,6 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await phone.read_frame(), (2, pcm))
         self.assertNotIn(pcm[:32], capture)
         await ws.close()
-        await self.host.expect('error')
         self.assertEqual(await self.host.expect('lost'), {'event':'lost', **dest})
         for secret in (sentinel, qr['secret'], qr['nonce'], prompt['emoji']):
             self.assertNotIn(secret.encode(), capture)
