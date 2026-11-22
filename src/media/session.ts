@@ -15,7 +15,8 @@ export interface VoiceCallbacks {
 }
 interface Reading {
 	target: {mark:string} | {text:string; retry:boolean};
-	phase: 'sending' | 'awaiting' | 'verifying' | 'verified' | 'marked' | 'played' | 'confirming';
+	phase: 'sending' | 'awaiting' | 'verifying' | 'verified' | 'discarding' | 'marked' | 'played' | 'confirming';
+	candidate?: string;
 	expires: number;
 	frames: { pcm: Uint8Array; received: number }[];
 	cursor: number;
@@ -88,9 +89,35 @@ export class VoiceSession {
 		if (this.#reading) this.#cutOutput = true;
 		++this.#revision; this.#clearReadback(); this.trace?.step('interrupt'); this.cb.onInterrupt();
 	}
+	#overlap(r:Reading) {
+		if ('mark' in r.target) { this.#interrupt(); return }
+		if (r.phase==='discarding') return;
+		// Keep the requested narration, but never play overlapping unchecked audio.
+		++this.#revision; this.#clearWake(); this.#clearAudioDeadline();
+		r.frames.length=0; r.phase='discarding';
+		this.cb.onInterrupt();
+		this.#awaitingAudio=setTimeout(()=>{
+			if (this.#reading===r) {this.#interrupt();this.fail(new UngroundedSpeechError())}
+		}, FIRST_PLAYBACK_MS);
+		this.#awaitingAudio.unref();
+	}
+	async #retrySpeech(r:Reading) {
+		this.#interrupt();
+		if ('text' in r.target) {
+			if (r.target.retry) await this.#speak(r.target.text,undefined,false);
+			else this.fail(new UngroundedSpeechError());
+		}
+	}
 	#speech(provider: boolean) {
-		this.#clearAudioDeadline(); // Never repeat the old question over the caller.
 		this.trace?.step(provider ? 'onset.provider' : 'onset.local');
+		const waiting = this.#reading;
+		if (!provider && waiting && 'text' in waiting.target && waiting.playStart === undefined) {
+			// Mic energy is not recognized speech. A tap or capture startup must
+			// not discard an unheard question or cancel its playback deadline.
+			waiting.candidate ??= crypto.randomUUID();
+			return;
+		}
+		this.#clearAudioDeadline();
 		this.#cutOutput = true;
 		if (this.#ambiguous) return;
 		if (this.#onset) {
@@ -163,7 +190,7 @@ export class VoiceSession {
 		if (!this.#live) return;
 		if (pcm.length !== 960) throw new Error('Invalid voice output');
 		const r = this.#reading;
-		if (this.#cutOutput || !r) return; // No desktop-owned turn: never stream speculative audio.
+		if (this.#cutOutput || !r || r.phase==='discarding') return; // Never stream speculative audio.
 		const voiced = energy(pcm) >= 64 ** 2;
 		if (r.phase === 'marked' || r.phase === 'played' || r.phase === 'confirming') {
 			if (voiced) this.#interrupt(); return;
@@ -243,7 +270,7 @@ export class VoiceSession {
 				case 'unknown':
 					if (event.wireType === 'input_audio_buffer.speech_started') this.#speech(true);
 					else if (!mutedReply && ['turn.interrupted','response.cancelled','output_audio_buffer.cleared'].includes(event.wireType)) this.#interrupt();
-					else if (!mutedReply && event.wireType === 'output_audio_buffer.started' && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#interrupt();
+					else if (!mutedReply && event.wireType === 'output_audio_buffer.started' && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r);
 					return;
 				case 'delegation.created': {
 					const id = event.item.id;
@@ -254,9 +281,9 @@ export class VoiceSession {
 					return;
 				}
 				case 'error': throw new Error('Codex voice connection failed');
-				case 'input_transcript.added': if (!this.#onset && r) this.#interrupt(); return;
+				case 'input_transcript.added': if (!this.#onset && r && !r.candidate) this.#interrupt(); return;
 				case 'output_audio.delta': case 'output_transcript.added':
-					if (!mutedReply && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#interrupt(); return;
+					if (!mutedReply && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r); return;
 				case 'turn.done': break;
 				default: return;
 			}
@@ -266,6 +293,7 @@ export class VoiceSession {
 			if (role === 'assistant') {
 				this.cb.onTranscript(role, transcript);
 				if (!r) return;
+				if (r.phase==='discarding') {await this.#retrySpeech(r);return}
 				if (r.phase !== 'awaiting' || this.#onset || this.#ambiguous) { this.#interrupt(); return }
 				r.phase = 'verifying';
 				let valid = false;
@@ -273,15 +301,10 @@ export class VoiceSession {
 					if ('mark' in r.target) valid = await this.cb.onReadback(r.target.mark, transcript);
 					else valid = await this.cb.onSpeech(r.target.text, transcript);
 				} catch { /* No decision-owner approval. */ }
-				if (!this.#live || this.#reading !== r) return;
+				if (!this.#live || this.#reading !== r || r.phase !== 'verifying') return;
 				if (!valid) {
-					this.trace?.step('readback.rejected'); this.#interrupt();
-					if ('text' in r.target) {
-						// A speculative reply to the microphone can finish before the
-						// narration we requested. Drop it entirely, then ask once more.
-						if (r.target.retry) await this.#speak(r.target.text, undefined, false);
-						else this.fail(new UngroundedSpeechError());
-					}
+					this.trace?.step('readback.rejected');
+					await this.#retrySpeech(r);
 					return;
 				}
 				r.phase = 'verified'; this.trace?.step('readback.verified');
@@ -293,9 +316,12 @@ export class VoiceSession {
 				}
 				this.#pump(r); return;
 			}
-			const onset = this.#onset; this.#onset = undefined; this.#ambiguous = false;
+			const deferred = !this.#onset && r?.candidate;
+			const onset = this.#onset ?? (deferred ? {id:deferred,providerSeen:false} : undefined);
+			this.#onset = undefined; this.#ambiguous = false;
 			if (r?.phase === 'confirming' && onset && performance.now() < r.expires) this.#clearReadback();
 			else if (r) this.#interrupt();
+			if (deferred) { this.cb.onSpeechStarted(deferred); this.trace?.step('speech.started.callback') }
 			const claim = this.cb.onTranscript(role, transcript, onset?.id);
 			this.#cutOutput = !!onset && (claim === 'deciding' || claim === 'consulting');
 			if (this.#cutOutput) { ++this.#revision; this.trace?.step(claim === 'consulting' ? 'consult.claimed' : 'decision.claimed') }

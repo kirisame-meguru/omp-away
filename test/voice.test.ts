@@ -6,21 +6,50 @@ import { openVoiceTrace } from '../src/media/trace';
 import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
 import { VoiceSession } from '../src/media/session';
 import { LiveTransport } from '../src/media/live-sdk.generated.mjs';
+import { logger } from '@oh-my-pi/pi-utils';
 
 const speech = new Uint8Array(960).fill(8), silence = new Uint8Array(960);
 const final = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
 const summary = 'The green lane, correct?';
-function harness(verify = async (_m: string, text: string) => text === summary, write?: () => void | Promise<void>) {
+function harness(verify = async (_m: string, text: string) => text === summary, write?: () => void | Promise<void>,
+	verifySpeech:(expected:string,actual:string)=>boolean|Promise<boolean>=(expected,actual)=>expected===actual) {
 	const sent: LiveClientMessage[] = [], starts: string[] = [], transcripts: unknown[][] = [], marks: string[] = [];
 	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [], verified: string[][] = [];
 	const marked = Promise.withResolvers<void>();
 	const session = new VoiceSession({ onTranscript: (...args) => { transcripts.push(args); if (args[0] === 'user' && args[2]) return 'deciding' },
-		onSpeech:(expected,actual)=>expected===actual,
+		onSpeech:verifySpeech,
 		onReadback: async (m, text) => { verified.push([m, text]); return verify(m, text) }, onSpeechStarted: id => { starts.push(id); events.push('speech') },
 		onAudio: frame => { audio.push(frame); return write?.() }, onMark: mark => { marks.push(mark); events.push('mark'); marked.resolve() },
 		onInterrupt: () => { events.push('interrupt') } }, async m => { sent.push(m) }, e => { failures.push(e) });
 	return { session, sent, starts, transcripts, marks, marked: marked.promise, audio, events, failures, verified };
 }
+test('default voice diagnostics contain only bounded categories, not speech or provider identifiers',()=>{
+	const log=vi.spyOn(logger,'info').mockImplementation(()=>{});
+	try {
+		const trace=openVoiceTrace(undefined);
+		trace.sideband(final('user','private caller words'));
+		trace.sideband({type:'unknown',wireType:'private provider id'});
+		trace.step('rtp.replay.started'); trace.close(); trace.close();
+		expect(log).toHaveBeenCalledTimes(1);
+		expect(log.mock.calls[0][1]).toMatchObject({stages:{'final.user':1,'rtp.replay.started':1}});
+		expect(JSON.stringify(log.mock.calls)).not.toContain('private');
+	} finally {log.mockRestore()}
+});
+test('overlapping speculative speech cannot cancel the options forever or play before the replacement is checked',async()=>{
+	const verdict=Promise.withResolvers<boolean>(), h=harness(undefined,undefined,()=>verdict.promise);
+	const menu='Tea or coffee.';
+	try {
+		await h.session.sendSpeakable(menu); frames(h.session,speech,10);
+		const checking=h.session.event(final('assistant',menu));
+		await h.session.event({type:'output_transcript.added',item:{text:'Another reply'}});
+		verdict.resolve(true); await checking;
+		frames(h.session,speech,10);
+		await h.session.event(final('assistant','An unsolicited reply.'));
+		expect(h.audio).toHaveLength(0); expect(h.sent).toHaveLength(2);
+		frames(h.session,speech,10); await h.session.event(final('assistant',menu));
+		expect(h.audio[0]).toBe(speech); expect(h.marks).toEqual([]); expect(h.failures).toEqual([]);
+	} finally {h.session.stop()}
+});
 function frames(s: VoiceSession, frame: Uint8Array, n: number) { for (let i=0; i<n; i++) s.rtp(frame) }
 async function readback({session:s,marked}: ReturnType<typeof harness>) {
 	await s.sendSpeakable('Confirm the chosen green lane.', 'm'); frames(s,speech,10);
@@ -48,13 +77,24 @@ test('buffered opening audio without a transcript cannot leave a joined caller w
 		expect(h.audio).toHaveLength(0); expect(h.failures[0]?.message).toMatch(/playback/i);
 	} finally {h.session.stop();vi.useRealTimers()}
 });
+test('a microphone startup transient cannot cancel the unheard opening',async()=>{
+	const h=harness(), question='Tea or coffee?';
+	try {
+		await h.session.sendSpeakable(question);
+		h.session.input(speech);
+		for(let i=0;i<30;i++) h.session.input(silence);
+		frames(h.session,speech,10);
+		await h.session.event(final('assistant',question));
+		expect(h.audio[0]).toBe(speech); expect(h.failures).toEqual([]); expect(h.marks).toEqual([]);
+	} finally {h.session.stop()}
+});
 test.each(['audible','caller','closed'] as const)('no silent-opening retry after %s', async state=>{
 	vi.useFakeTimers();
 	const h=harness();
 	try {
 		await h.session.sendSpeakable('Which lane should we use?');
 		if(state==='audible') {frames(h.session,speech,10); await h.session.event(final('assistant','Which lane should we use?'))}
-		else if(state==='caller') h.session.input(speech);
+		else if(state==='caller') {h.session.input(speech); await h.session.event(final('user','What are the options?'))}
 		else h.session.stop();
 		vi.advanceTimersByTime(30_000);
 		expect(h.sent).toHaveLength(1); expect(h.failures).toEqual([]);

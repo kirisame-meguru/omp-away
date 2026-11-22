@@ -1,6 +1,7 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
+import { logger } from '@oh-my-pi/pi-utils';
 
 // Only exact members are ever persisted. In particular a server can choose arbitrary 'type',
 // item ID, role or payload; a regex for plausible-looking names is NOT a safe allowlist.
@@ -25,10 +26,28 @@ export interface VoiceTrace {
 	close(): void;
 }
 
-/** Only the desktop operator supplies this path. No file/stream/callback when disabled.
- * New local file per call; ensure its directory has a private ACL on Windows. */
-export function openVoiceTrace(path: string | undefined): VoiceTrace | undefined {
-	if (path === undefined || path === '') return;
+/** Always retain a bounded category-only summary; detailed traces require an operator path.
+ * No text, audio, identifiers, or arbitrary provider event names enter either output. */
+export function openVoiceTrace(path: string | undefined): VoiceTrace {
+	if (path === undefined || path === '') {
+		const counts:Record<string,number> = {};
+		const started=performance.now();
+		let closed=false;
+		const count=(name:string)=>{if(!closed) counts[name]=Math.min((counts[name]??0)+1,65535)};
+		return {
+			step(event) {if(steps.includes(event)) count(event)},
+			sideband(event) {
+				if(event.type==='turn.done') count(event.turn.role==='user' ? 'final.user' : 'final.assistant');
+				else if(event.type==='error') count('provider.error');
+			},
+			sctp() {},
+			close() {
+				if(closed) return;
+				closed=true;
+				logger.info('Away voice summary', {elapsedMs:Math.round(performance.now()-started),stages:counts});
+			},
+		};
+	}
 	if (!isAbsolute(path) || /^[\\/]{2}/.test(path) || (process.platform === 'win32' &&
 		(!/^[A-Za-z]:[\\/]/.test(path) || /[:]/.test(path.slice(2)) || /(?:^|[\\/])(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:[.\\/]|$)/i.test(path)))) throw new Error('Voice trace needs a fresh absolute local file');
 	let fd: number | undefined;

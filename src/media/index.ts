@@ -54,7 +54,7 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 		const prompt = await Bun.file(new URL('../../prompts/voice.md', import.meta.url)).text();
 		controller.signal.throwIfAborted();
 		stage = 'Unable to start the desktop media helper; provision plugin/media/.venv with uv';
-		peer = spawnPeer(pcm => session.rtp(pcm), () => { void close(new Error('Desktop media peer unavailable')) }, trace?.sctp);
+		peer = spawnPeer(pcm => session.rtp(pcm), () => { void close(new Error('Desktop media peer unavailable')) }, process.env.OMP_AWAY_VOICE_TRACE ? trace.sctp : undefined);
 		const sdpOffer = await peer.offer;
 		controller.signal.throwIfAborted();
 		if (!sdpOffer) throw new Error('Missing media offer');
