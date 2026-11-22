@@ -37,6 +37,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         fun onEnded(requestId: String) {}
         fun onPcm(pcm: ByteArray) {}
         fun onMark(requestId: String, mark: String) {}
+        fun onTranscript(requestId: String, role: String, text: String, final: Boolean) {}
         fun onError(code: String) {}
         fun onDisconnected() {}
     }
@@ -261,6 +262,16 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                     v.marks.addLast(mark); listener.onMark(v.id, mark)
                 }
             }
+            "transcript" -> {
+                msg.fields("type", "requestId", "role", "text", "final")
+                val v = checkNotNull(s.voice)
+                check(v.joined && v.id == msg.text("requestId"))
+                val role = msg.text("role")
+                val text = msg.text("text")
+                val final = msg.get("final") as Boolean
+                require((role == "user" || role == "assistant") && text.length <= 8192 && '\u0000' !in text)
+                if (!v.stopping) listener.onTranscript(v.id, role, text, final)
+            }
             "error" -> {
                 msg.fields("type", "code"); val code = msg.text("code")
                 if (s.voice?.joined == false) s.voice = null
@@ -276,14 +287,16 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     }
     fun list() = action { sendJson(it, JSONObject().put("type", "list")) }
     fun join(requestId: String) = action { s ->
-        if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId) }
+        if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId, captions = true) }
     }
     fun silence(requestId: String) = action { s -> if (requestId.isNotEmpty()) command(s, "silence", requestId) }
     fun hangup(requestId: String) = action { s ->
         val v = s.voice
         if (v != null && v.id == requestId && !v.stopping) { recording = null; v.stopping = true; command(s, "hangup", requestId) }
     }
-    private fun command(s: Session, type: String, id: String) = sendJson(s, JSONObject().put("type", type).put("requestId", id))
+    private fun command(s: Session, type: String, id: String, captions: Boolean = false) = sendJson(s, JSONObject().put("type", type).put("requestId", id).apply {
+        if (captions) put("captions", true)
+    })
     fun played(requestId: String, mark: String) {
         val v = recording ?: return
         action { s -> if (v === recording && v.id == requestId && v.marks.firstOrNull() == mark) {

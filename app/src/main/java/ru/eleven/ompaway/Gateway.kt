@@ -19,6 +19,17 @@ class Gateway : Application() {
     private val tokenState = TokenUpdates()
     @Volatile private var session: Session? = null
     private var observer: (() -> Unit)? = null
+    private var voiceObserver: (() -> Unit)? = null
+    internal var speaking = false
+        private set
+    internal var callerCaption = ""
+        private set
+    internal var assistantCaption = ""
+        private set
+    internal var callerCaptionFinal = false
+        private set
+    internal var assistantCaptionFinal = false
+        private set
     private var syncJob: ((Boolean) -> Unit)? = null
     private val timeout = Runnable { finishSync(true) }
     private val joinTimeout = Runnable { if (call != null && !talking) endCall("Voice did not become ready. Request remains pending.") }
@@ -63,8 +74,8 @@ class Gateway : Application() {
         changed()
     }
 
-    internal fun foreground(render: () -> Unit) {
-        observer = render
+    internal fun foreground(render: () -> Unit, renderVoice: (() -> Unit)? = null) {
+        observer = render; voiceObserver = renderVoice
         val s = current()
         if (s.channel.isPaired() && !verifiedInbox && !s.connecting) connect()
         refreshToken()
@@ -72,7 +83,7 @@ class Gateway : Application() {
     }
 
     internal fun background() {
-        observer = null
+        observer = null; voiceObserver = null
         endCall(null)
         if (syncJob == null || pairing) retire()
     }
@@ -180,8 +191,14 @@ class Gateway : Application() {
                     main.removeCallbacks(joinTimeout); talking = true; status = "In call"; changed()
                 }
             }
+        }, { active ->
+            main.post {
+                if (call === media && speaking != active) { speaking = active; voiceObserver?.invoke() }
+            }
         })
         call = media; talking = false; status = "Joining…"
+        speaking = false; callerCaption = ""; assistantCaption = ""
+        callerCaptionFinal = false; assistantCaptionFinal = false
         Invites.cancel(this, id)
         main.postDelayed(joinTimeout, 90_000)
         s.channel.join(id); changed()
@@ -192,6 +209,8 @@ class Gateway : Application() {
     private fun endCall(message: String?, tellDesktop: Boolean = true) {
         val media = call ?: return
         call = null; talking = false
+        speaking = false; callerCaption = ""; assistantCaption = ""
+        callerCaptionFinal = false; assistantCaptionFinal = false
         main.removeCallbacks(joinTimeout)
         media.close()
         if (tellDesktop && session != null) {
@@ -251,6 +270,12 @@ class Gateway : Application() {
         }
         override fun onPcm(pcm: ByteArray) { stream?.receive(pcm) }
         override fun onMark(requestId: String, mark: String) { stream?.takeIf { it.id == requestId }?.mark(mark) }
+        override fun onTranscript(requestId: String, role: String, text: String, final: Boolean) = ui {
+            if (callId != requestId || observer == null) return@ui
+            if (role == "user") { callerCaption = text; callerCaptionFinal = final }
+            else { assistantCaption = text; assistantCaptionFinal = final }
+            voiceObserver?.invoke()
+        }
         override fun onEnded(requestId: String) {
             stream?.takeIf { it.id == requestId }?.let { stream = null; it.invalidate() }
             ui {

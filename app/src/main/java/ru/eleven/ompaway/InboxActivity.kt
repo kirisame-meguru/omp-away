@@ -35,6 +35,7 @@ class InboxActivity : Activity() {
     private var emojiDialog: AlertDialog? = null
     private var shownEmoji: String? = null
     private var resumed = false
+    private var transcriptViews: CallTranscriptViews? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +57,7 @@ class InboxActivity : Activity() {
 
     override fun onResume() {
         super.onResume(); resumed = true
-        app.foreground(::render)
+        app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
     }
     override fun onPause() {
@@ -69,6 +70,7 @@ class InboxActivity : Activity() {
         if (!resumed || isFinishing) return
         val y = scroll.scrollY
         column.removeAllViews()
+        transcriptViews = null
         text("Away inbox", 28, bold = true)
         text(app.status, 16)
         notice?.let { text(it, 14) }
@@ -102,7 +104,8 @@ class InboxActivity : Activity() {
         } else {
             if (app.callId == null) button(if (app.verifiedInbox) "Refresh inbox" else "Reconnect") { notice = null; app.retry() }
             app.callId?.let {
-                text(if (app.talking) "Microphone and playback on" else "Waiting for desktop to join", 20, bold = true)
+                transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 17), text("", 17))
+                renderVoice()
                 button("Hang up") { app.hangup() }
             }
         }
@@ -146,6 +149,12 @@ class InboxActivity : Activity() {
         }
     }
 
+    private fun renderVoice() {
+        if (!resumed || app.callId == null) return
+        transcriptViews?.update(app.talking, app.speaking, app.callerCaption, app.callerCaptionFinal,
+            app.assistantCaption, app.assistantCaptionFinal)
+    }
+
     private fun dismissEmoji() { emojiDialog?.dismiss(); emojiDialog = null; shownEmoji = null }
     private fun scan() {
         notice = null
@@ -178,13 +187,12 @@ class InboxActivity : Activity() {
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density + 0.5f).toInt()
-    private fun text(value: String, sp: Int, bold: Boolean = false) {
-        column.addView(TextView(this).apply {
+    private fun text(value: String, sp: Int, bold: Boolean = false): TextView =
+        TextView(this).apply {
             text = value; textSize = sp.toFloat(); setPadding(0, dp(if (bold) 14 else 5), 0, dp(3))
             if (bold) setTypeface(typeface, Typeface.BOLD)
             textDirection = View.TEXT_DIRECTION_FIRST_STRONG
-        })
-    }
+        }.also { column.addView(it) }
     private fun button(label: String, action: () -> Unit) {
         column.addView(Button(this).apply {
             text = label; isAllCaps = false; gravity = Gravity.CENTER; setOnClickListener { if (resumed) action() }

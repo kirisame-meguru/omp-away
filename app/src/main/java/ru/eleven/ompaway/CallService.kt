@@ -35,6 +35,7 @@ internal class CallService(
     private val played: (String) -> Unit,
     private val failed: () -> Unit,
     private val ready: () -> Unit = {},
+    private val speaking: (Boolean) -> Unit = {},
 ) : AutoCloseable {
     private val app = context.applicationContext
     private val audio = checkNotNull(app.getSystemService(AudioManager::class.java))
@@ -176,6 +177,9 @@ internal class CallService(
             val silence = ByteArray(BYTES)
             val stamp = AudioTimestamp()
             var receivedAudio = false
+            var speechActive = false
+            var lastVoiceFrame = 0L
+            var lastVoiceAt = 0L
             while (live.get()) {
                 when (val next = queue.poll(40, TimeUnit.MILLISECONDS)) {
                     is ByteArray -> {
@@ -191,6 +195,15 @@ internal class CallService(
                         }
                         write(track, next)
                         framesWritten += BYTES / 2
+                        var energy = 0L
+                        for (i in next.indices step 2) {
+                            val sample = ((next[i].toInt() and 255) or (next[i + 1].toInt() shl 8)).toShort().toLong()
+                            energy += sample * sample
+                        }
+                        if (energy >= 64L * 64 * (BYTES / 2)) {
+                            lastVoiceFrame = framesWritten; lastVoiceAt = SystemClock.elapsedRealtime()
+                            if (!speechActive) { speechActive = true; speaking(true) }
+                        }
                         if (framesWritten == BYTES / 2L && live.get()) {
                             ready()
                         }
@@ -214,6 +227,14 @@ internal class CallService(
                         synchronized(gate) { if (live.get()) played(next) }
                         receivedAudio = false
                     }
+                }
+                if (speechActive && SystemClock.elapsedRealtime() - lastVoiceAt >= 300) {
+                    // Some routes omit timestamps. The playback head is sufficient for display,
+                    // never for the separate strict playout acknowledgement above.
+                    val drained = if (track.getTimestamp(stamp))
+                        presented(lastVoiceFrame, stamp.framePosition, stamp.nanoTime, System.nanoTime())
+                    else (track.playbackHeadPosition.toLong() and 0xffffffffL) >= lastVoiceFrame
+                    if (drained) { speechActive = false; speaking(false) }
                 }
             }
         } finally {

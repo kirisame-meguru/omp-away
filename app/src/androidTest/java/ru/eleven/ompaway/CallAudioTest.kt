@@ -17,6 +17,9 @@ import org.junit.Assume.assumeTrue
 import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.sin
+import android.widget.LinearLayout
+import android.widget.TextView
+import ru.eleven.ompaway.security.bytesJson
 
 class CallAudioTest {
     @Test fun speakerPreferenceRoutesNewCallsAndDoesNotLeakIntoTheNextCall() {
@@ -59,28 +62,85 @@ class CallAudioTest {
         val context = instrumentation.targetContext
         val activity = instrumentation.startActivitySync(Intent(context, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
+            lateinit var transcriptViews: CallTranscriptViews
+            lateinit var callerView: TextView
+            var mediaReady = false
+            var mediaSpeaking = false
+            var callerText = ""
+            var assistantText = ""
+            var callerFinal = false
+            var assistantFinal = false
+            val partialCaptions = AtomicInteger()
+            val callerFinals = AtomicInteger()
+            val speakingTransitions = AtomicInteger()
+            val listeningTransitions = AtomicInteger()
+            fun renderVoice() = transcriptViews.update(mediaReady, mediaSpeaking, callerText, callerFinal, assistantText, assistantFinal)
+            instrumentation.runOnMainSync {
+                val column = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+                val status = TextView(activity)
+                callerView = TextView(activity)
+                val assistant = TextView(activity)
+                column.addView(status); column.addView(callerView); column.addView(assistant)
+                activity.setContentView(column)
+                transcriptViews = CallTranscriptViews(status, callerView, assistant)
+                renderVoice()
+            }
             Socket(InetAddress.getLoopbackAddress(), port!!).use { socket ->
                 socket.soTimeout = 120_000
                 val input = DataInputStream(socket.getInputStream())
                 val output = socket.getOutputStream()
                 val failures = AtomicInteger()
                 val played = AtomicInteger()
+                var activeRequest: String? = null
                 fun send(kind: Int, pcm: ByteArray? = null) = synchronized(output) {
                     output.write(kind); if (pcm != null) output.write(pcm); output.flush()
                 }
                 val call = CallService(context, "isolated-test", { send(1, it) },
-                    { played.incrementAndGet(); send(2) }, { failures.incrementAndGet(); send(3) })
+                    { played.incrementAndGet(); send(2) }, { failures.incrementAndGet(); send(3) },
+                    { instrumentation.runOnMainSync { mediaReady = true; renderVoice() } },
+                    { active -> instrumentation.runOnMainSync {
+                        mediaSpeaking = active
+                        if (active) speakingTransitions.incrementAndGet() else listeningTransitions.incrementAndGet()
+                        renderVoice()
+                    } })
                 try {
                     instrumentation.runOnMainSync { call.start() }
                     while (true) when (input.readUnsignedByte()) {
                         1 -> call.receive(ByteArray(960).also { input.readFully(it) })
                         2 -> call.mark("drain")
                         3 -> break
+                        4 -> {
+                            val size = input.readInt()
+                            require(size in 1..65536)
+                            val message = bytesJson(ByteArray(size).also { input.readFully(it) })
+                            if (message.getString("type") == "joined") activeRequest = message.getString("requestId")
+                            else {
+                                check(message.getString("type") == "transcript" && message.getString("requestId") == activeRequest)
+                                val role = message.getString("role")
+                                val text = message.getString("text")
+                                val final = message.get("final") as Boolean
+                                require((role == "user" || role == "assistant") && text.length <= 8192)
+                                if (!final) partialCaptions.incrementAndGet()
+                                if (final && role == "user") callerFinals.incrementAndGet()
+                                instrumentation.runOnMainSync {
+                                    if (role == "user") { callerText = text; callerFinal = final }
+                                    else { assistantText = text; assistantFinal = final }
+                                    renderVoice()
+                                }
+                            }
+                        }
                         else -> error("Invalid isolated audio packet")
                     }
                     assertEquals("Real audio failed", 0, failures.get())
                     if (CallAudioSettings(context).speakerEnabled) awaitSpeaker(context.getSystemService(AudioManager::class.java), true)
                     assertEquals("Opening and options did not physically drain", 2, played.get())
+                    if (InstrumentationRegistry.getArguments().getString("captions") == "on") {
+                        assertTrue("Live transcript snapshots never arrived", partialCaptions.get() > 0)
+                        assertTrue("Both caller turns must complete", callerFinals.get() >= 2)
+                        instrumentation.runOnMainSync { assertTrue("Recognized confirmation is missing from the real caption view", callerView.text.contains("yeah", ignoreCase = true)) }
+                    }
+                    assertTrue("Speaking phase never started", speakingTransitions.get() > 0)
+                    assertTrue("Speaking phase did not return to listening after hardware playout", listeningTransitions.get() > 0)
                 } finally { instrumentation.runOnMainSync { call.close() } }
             }
         } finally { instrumentation.runOnMainSync { activity.finish() } }
