@@ -12,10 +12,11 @@ const wire = [
 	'response.output_audio.done','response.output_audio.delta','response.output_item.done','conversation.item.done','conversation.item.created','response.created','response.done','response.cancelled','turn.interrupted',
 ];
 const peerShapes = ['binary','oversize','invalid','turn.user.valid','turn.assistant.valid','turn.user.missing_transcript','turn.assistant.missing_transcript','turn.missing_turn','turn.other_role','transcript.missing_text'];
-const steps = ['onset.local','onset.provider','onset.paired','onset.ambiguous','interrupt','speech.started.callback','final.user.bound','final.user.unbound','final.assistant.callback','final.invalid',
-	'compare.tokens.equal','compare.tokens.different','compare.length.equal','compare.length.shorter','compare.length.longer','compare.fields.contiguous','compare.fields.ordered_only','compare.fields.missing',
-	'compare.tail.with_intro','compare.tail.words_only','compare.tail.different','consult.claimed','consult.duplicate','consult.delegation_first',
-	'canonical.match','canonical.mismatch','speakable.requested','speakable.sent','readback.requested','readback.sent','consult.dispatched','consult.refused','consult.sent','provisional.accepted','provisional.rejected','mark.emitted','voice.ready'] as const;
+const steps = ['onset.local','onset.provider','interrupt','speech.started.callback','final.user.bound','final.user.unbound',
+	'rtp.replay.started','rtp.replay.limit','rtp.first_voiced','rtp.voice.none','rtp.voice.partial','rtp.voice.enough',
+	'rtp.quiet.none','rtp.quiet.partial','rtp.quiet.enough','rtp.writes.pending','rtp.writes.drained','rtp.receive.idle','rtp.receive.recent',
+	'rtp.end.quiet_frames','rtp.end.receive_gap','rtp.end.quiet_gap',
+	'consult.claimed','decision.claimed','readback.verified','readback.rejected','speakable.sent','readback.sent','mark.emitted','mark.played','voice.ready'] as const;
 export interface VoiceTrace {
 	step(event: typeof steps[number]): void;
 	sideband(event: LiveServerEvent): void;
@@ -30,8 +31,13 @@ export function openVoiceTrace(path: string | undefined): VoiceTrace | undefined
 	if (!isAbsolute(path) || /^[\\/]{2}/.test(path) || (process.platform === 'win32' &&
 		(!/^[A-Za-z]:[\\/]/.test(path) || /[:]/.test(path.slice(2)) || /(?:^|[\\/])(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:[.\\/]|$)/i.test(path)))) throw new Error('Voice trace needs a fresh absolute local file');
 	let fd: number | undefined;
-	try { fd = openSync(path, 'ax', 0o600) } catch { throw new Error('Cannot create fresh voice trace') }
+	try { fd = openSync(path, 'ax', 0o600) } catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new Error('Cannot create voice trace');
+		// Never append to or replace an existing path, including on reconnect.
+		try { fd = openSync(`${path}.${crypto.randomUUID()}`, 'ax', 0o600) } catch { throw new Error('Cannot create separate voice trace') }
+	}
 	const counts = new Map<string, number>();
+	const openedAt = performance.now();
 	let seq = 0;
 	function release() {
 		if (fd === undefined) return;
@@ -45,7 +51,7 @@ export function openVoiceTrace(path: string | undefined): VoiceTrace | undefined
 		if ((category.endsWith('.delta') || category.endsWith('.added') || category.endsWith('.other')) && (count & (count - 1)) !== 0) return;
 		try {
 			++seq;
-			writeSync(fd, `${seq} ${seq === 4096 ? 'trace.limit' : category} ${count}\n`);
+			writeSync(fd, `${seq} ${seq === 4096 ? 'trace.limit' : category} ${count} ${Math.floor(performance.now() - openedAt)}\n`);
 			if (seq === 4096) release();
 		} catch { release() }
 	}

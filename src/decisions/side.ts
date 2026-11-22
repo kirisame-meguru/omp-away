@@ -4,7 +4,8 @@ import type { DecisionForm } from "./form";
 export interface SideContext {
 	runEphemeralTurn?(options:{promptText:string;tools:false;signal:AbortSignal;purpose:string;dedupeReply:false;maxContextBytes:number;onTextDelta:(text:string)=>void}):Promise<{replyText:string;assistantMessage:{stopReason:string}}>;
 }
-const prompts = Object.fromEntries(["brief","consult","extract"].map(key=>[key,readFileSync(new URL(`../../prompts/decisions/${key}.md`,import.meta.url),"utf8").trim()]));
+type SidePurpose="brief"|"consult"|"extract"|"verify"|"confirm";
+const prompts = Object.fromEntries(["brief","consult","extract","verify","confirm"].map(key=>[key,readFileSync(new URL(`../../prompts/decisions/${key}.md`,import.meta.url),"utf8").trim()]));
 export type Exchange = {question:string; answer:string};
 export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):Promise<T> {
 	signal.throwIfAborted();
@@ -19,8 +20,8 @@ export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):
 	} finally { signal.removeEventListener("abort",stop); }
 }
 /** The only model boundary. No sendUserMessage, live delegation, tools or main-session mutation. */
-export async function side(ctx: SideContext, form: DecisionForm, kind: "brief"|"consult"|"extract", data: Record<string,unknown>, signal: AbortSignal): Promise<string> {
-	const byteCap = kind === "extract" ? 8192 : 2048;
+export async function side(ctx: SideContext, form: DecisionForm, kind:SidePurpose, data: Record<string,unknown>, signal: AbortSignal): Promise<string> {
+	const byteCap = kind === "extract" || kind==="verify" ? 8192 : 2048;
 	signal.throwIfAborted();
 	const operation=new AbortController();
 	const stop=()=>operation.abort();

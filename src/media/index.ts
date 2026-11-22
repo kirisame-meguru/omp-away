@@ -13,14 +13,15 @@ export interface VoiceOptions extends VoiceCallbacks {
 }
 export interface VoiceCall {
 	sendPcm(pcm: Uint8Array): void;
-	sendSpeakable(text: string, mark?: string, confirmationPhrase?: string): Promise<void>;
+	sendSpeakable(text: string, mark?: string): Promise<void>;
+	played(mark: string): boolean;
 	close(): Promise<void>;
 }
 
 /** Open one desktop-authenticated Codex call. The peer owns only ephemeral WebRTC
  * keys and the signaled SDP. Neither device nor media process receives the login. */
 export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
-	const { ctx, brief, signal, onEnd, consult, onTranscript, onAudio, onMark, onInterrupt, onProvisional, onSpeechStarted } = options;
+	const { ctx, brief, signal, onEnd, onTranscript, onAudio, onMark, onReadback, onInterrupt, onSpeechStarted } = options;
 	signal?.throwIfAborted();
 	if (typeof brief !== 'string' || !brief.trim() || brief.length > 8192) throw new Error('Missing or oversize decision brief');
 	const sessionId = ctx.sessionManager.getSessionId(), authStorage = ctx.modelRegistry.authStorage;
@@ -31,8 +32,8 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 	let peer: MediaPeer | undefined, transport: LiveTransport | undefined;
 	let cleanup: Promise<void> | undefined;
 	const abort = () => { void close() };
-	const timer = setTimeout(() => { void close(new Error('Desktop voice setup timed out')) }, 60_000);
-	const session = new VoiceSession({ consult, onTranscript, onAudio, onMark, onProvisional, onInterrupt, onSpeechStarted }, message => {
+	let timer = setTimeout(() => { void close(new Error('Desktop voice setup timed out')) }, 60_000);
+	const session = new VoiceSession({ onTranscript, onAudio, onMark, onReadback, onInterrupt, onSpeechStarted }, message => {
 		if (!transport || controller.signal.aborted) return Promise.reject(new Error('Voice is closed'));
 		return transport.send(message);
 	}, reason => { void close(reason) }, trace);
@@ -68,6 +69,8 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 		await peer.answer(transport.sdpAnswer); controller.signal.throwIfAborted();
 		trace?.step('voice.ready');
 		clearTimeout(timer);
+		timer = setTimeout(() => { void close(new Error('Desktop voice call duration limit reached')) }, 15 * 60_000);
+		timer.unref();
 	}
 	try { await Promise.race([start(), ended.promise]) }
 	catch {
@@ -79,7 +82,8 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 			try { session.input(pcm); peer!.sendPcm(pcm) }
 			catch { const reason = new Error('Invalid or stalled phone audio'); void close(reason); throw reason }
 		},
-		sendSpeakable: (text, mark, phrase) => session.sendSpeakable(text, mark, phrase),
+		sendSpeakable: (text, mark) => session.sendSpeakable(text, mark),
+		played: mark => session.played(mark),
 		close: () => close(),
 	};
 }

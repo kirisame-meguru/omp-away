@@ -16,7 +16,7 @@ type Settings = Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"pytho
 interface Transports { gateway:typeof startSecureDesktop; voice:typeof openVoice }
 interface Joined {
 	device:string; id:string; decision:DecisionCall; voice?:VoiceCall; streaming:boolean;
-	provisional?:string; outstanding?:string;
+	readback?:{mark:string;phase:"summarizing"|"verifying"|"verified"|"sent"};
 }
 
 // A routing grammar for a single English informational question, not an authorization
@@ -75,22 +75,18 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			const brief=await decision.brief();
 			if (!current(call)) return;
 			const voice=await transports.voice({ctx,brief,signal:decision.signal,
-				async consult(question,signal) {
-					signal.throwIfAborted();
-					if (!current(call) || !call.streaming) throw Error("call-ended");
-					const answer=await decision.consult(question);
-					signal.throwIfAborted(); return answer;
-				},
 				onSpeechStarted(utterance) {
 					if (!current(call) || !call.streaming) return;
-					++revision; onset=utterance; decision.speechStarted(utterance);
+					++revision; onset=utterance; call.readback=undefined;
+					// This onset might be the first affirmative after playback. Let the
+					// decision own it; interrupt() here would erase its armed draft.
+					decision.speechStarted(utterance);
 				},
-				onTranscript(role,text,utterance,alreadyConsulted?:boolean) {
+				onTranscript(role,text,utterance) {
 					if (!current(call) || !call.streaming || role!=="user") return;
-					if (!utterance) {++revision; onset=undefined; decision.interrupt();return}
+					if (!utterance) {++revision; onset=undefined;call.readback=undefined;decision.interrupt();return}
 					if (onset!==utterance) return; // A duplicate final cannot cancel a live consultation.
 					onset=undefined;
-					if (alreadyConsulted) return;
 					if (informationalQuestion(text)) {
 						const turn=revision;
 						// consult invalidates the draft/readback and consumes the speech onset. It
@@ -100,24 +96,35 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 						}).catch(()=>{if (current(call) && revision===turn) fail(call)});
 						return "consulting" as const;
 					}
+					const turn=revision;
 					void decision.speechFinished(utterance,text).then(async reply=>{
-						if (current(call) && reply.kind==="say") await call.voice!.sendSpeakable(reply.text,reply.mark,reply.confirmationPhrase);
-					}).catch(()=>fail(call));
+						if (!current(call) || revision!==turn || reply.kind!=="say") return;
+						call.readback=reply.mark ? {mark:reply.mark,phase:"summarizing"} : undefined;
+						await call.voice!.sendSpeakable(reply.text,reply.mark);
+					}).catch(()=>{if (current(call) && revision===turn) fail(call)});
+					return "deciding" as const;
 				},
 				onInterrupt() {
 					if (!current(call)) return;
-					++revision; onset=undefined; call.provisional=call.outstanding=undefined;decision.interrupt();
+					++revision; onset=undefined; call.readback=undefined;decision.interrupt();
 				},
 				onAudio(pcm) {
 					if (current(call) && call.streaming) return gateway!.sendPcm(device,pcm).catch(()=>fail(call));
 				},
-				onProvisional(mark,utterance,text) {
-					if (!current(call) || !call.streaming || !decision.provisionalConfirmation(mark,utterance,text)) return false;
-					call.provisional=mark;return true;
+				async onReadback(mark,text) {
+					const readback=call.readback;
+					if (!current(call) || !call.streaming || !readback || readback.mark!==mark || readback.phase!=="summarizing") return false;
+					readback.phase="verifying";
+					const verified=await decision.verifyReadback(mark,text);
+					if (!current(call) || call.readback!==readback) return false;
+					if (!verified) {call.readback=undefined;return false}
+					readback.phase="verified";
+					return true;
 				},
 				onMark(mark) {
-					if (!current(call) || !call.streaming || call.provisional!==mark) return;
-					call.provisional=undefined; call.outstanding=mark;
+					const readback=call.readback;
+					if (!current(call) || !call.streaming || !readback || readback.mark!==mark || readback.phase!=="verified") return;
+					readback.phase="sent";
 					void gateway!.sendControl(device,{type:"mark",requestId:id,mark}).catch(()=>fail(call));
 				},
 				onEnd:()=>fail(call),
@@ -148,9 +155,14 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				case "hangup": if (active?.device===device && active.id===message.requestId) active.decision.close(); break;
 				case "played": {
 					const call=active;
-					if (!call || !current(call) || !call.streaming || call.device!==device || call.id!==message.requestId || call.outstanding!==message.mark) return;
-					call.outstanding=undefined;
-					try {await call.decision.played(message.mark)} catch {fail(call)}
+					if (!call || !current(call) || !call.streaming || call.device!==device || call.id!==message.requestId) return;
+					const readback=call.readback;
+					if (!readback || readback.phase!=="sent" || readback.mark!==message.mark) return;
+					call.readback=undefined;
+					try {
+						if (call.voice!.played(message.mark)) await call.decision.played(message.mark);
+						else call.decision.interrupt();
+					} catch {fail(call)}
 					break;
 				}
 			}

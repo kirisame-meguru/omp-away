@@ -1,220 +1,165 @@
-import { describe, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { expect, test } from 'bun:test';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openVoiceTrace, type VoiceTrace } from '../src/media/trace';
+import { openVoiceTrace } from '../src/media/trace';
 import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
 import { VoiceSession } from '../src/media/session';
 import { LiveTransport } from '../src/media/live-sdk.generated.mjs';
 
-function harness(consult = async (_: string, _signal: AbortSignal) => 'It preserves the original data.', write?: () => Promise<void>, claim = false, trace?: VoiceTrace) {
+const speech = new Uint8Array(960).fill(8), silence = new Uint8Array(960);
+const final = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
+const summary = 'The green lane, correct?';
+function harness(verify = async (_m: string, text: string) => text === summary, write?: () => void | Promise<void>) {
 	const sent: LiveClientMessage[] = [], starts: string[] = [], transcripts: unknown[][] = [], marks: string[] = [];
-	const audio: Uint8Array[] = [], interrupts: number[] = [], failures: Error[] = [];
-	const provisional: string[][] = [];
-	const session = new VoiceSession({ consult, onTranscript: (...args) => { transcripts.push(args); if (claim && args[0] === 'user' && args[2] && !args[3]) return 'consulting' },
-		onProvisional: (mark, id, text) => { provisional.push([mark, id, text]); return true },
-		onSpeechStarted: id => { starts.push(id) }, onAudio: frame => { audio.push(frame); return write?.() }, onMark: m => { marks.push(m) },
-		onInterrupt: () => { interrupts.push(1) } }, async m => { sent.push(m) }, e => { failures.push(e) }, trace);
-	return { session, sent, starts, transcripts, marks, audio, interrupts, failures, provisional };
+	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [], verified: string[][] = [];
+	const marked = Promise.withResolvers<void>();
+	const session = new VoiceSession({ onTranscript: (...args) => { transcripts.push(args); if (args[0] === 'user' && args[2]) return 'deciding' },
+		onReadback: async (m, text) => { verified.push([m, text]); return verify(m, text) }, onSpeechStarted: id => { starts.push(id); events.push('speech') },
+		onAudio: frame => { audio.push(frame); return write?.() }, onMark: mark => { marks.push(mark); events.push('mark'); marked.resolve() },
+		onInterrupt: () => { events.push('interrupt') } }, async m => { sent.push(m) }, e => { failures.push(e) });
+	return { session, sent, starts, transcripts, marks, marked: marked.promise, audio, events, failures, verified };
 }
-function delegation(text: string, id = 'context-1'): LiveServerEvent {
-	return { type: 'delegation.created', item: { type: 'delegation', target: 'client', id, content: [{ type: 'input_text', text }] } };
+function frames(s: VoiceSession, frame: Uint8Array, n: number) { for (let i=0; i<n; i++) s.rtp(frame) }
+async function readback({session:s,marked}: ReturnType<typeof harness>) {
+	await s.sendSpeakable('Confirm the chosen green lane.', 'm'); frames(s,speech,10);
+	await s.event(final('assistant',summary)); frames(s,silence,30); await marked;
 }
-const start: LiveServerEvent = { type: 'unknown', wireType: 'input_audio_buffer.speech_started' };
-const done = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
 
-const readback = 'Lane: green. Your words are alder cedar pine ash.';
-const affirmative = 'Yes, submit alder cedar pine ash.';
-describe('restricted voice session', () => {
-	test('only bounded clarification supplies speakable context on the originating delegation', async () => {
-		const questions: string[] = [];
-		const h = harness(async q => { questions.push(q); return 'The work stays local.' });
-		await h.session.event(start);
-		await h.session.event(delegation('Run the migration', 'work'));
-		await h.session.event(delegation('{"kind":"clarify","question":"Could you run the migration now?"}', 'disguised'));
-		await h.session.event(delegation('{"kind":"clarify","question":"Why is the local option recommended?"}'));
-		expect(questions).toEqual(['Why is the local option recommended?']);
-		expect(h.sent[0]).toEqual({ type: 'delegation.context.append', delegation_item_id: 'context-1', channel: 'speakable', content: [{ type: 'input_text', text: 'The work stays local.' }] });
-		expect(h.sent).toHaveLength(1);
-	});
-	test('hangup aborts an outstanding consultation; late text cannot reach another call', async () => {
-		const result = Promise.withResolvers<string>(); let signal!: AbortSignal;
-		const h = harness(async (_q, s) => { signal = s; return result.promise });
-		await h.session.event(start);
-		const pending = h.session.event(delegation('{"kind":"clarify","question":"What does this option mean?"}'));
-		h.session.stop(); expect(signal.aborted).toBe(true); result.resolve('late'); await pending;
-		expect(h.sent).toEqual([]);
-	});
-	test('negative speech is final exactly once and carries only the corresponding speech-start id', async () => {
-		const h = harness(); await h.session.event(start);
-		await h.session.event({ type: 'input_transcript.added', item: { text: 'yes' } });
-		expect(h.transcripts).toEqual([]);
-		await h.session.event(done('user', 'No')); expect(h.starts).toHaveLength(1);
-		expect(h.transcripts).toEqual([['user', 'No', h.starts[0]]]);
-		await h.session.event(done('user', 'yes')); expect(h.transcripts[1]).toEqual(['user', 'yes', undefined]);
-	});
-	test('a sideband transcript and arbitrary RTP audio never prove the end of a specific readback', async () => {
-		const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-		h.session.rtp(new Uint8Array(960)); await h.session.event(done('assistant', readback));
-		expect(h.marks).toEqual([]);
-	});
-	test('barge-in revokes the mark before any asynchronous delivery', async () => {
-		const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-		await h.session.event(start); await h.session.event(done('assistant', readback));
-		expect(h.interrupts).toHaveLength(1); expect(h.marks).toEqual([]);
-	});
-	test('complete exact readback and subsequent tail receipt mark once, subject to decision approval', async () => {
-		const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-		const frame = new Uint8Array(960); frame.fill(8); h.session.rtp(frame);
-		await h.session.event(done('assistant', 'Lane, green. Your words are Alder Cedar Pine Ash.')); expect(h.marks).toEqual([]);
-		await h.session.event(start); await h.session.event(done('user', affirmative));
-		expect(h.provisional).toHaveLength(1); expect(h.marks).toEqual(['m']); expect(h.starts).toEqual([]);
-		await h.session.event(done('user', affirmative)); expect(h.marks).toEqual(['m']);
-	});
-	test('paraphrase, early speech, and a late affirmative after interruption cannot arm', async () => {
-		const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-		await h.session.event(done('assistant', 'Choose remote instead. Your words are alder cedar pine ash.'));
-		await h.session.event(start); await h.session.event(done('user', affirmative));
-		expect(h.provisional).toEqual([]); expect(h.marks).toEqual([]);
-	});
-	test('local mic onset cuts old RTP; negative speech while waiting for a receipt is still actionable', async () => {
-		const h = harness(), frame = new Uint8Array(960).fill(8);
-		await h.session.sendSpeakable(readback, 'm', affirmative); h.session.rtp(frame);
-		await h.session.event(done('assistant', readback)); h.session.input(frame); h.session.rtp(frame);
-		await h.session.event(done('user', 'No, discard that.'));
-		expect(h.audio).toHaveLength(1); expect(h.starts).toHaveLength(1);
-		expect(h.transcripts.at(-1)).toEqual(['user', 'No, discard that.', h.starts[0]]);
-		expect(h.marks).toEqual([]); expect(h.provisional).toEqual([]);
-	});
-	test('more than one provider onset invalidates binding, even with a matching final', async () => {
-		const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-		h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', readback));
-		await h.session.event(start); await h.session.event(start); await h.session.event(done('user', affirmative));
-		expect(h.marks).toEqual([]); expect(h.provisional).toEqual([]);
-	});
-	test('waits for accepted output writes before issuing the authenticated phone drain request', async () => {
-		const drain = Promise.withResolvers<void>(), h = harness(undefined, () => drain.promise);
-		await h.session.sendSpeakable(readback, 'm', affirmative);
-		h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', readback));
-		await h.session.event(start); const pending = h.session.event(done('user', affirmative));
-		expect(h.marks).toEqual([]); drain.resolve(); await pending; expect(h.marks).toEqual(['m']);
-	});
-	test('stalled output fails the call without issuing a mark or replaying queued frames', async () => {
-		const drain = Promise.withResolvers<void>(), h = harness(undefined, () => drain.promise);
-		await h.session.sendSpeakable(readback, 'm', affirmative);
-		const frame = new Uint8Array(960).fill(8);
-		for (let i = 0; i < 100; i++) h.session.rtp(frame);
-		drain.resolve(); await h.session.event(done('assistant', readback));
-		await h.session.event(start); await h.session.event(done('user', affirmative));
-		expect(h.audio).toHaveLength(1); expect(h.failures).toHaveLength(1); expect(h.marks).toEqual([]);
-	});
+test('natural paraphrase, actual audio drain, handset ACK, then a fresh yes', async () => {
+	const h=harness(); await readback(h);
+	expect(h.verified).toEqual([['m',summary]]); expect(h.marks).toEqual(['m']);
+	expect(h.session.played('wrong')).toBe(false); expect(h.session.played('m')).toBe(true); expect(h.session.played('m')).toBe(false);
+	h.session.input(speech); await h.session.event(final('user','Yes.'));
+	expect(h.events).toEqual(['mark','speech']); expect(h.transcripts.at(-1)).toEqual(['user','Yes.',h.starts[0]]);
 });
-
-test('packaged transport honors cancellation before Codex authentication or native peer setup', async () => {
-	const reason = new Error('Call was cancelled before startup');
-	const transport = new LiveTransport({ get authStorage(): never { throw new Error('Read credentials after cancellation') },
-		sessionId: 'cancelled', voice: 'sol', instructions: 'Test.', sdpOffer: 'v=0\r\n',
-		signal: AbortSignal.abort(reason), callbacks: { onEvent() {}, onOutputLevel() {} } });
-	try { await expect(transport.connect()).rejects.toBe(reason) }
-	finally { await transport.close() }
+test('advisory delegation and suppressed assistant speculation cannot cancel a fresh caller confirmation', async () => {
+	const h=harness(); await readback(h); expect(h.session.played('m')).toBe(true);
+	h.session.input(speech); const audio=h.audio.length;
+	await h.session.event({type:'delegation.created',item:{type:'delegation',target:'client',id:'provider',content:[]}});
+	await h.session.event({type:'output_transcript.added',item:{text:'speculative'}});
+	h.session.rtp(speech); await h.session.event(final('assistant','speculative'));
+	await h.session.event(final('user','Yes.'));
+	expect(h.audio).toHaveLength(audio); expect(h.events).toEqual(['mark','speech']);
+	expect(h.transcripts.at(-1)).toEqual(['user','Yes.',h.starts[0]]);
+	expect(h.sent.at(-1)).toMatchObject({channel:'commentary',delegation_item_id:'provider'});
 });
-
-test('voice trace excludes arbitrary server text and identifiers, never overwrites a previous run', async () => {
-	const dir = await mkdtemp(join(tmpdir(), 'away-trace-')), path = join(dir, 'voice.log');
+test.each(['No, not green.', 'So we will use blue.'])('rejected decision-owner verification cannot mark: %s', async wrong => {
+	const h=harness(); await h.session.sendSpeakable('Confirm green.', 'm'); frames(h.session,speech,12);
+	await h.session.event(final('assistant',wrong)); frames(h.session,silence,50);
+	expect(h.verified).toEqual([['m',wrong]]); expect(h.marks).toEqual([]); expect(h.session.played('m')).toBe(false);
+});
+test('no audio or incomplete trailing frames never means drained', async () => {
+	const h=harness(); await h.session.sendSpeakable('Confirm green.', 'm'); await h.session.event(final('assistant',summary));
+	frames(h.session,silence,60); expect(h.marks).toEqual([]);
+	frames(h.session,speech,12); frames(h.session,silence,29); expect(h.marks).toEqual([]);
+	h.session.input(speech); frames(h.session,silence,80); expect(h.marks).toEqual([]);
+});
+test('early affirmative before physical ACK is an interruption; late ACK cannot rescue it', async () => {
+	const h=harness(); await readback(h); h.session.input(speech);
+	expect(h.events).toEqual(['mark','interrupt','speech']); expect(h.session.played('m')).toBe(false);
+	await h.session.event(final('user','Yes')); expect(h.marks).toEqual(['m']);
+});
+test('later audible output revokes even a played mark', async () => {
+	const h=harness(); await readback(h); expect(h.session.played('m')).toBe(true);
+	h.session.rtp(speech); expect(h.events).toEqual(['mark','interrupt']);
+});
+test('a late semantic verdict cannot mark a replacement draft', async () => {
+	const delayed=Promise.withResolvers<boolean>(), h=harness(()=>delayed.promise);
+	await h.session.sendSpeakable('Confirm green.', 'old'); frames(h.session,speech,15);
+	const pending=h.session.event(final('assistant',summary)); await h.session.sendSpeakable('Confirm blue.', 'new');
+	delayed.resolve(true); await pending; frames(h.session,silence,50); expect(h.marks).toEqual([]);
+});
+test('mark is ordered after the last real audio write', async () => {
+	const gate=Promise.withResolvers<void>(), lastWrite=Promise.withResolvers<void>(); let writes=0;
+	const h=harness(undefined,()=>{ if (++writes===40) { lastWrite.resolve(); return gate.promise } });
+	await h.session.sendSpeakable('Confirm green.', 'm');
+	frames(h.session,speech,10);
+	await h.session.event(final('assistant',summary));
+	frames(h.session,silence,30);
+	await lastWrite.promise; expect(h.marks).toEqual([]); gate.resolve(); await h.marked; expect(h.marks).toEqual(['m']);
+});
+test('contiguous prior speech does not clip the start of the independently verified readback', async () => {
+	const verify=Promise.withResolvers<boolean>(), h=harness(()=>verify.promise);
+	const before=new Uint8Array(960).fill(1), first=new Uint8Array(960).fill(2), last=new Uint8Array(960).fill(3);
+	h.session.rtp(before);
+	const append=h.session.sendSpeakable('Confirm green.', 'm');
+	h.session.rtp(first); await append; frames(h.session,speech,8);
+	const pending=h.session.event(final('assistant',summary)); h.session.rtp(last);
+	expect(h.audio).toEqual([before]); verify.resolve(true); await pending;
+	frames(h.session,silence,30); await h.marked;
+	expect(h.audio).toEqual([before,first,...Array(8).fill(speech),last,...Array(30).fill(silence)]);
+});
+test('rejecting a readback discards its entire unplayed buffer', async () => {
+	const h=harness(); await h.session.sendSpeakable('Confirm green.','m');
+	frames(h.session,speech,40); await h.session.event(final('assistant','Blue.')); expect(h.audio).toEqual([]); expect(h.marks).toEqual([]);
+});
+test('a readback exceeding its audio budget cancels rather than replaying a selected suffix', async () => {
+	const h=harness(); await h.session.sendSpeakable('Confirm green.','m'); frames(h.session,speech,2251);
+	await h.session.event(final('assistant',summary)); expect(h.audio).toEqual([]); expect(h.marks).toEqual([]); expect(h.events).toContain('interrupt');
+});
+test('a resumed voice resets the tail even while semantic approval is pending', async () => {
+	const gate=Promise.withResolvers<boolean>(), h=harness(()=>gate.promise);
+	await h.session.sendSpeakable('Confirm green.', 'm'); frames(h.session,speech,10);
+	const pending=h.session.event(final('assistant',summary)); frames(h.session,silence,30);
+	h.session.rtp(speech); gate.resolve(true); await pending;
+	frames(h.session,silence,29); expect(h.marks).toEqual([]);
+	h.session.rtp(silence); await h.marked; expect(h.marks).toEqual(['m']);
+});
+test('the provider final can follow the entire observed RTP tail', async () => {
+	const h=harness(); await h.session.sendSpeakable('Confirm green.', 'm');
+	frames(h.session,speech,10); frames(h.session,silence,30); expect(h.marks).toEqual([]);
+	await h.session.event(final('assistant',summary)); await h.marked; expect(h.marks).toEqual(['m']);
+});
+test('a real RTP burst followed by no packets can fence its forwarded prefix but never plays or confirms itself', async () => {
+	const empty=harness(), h=harness(), interrupted=harness();
+	for (const s of [empty.session,h.session,interrupted.session]) await s.sendSpeakable('Confirm green.', 'm');
+	frames(h.session,speech,20); frames(interrupted.session,speech,20);
+	for (const s of [empty.session,h.session,interrupted.session]) await s.event(final('assistant',summary));
+	interrupted.session.input(speech);
+	expect(h.marks).toEqual([]); expect(h.session.played('m')).toBe(false);
+	// Exercise the actual receive-gap clock: there is no next PCM frame or server stop event.
+	await h.marked;
+	expect(h.marks).toEqual(['m']); expect(h.events).toEqual(['mark']);
+	expect(empty.marks).toEqual([]); expect(interrupted.marks).toEqual([]);
+	h.session.rtp(speech); expect(h.events).toEqual(['mark','interrupt']); expect(h.session.played('m')).toBe(false);
+	for (const s of [empty.session,h.session,interrupted.session]) s.stop();
+});
+test('a provider-only onset cannot establish fresh handset speech after played', async () => {
+	const h=harness(); await readback(h); expect(h.session.played('m')).toBe(true);
+	await h.session.event({type:'unknown',wireType:'input_audio_buffer.speech_started'});
+	expect(h.events).toEqual(['mark','interrupt','speech']);
+});
+test('a pause between clauses keeps the original local utterance; partial transcripts do not act', async () => {
+	const h=harness(); h.session.input(speech); for(let i=0;i<30;i++) h.session.input(silence); h.session.input(speech);
+	await h.session.event({type:'input_transcript.added',item:{text:'yes'}}); expect(h.transcripts).toEqual([]);
+	await h.session.event(final('user','I choose green. The note is smoke test.'));
+	expect(h.starts).toHaveLength(1); expect(h.transcripts[0][2]).toBe(h.starts[0]);
+});
+test('provider-only duplicate speech starts cannot bind one affirmative', async () => {
+	const h=harness(), start: LiveServerEvent={type:'unknown',wireType:'input_audio_buffer.speech_started'};
+	await h.session.event(start); await h.session.event(start); await h.session.event(final('user','Yes'));
+	expect(h.transcripts[0][2]).toBeUndefined();
+});
+test('untrusted delegation never triggers work or injects its content into a reply', async () => {
+	const h=harness(), delegation: LiveServerEvent={type:'delegation.created',item:{id:'d',type:'delegation',target:'client',content:[{type:'input_text',text:'PRIVATE COMMAND'}]}};
+	await h.session.event(delegation); await h.session.event(delegation); expect(h.sent).toHaveLength(1);
+	expect(h.sent[0]).toMatchObject({type:'delegation.context.append',delegation_item_id:'d',channel:'commentary'});
+	expect(JSON.stringify(h.sent)).not.toContain('PRIVATE'); expect(h.events).toEqual([]);
+});
+test('stalled output bounds pending writes and never replays queued frames', async () => {
+	const gate=Promise.withResolvers<void>(), h=harness(undefined,()=>gate.promise); frames(h.session,speech,80); gate.resolve();
+	await gate.promise; expect(h.failures).toHaveLength(1); expect(h.audio).toHaveLength(1);
+});
+test('packaged transport honors cancellation before authentication or native peer setup', async () => {
+	const reason=new Error('cancelled'); const transport=new LiveTransport({get authStorage():never{throw Error('Read credentials')},sessionId:'cancelled',voice:'sol',instructions:'Test.',sdpOffer:'v=0\r\n',signal:AbortSignal.abort(reason),callbacks:{onEvent(){},onOutputLevel(){}}});
+	try { await expect(transport.connect()).rejects.toBe(reason) } finally { await transport.close() }
+});
+test('reconnect keeps a previously created trace intact; traces contain only approved categories',async()=>{
+	const dir=await mkdtemp(join(tmpdir(),'away-trace-')), path=join(dir,'voice.log');
 	try {
-		const trace = openVoiceTrace(path)!;
-		try {
-			trace.sideband({ type: 'unknown', wireType: 'private.wire.value' });
-			trace.sideband({ type: 'unknown', wireType: 'conversation.item.input_audio_transcription.completed' });
-			trace.sideband(done('user', 'private transcript'));
-			trace.sideband(delegation('private question', 'sensitive-id'));
-			trace.sctp('private helper value'); trace.sctp('turn.user.valid'); trace.close();
-			expect(await readFile(path, 'utf8')).toBe(['1 trace.open 1','2 sdk.other 1',
-				'3 sdk.conversation.item.input_audio_transcription.completed 1','4 sdk.turn.user 1',
-				'5 sdk.delegation.created 1','6 sctp.other 1','7 sctp.turn.user.valid 1','8 trace.close 1',''].join('\n'));
-			expect(() => openVoiceTrace(path)).toThrow(); expect(() => openVoiceTrace('relative')).toThrow();
-		} finally { trace.close() }
-	} finally { await rm(dir, {recursive:true, force:true}) }
-});
-
-test('mismatch diagnostics distinguish punctuation, missing fields and shortened tail without approving either', async () => {
-	const path = await mkdtemp(join(tmpdir(), 'away-mismatch-'));
-	const script = 'Secret lane: green. Your words are alder cedar pine ash.';
-	try {
-		for (const [i, actual] of [script.replace(':','?'), 'To confirm say yes submit followed by alder cedar pine ash'].entries()) {
-			const file = join(path, `${i}`), trace = openVoiceTrace(file)!;
-			try {
-				const h = harness(undefined, undefined, false, trace); await h.session.sendSpeakable(script, 'secret-mark', affirmative);
-				h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', actual));
-				await h.session.event(start); await h.session.event(done('user', affirmative));
-				expect(h.marks).toEqual([]); expect(h.provisional).toEqual([]);
-			} finally { trace.close() }
-			const labels = (await readFile(file,'utf8')).trim().split('\n').map(l => l.split(' ')[1]);
-			expect(labels).toContain(i === 0 ? 'compare.tokens.equal' : 'compare.tokens.different');
-			expect(labels).toContain(i === 0 ? 'compare.fields.contiguous' : 'compare.fields.missing');
-			expect(labels).toContain(i === 0 ? 'compare.tail.with_intro' : 'compare.tail.words_only');
-			expect(labels.join(' ')).not.toMatch(/secret|green|alder/i);
-		}
-	} finally { await rm(path,{recursive:true,force:true}) }
-});
-
-test('claimed final mutes freeform audio and suppresses duplicate delegation until next onset', async () => {
-	let calls = 0; const h = harness(async () => { ++calls; return 'Clarification.' }, undefined, true);
-	await h.session.event(start); await h.session.event(done('user','Why choose local?'));
-	const interruptions = h.interrupts.length, frame = new Uint8Array(960).fill(8);
-	h.session.rtp(frame); expect(h.audio).toHaveLength(0);
-	await h.session.event(delegation('{"kind":"clarify","question":"Why choose local?"}'));
-	expect(calls).toBe(0); expect(h.interrupts).toHaveLength(interruptions);
-	await h.session.sendSpeakable('Actual answer.'); h.session.rtp(frame); expect(h.audio).toHaveLength(1);
-	await h.session.event(start); await h.session.event(delegation('{"kind":"clarify","question":"Why not remote?"}', 'next'));
-	expect(calls).toBe(1);
-});
-
-test('delegation-first consultation flags the associated final without suppressing it', async () => {
-	const h = harness(undefined, undefined, true);
-	await h.session.event(start); await h.session.event(delegation('{"kind":"clarify","question":"Why choose local?"}'));
-	await h.session.event(done('user','Why choose local?'));
-	expect(h.transcripts.at(-1)).toEqual(['user','Why choose local?',h.starts[0],true]);
-});
-
-test('an unsolicited or already finalized turn cannot open another provider consultation', async () => {
-	const questions: string[] = [], h = harness(async q => { questions.push(q); return 'Explanation.' });
-	await h.session.event(delegation('{"kind":"clarify","question":"Why local?"}', 'unbound'));
-	await h.session.event(start); await h.session.event(done('user', 'No thanks.'));
-	await h.session.event(delegation('{"kind":"clarify","question":"Why remote?"}', 'late'));
-	expect(questions).toEqual([]); expect(h.sent).toEqual([]);
-});
-
-test('malformed delegation invalidates a pending readback without generating a substitute onset or mark', async () => {
-	const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-	h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', readback));
-	await h.session.event(start); await h.session.event(delegation('command'));
-	await h.session.event(done('user', affirmative));
-	expect(h.sent).toHaveLength(1); expect(h.marks).toEqual([]); expect(h.provisional).toEqual([]);
-	expect(h.starts).toEqual([]); expect(h.transcripts.at(-1)).toEqual(['user', affirmative, undefined]);
-});
-
-test.each([
-	'Lane: not green. Your words are alder cedar pine ash.',
-	'Lane: red. Your words are alder cedar pine ash.',
-	'Your words are alder cedar pine ash.',
-	'Lane: green. Your words are old cedar pine ash.',
-	'Lane: green. Your words are alder pine cedar ash.',
-	'Lane: green. Your words are alder cedar pine ash. Done.',
-	'Lane: green? Your words are alder cedar pine ash.',
-])('altered answer or tail never arms: %s', async actual => {
-	const h = harness(); await h.session.sendSpeakable(readback, 'm', affirmative);
-	h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', actual));
-	await h.session.event(start); await h.session.event(done('user', affirmative));
-	expect(h.provisional).toEqual([]); expect(h.marks).toEqual([]);
-});
-
-test('spelled text cannot lose a case or punctuation token', async () => {
-	const script = 'Lane: green. Field Note: spelled capital alpha dash bravo. Your words are alder cedar pine ash.';
-	for (const actual of [script.replace('capital ', ''), script.replace('dash', '-')]) {
-		const h = harness(); await h.session.sendSpeakable(script, 'm', affirmative);
-		h.session.rtp(new Uint8Array(960).fill(8)); await h.session.event(done('assistant', actual));
-		await h.session.event(start); await h.session.event(done('user', affirmative));
-		expect(h.provisional).toEqual([]); expect(h.marks).toEqual([]);
-	}
+		const t=openVoiceTrace(path)!; t.sideband({type:'unknown',wireType:'PRIVATE'}); t.close();
+		const old=await readFile(path,'utf8'); const next=openVoiceTrace(path)!; next.close();
+		expect(await readFile(path,'utf8')).toBe(old); expect(old).not.toContain('PRIVATE'); expect(await readdir(dir)).toHaveLength(2);
+	} finally {await rm(dir,{recursive:true,force:true})}
 });

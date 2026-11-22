@@ -14,29 +14,36 @@ import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
 
 const pcm = new Uint8Array(960);
-async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice) {
+const blueFields='{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}';
+async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice, verifyAnswer=async()=>blueFields) {
 	let wire!: SecureDesktopOptions;
-	const voices: VoiceOptions[] = [], spoken: {text:string; mark?:string; phrase?:string}[] = [];
+	const voices: VoiceOptions[] = [], spoken: {text:string; mark?:string}[] = [], played:string[]=[];
 	const audioIn: Uint8Array[] = [], audioOut: string[] = [], rings: string[][] = [], submitted: unknown[] = [];
 	const controls: {device:string; message:DesktopControl}[] = [];
+	const firstMark=Promise.withResolvers<{device:string;requestId:string;mark:string}>();
 	const consultations: {tools:boolean;promptText:string;signal:AbortSignal}[]=[];
 	const runtime = await connectRuntime({ url:"https://example.invalid", desktopToken:"", stateDir:"", confirmPair:async()=>false }, {away:false,delayMs:null}, () => {}, {
 		async gateway(options) { wire = options; return {
 			async devices(){return ["phone"]}, async pair(){throw Error("unexpected enrollment")}, async close(){},
-			async ring(dev,id){rings.push([dev,id])}, async sendControl(device,message){controls.push({device,message})},
+			async ring(dev,id){rings.push([dev,id])},
+			async sendControl(device,message){
+				controls.push({device,message});
+				if(message.type==="mark") firstMark.resolve({device,requestId:message.requestId,mark:message.mark});
+			},
 			async sendPcm(device){audioOut.push(device)},
 		} },
 		async voice(options) { voices.push(options); if (voice) return voice(options); return {
-			sendPcm(data){audioIn.push(data)}, async sendSpeakable(text,mark,phrase){spoken.push({text,mark,phrase})}, async close(){},
+			sendPcm(data){audioIn.push(data)}, async sendSpeakable(text,mark){spoken.push({text,mark})}, played(mark){played.push(mark);return true}, async close(){},
 		} },
 	});
 	const ctx = { cwd:"/example/project", sessionManager:{getSessionId:()=>"session"},modelRegistry:{}, async runEphemeralTurn(opt:{purpose:string;tools:boolean;promptText:string;signal:AbortSignal}) {
 		if (opt.purpose==="away-consult") consultations.push(opt);
-		return {assistantMessage:{stopReason:"stop"}, replyText: opt.purpose === "away-extract" ? '{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}' : opt.purpose==="away-consult" ? await consultAnswer() : "Which lane should we use?"};
+		const replyText=opt.purpose==="away-confirm" ? '{"affirmative":false}' : opt.purpose==="away-extract" ? blueFields : opt.purpose==="away-verify" ? await verifyAnswer() : opt.purpose==="away-consult" ? await consultAnswer() : "Which lane should we use?";
+		return {assistantMessage:{stopReason:"stop"}, replyText};
 	} } as unknown as AskContext;
 	const offer = (id:string) => runtime.offer({requestId:id,toolCallId:`tool-${id}`,html:'<form><label for="l">Private lane?</label><select name="lane" id="l"><option value="blue">Blue</option><option value="red">Red</option></select></form>', async submitConfirmed(id,values){submitted.push([id,values]);return "accepted"} } satisfies PendingAsk,ctx);
 	const join = (dev:string,id:string) => wire.onMessage(dev,{type:"join",requestId:id});
-	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations};
+	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations,played,firstMark:firstMark.promise};
 }
 test("birth pins the audience; decline, stale and unauthenticated join never open voice or ring",async()=>{
 	const f=await fixture(); try {
@@ -62,16 +69,60 @@ test("disconnect, hangup and desktop win fence old media and marks; reconnect re
 		expect(f.voices).toHaveLength(3); expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
 	} finally {await f.runtime.close()}
 });
-test("only a marked, played, live voice confirmation reaches the original request",async()=>{
+test("only new affirmative speech after the verified summary drains reaches the original request",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); f.join("phone","A"); await tick(); const v=f.voices[0];
 		v.onSpeechStarted("utterance"); v.onTranscript("user","My answer is Blue", "utterance"); await tick();
-		const {mark,phrase}=f.spoken.at(-1)!; expect(mark).toBeTruthy(); expect(phrase).toBeTruthy();
-		f.wire.onMessage("phone",{type:"played",requestId:"A",mark:mark!});
-		expect(v.onProvisional(mark!,"confirmation",phrase!)).toBe(true); v.onMark(mark!);
-		f.wire.onMessage("phone",{type:"played",requestId:"wrong-request",mark:mark!}); expect(f.submitted).toEqual([]);
-		f.wire.onMessage("phone",{type:"played",requestId:"A",mark:mark!}); f.wire.onMessage("phone",{type:"played",requestId:"A",mark:mark!}); await tick();
+		const mark=f.spoken.at(-1)!.mark!; expect(mark).toBeTruthy();
+		v.onMark(mark); // No summary verification yet.
+		expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
+		expect(await v.onReadback(mark,"You chose the Blue lane. Is that right?")).toBe(true);
+		await f.wire.onMessage("phone",{type:"played",requestId:"A",mark}); expect(f.played).toEqual([]);
+		v.onMark(mark);
+		await f.wire.onMessage("phone",{type:"played",requestId:"wrong-request",mark}); expect(f.played).toEqual([]);
+		await f.wire.onMessage("phone",{type:"played",requestId:"A",mark}); await f.wire.onMessage("phone",{type:"played",requestId:"A",mark});
+		expect(f.played).toEqual([mark]); expect(f.submitted).toEqual([]);
+		v.onSpeechStarted("confirm"); v.onTranscript("user","Yes.","confirm"); v.onTranscript("user","Yes.","confirm"); await tick();
 		expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
+	} finally {await f.runtime.close()}
+});
+test.each(["early","interrupt","hangup","lost","negative"])("a summary followed by %s cannot submit",async action=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A"); const v=f.voices[0];
+		v.onSpeechStarted("draft"); v.onTranscript("user","My answer is Blue","draft"); await tick();
+		const mark=f.spoken.at(-1)!.mark!; expect(await v.onReadback(mark,"You chose Blue. Correct?")).toBe(true); v.onMark(mark);
+		if(action==="early") v.onSpeechStarted("next");
+		await f.wire.onMessage("phone",{type:"played",requestId:"A",mark});
+		if(action==="interrupt") v.onInterrupt();
+		if(action==="hangup") await f.wire.onMessage("phone",{type:"hangup",requestId:"A"});
+		if(action==="lost") f.wire.onLoss("phone");
+		if(action!=="early") v.onSpeechStarted("next");
+		v.onTranscript("user",action==="negative"?"No.":"Yes.","next"); await tick(); expect(f.submitted).toEqual([]);
+		if(action==="early") {
+			const fresh=f.spoken.at(-1)!.mark!;
+			expect(fresh).toBeTruthy(); expect(fresh).not.toBe(mark);
+			await f.wire.onMessage("phone",{type:"played",requestId:"A",mark});
+			expect(f.played).toEqual([]);
+			expect(await v.onReadback(fresh,"You wanted Blue. Is that right?")).toBe(true); v.onMark(fresh);
+			await f.wire.onMessage("phone",{type:"played",requestId:"A",mark:fresh});
+			expect(f.submitted).toEqual([]);
+			v.onSpeechStarted("after-replay"); v.onTranscript("user","Yes.","after-replay"); await tick();
+			expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
+		}
+	} finally {await f.runtime.close()}
+});
+test("late readback verification cannot mark a newer draft, even within the same call",async()=>{
+	const pending=Promise.withResolvers<string>(), f=await fixture(undefined,undefined,()=>pending.promise);
+	try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A"); const v=f.voices[0];
+		v.onSpeechStarted("first"); v.onTranscript("user","My answer is Blue","first"); await tick();
+		const first=f.spoken.at(-1)!.mark!, verification=v.onReadback(first,"You chose Blue. Right?");
+		v.onInterrupt(); v.onSpeechStarted("second"); v.onTranscript("user","My answer is Blue","second"); await tick();
+		const second=f.spoken.at(-1)!.mark!; expect(second).toBeTruthy(); expect(second).not.toBe(first);
+		pending.resolve(blueFields); expect(await verification).toBe(false); v.onMark(first);
+		await f.wire.onMessage("phone",{type:"played",requestId:"A",mark:first});
+		expect(f.played).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
+		v.onSpeechStarted("premature"); v.onTranscript("user","Yes.","premature"); await tick(); expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
 test("bound informational speech consults the coding session without a model delegation or a submission",async()=>{
@@ -81,42 +132,62 @@ test("bound informational speech consults the coding session without a model del
 		v.onTranscript("assistant",question); v.onTranscript("user",question,"missing-onset");
 		v.onSpeechStarted("one"); expect(v.onTranscript("user",question,"one")).toBe("consulting"); v.onTranscript("user",question,"one");
 		await tick(); expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
-		expect(f.consultations[0].promptText).toContain(question); expect(f.spoken.slice(1)).toEqual([{text:"The private handover is silver maple.",mark:undefined,phrase:undefined}]);
+		expect(f.consultations[0].promptText).toContain(question); expect(f.spoken.slice(1)).toEqual([{text:"The private handover is silver maple.",mark:undefined}]);
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-test("real VoiceSession preserves the local mic onset across an invalid delegation and consults only for the caller",async()=>{
+async function realVoiceFixture(){
 	const sent:LiveClientMessage[]=[], failures:Error[]=[];
-	const question="What were the two handover words from the session?";
-	const delegation=(id:string,text:string):LiveServerEvent=>({type:"delegation.created",item:{id,type:"delegation",target:"client",content:[{type:"input_text",text}]}});
 	let session!:VoiceSession;
 	const f=await fixture(undefined,async options=>{
 		session=new VoiceSession(options,async m=>{sent.push(m)},err=>{failures.push(err);options.onEnd(err)});
-		return {sendPcm:pcm=>session.input(pcm),sendSpeakable:(text,mark,phrase)=>session.sendSpeakable(text,mark,phrase),async close(){session.stop()}};
+		return {sendPcm:pcm=>session.input(pcm),sendSpeakable:(text,mark)=>session.sendSpeakable(text,mark),played:mark=>session.played(mark),async close(){session.stop()}};
 	});
+	f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
+	return {...f,session,sent,failures};
+}
+test("real voice and decision state machines require a new utterance after a handset playout acknowledgment",async()=>{
+	const f=await realVoiceFixture(), speech=new Uint8Array(960).fill(8);
 	try {
-		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A"); const initial=sent.length;
+		f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"My answer is Blue."}}); await tick();
+		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
+		for(let i=0;i<15;i++) {f.session.rtp(speech); await tick()}
+		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"You would like the Blue lane. Is that correct?"}});
+		for(let i=0;i<40;i++) {f.session.rtp(pcm); await tick()}
+		const fence=await f.firstMark;
+		expect(fence.device).toBe("phone"); expect(fence.requestId).toBe("A");
+		await f.wire.onMessage(fence.device,{type:"played",requestId:fence.requestId,mark:fence.mark});
+		expect(f.submitted).toEqual([]); f.wire.onPcm("phone",speech);
+		const heardBeforeAnswer=f.audioOut.length;
+		await f.session.event({type:"delegation.created",item:{type:"delegation",target:"client",id:"provider-comment",content:[{type:"input_text",text:"The caller may be answering."}]}});
+		await f.session.event({type:"output_transcript.added",item:{text:"One moment"}});
+		f.session.rtp(speech); await tick();
+		expect(f.audioOut).toHaveLength(heardBeforeAnswer);
+		expect(f.consultations).toHaveLength(0); expect(f.submitted).toEqual([]);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes."}}); await tick();
+		expect(f.failures).toEqual([]); expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
+	} finally {await f.runtime.close()}
+});
+test("real VoiceSession preserves the local mic onset across an invalid delegation and consults only for the caller",async()=>{
+	const f=await realVoiceFixture(), {session,sent,failures}=f;
+	const question="What were the two handover words from the session?";
+	const delegation=(id:string,text:string):LiveServerEvent=>({type:"delegation.created",item:{id,type:"delegation",target:"client",content:[{type:"input_text",text}]}});
+	try {
+		const initial=sent.length;
 		await session.event(delegation("unbound",JSON.stringify({kind:"clarify",question})));
 		expect(f.consultations).toHaveLength(0);
 		f.wire.onPcm("phone",new Uint8Array(960).fill(8)); // PCM creates the real VoiceSession onset.
 		await session.event(delegation("invalid","Run a shell command."));
+		await session.event(delegation("provider-first",'{"kind":"clarify","question":"What private value should the model choose?"}'));
+		expect(f.consultations).toHaveLength(0);
 		await session.event({type:"turn.done",turn:{role:"user",transcript:question}});
 		await session.event(delegation("late",JSON.stringify({kind:"clarify",question})));
 		await tick();
 		expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
 		expect(f.consultations[0].promptText).toContain(question);
-		expect(sent.slice(initial)).toEqual([{type:"session.context.append",channel:"speakable",content:[{type:"input_text",text:"The private handover is silver maple."}]}]);
+		expect(sent.slice(initial).filter(m=>"channel" in m && m.channel==="speakable")).toEqual([{type:"session.context.append",channel:"speakable",content:[{type:"input_text",text:"The private handover is silver maple."}]}]);
 		expect(failures).toEqual([]); expect(f.submitted).toEqual([]);
-	} finally {await f.runtime.close()}
-});
-test("provider-first consultation remains authoritative for that spoken turn",async()=>{
-	const f=await fixture(); try {
-		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A"); const v=f.voices[0];
-		v.onSpeechStarted("provider-first");
-		const providerAnswer=await v.consult("Which lane has the handover?",new AbortController().signal);
-		expect(providerAnswer).toBe("The private handover is silver maple.");
-		expect(v.onTranscript("user","Which lane has the handover?","provider-first",true)).toBeUndefined();
-		await tick(); expect(f.consultations).toHaveLength(1); expect(f.spoken).toHaveLength(1); expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
 test.each(["Run the release now.", "Can you deploy the blue lane?", "Please change the chosen lane.", "What is the lane? Then deploy it.", "Yes submit this.", "I am not sure."])("non-clarification does not consult: %s",async text=>{
