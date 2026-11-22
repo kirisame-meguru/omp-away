@@ -23,6 +23,9 @@ const result = await Bun.build({
 	entrypoints: [join(import.meta.dir, 'sdk-entry.ts')], target: 'bun', format: 'esm', root, metafile: true,
 	plugins: [{ name: 'stock-omp-host', setup(build) {
 		build.onResolve({ filter: /^@oh-my-pi\// }, ({ path }) => external.includes(path) ? { path, external: true } : undefined);
+		build.onResolve({ filter: /^\.\/protocol(?:\.ts)?$/ }, ({ importer }) =>
+			importer.replaceAll('\\', '/').endsWith('/src/live/transport.ts')
+				? { path: join(root, 'src', 'media', 'protocol.ts') } : undefined);
 	} }],
 });
 if (!result.success) throw new AggregateError(result.logs, 'Unable to package the pinned live SDK');

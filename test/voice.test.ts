@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openVoiceTrace } from '../src/media/trace';
 import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
-import { VoiceSession } from '../src/media/session';
+import { VoiceSession, VoicePlaybackTimeout } from '../src/media/session';
 import { LiveTransport } from '../src/media/live-sdk.generated.mjs';
 import { logger } from '@oh-my-pi/pi-utils';
 
@@ -23,6 +23,107 @@ function harness(verify = async (_m: string, text: string) => text === summary, 
 		onInterrupt: () => { events.push('interrupt') } }, async m => { sent.push(m) }, e => { failures.push(e) });
 	return { session, sent, starts, transcripts, marks, marked: marked.promise, audio, events, failures, verified };
 }
+test('ordered audio deltas retain the whole verified readback without an unrelated RTP stream',async()=>{
+	const h=harness(), audio=Buffer.concat(Array(10).fill(speech)).toString('base64');
+	try {
+		await h.session.sendSpeakable(summary,'m');
+		await h.session.event({type:'output_audio.delta',audio});
+		expect(h.audio).toEqual([]);
+		await h.session.event(final('assistant',summary));
+		expect(h.audio[0]).toEqual(speech);
+		await h.session.event({type:'output_audio.delta',audio:Buffer.alloc(960*30).toString('base64')});
+		await h.marked;
+		expect(h.audio).toHaveLength(40);
+		expect(h.marks).toEqual(['m']); expect(h.failures).toEqual([]);
+	} finally {h.session.stop()}
+},2000);
+test.each(['final-first','tail-first'] as const)('new narration waits for both the previous turn and its audio tail (%s)',async order=>{
+	const h=harness(), menu='The options are tea, coffee, and Other.', old=new Uint8Array(960).fill(2);
+	try {
+		await h.session.event({type:'output_transcript.added',item:{text:'Tea or'}});
+		frames(h.session,old,10);
+		const pending=h.session.sendSpeakable(menu);
+		expect(h.sent).toHaveLength(0);
+		if(order==='final-first') {
+			await h.session.event(final('assistant','Tea or coffee.'));
+			frames(h.session,silence,29); expect(h.sent).toHaveLength(0);
+			h.session.rtp(silence);
+		} else {
+			frames(h.session,silence,30); expect(h.sent).toHaveLength(0);
+			await h.session.event(final('assistant','Tea or coffee.'));
+		}
+		await pending;
+		expect(h.sent).toHaveLength(1);
+		frames(h.session,speech,10); await h.session.event(final('assistant',menu));
+		expect(h.audio).not.toContain(old); expect(h.audio).toContain(speech);
+		expect(h.failures).toEqual([]); expect(h.marks).toEqual([]);
+	} finally {h.session.stop()}
+});
+test.each(['closed','timed-out'] as const)('a narration waiting for a previous turn cannot start after it is %s',async reason=>{
+	vi.useFakeTimers(); const h=harness();
+	try {
+		await h.session.event({type:'output_transcript.added',item:{text:'Previous reply'}});
+		const pending=h.session.sendSpeakable('Tea or coffee?');
+		if(reason==='closed') h.session.stop(); else vi.advanceTimersByTime(20_000);
+		await pending;
+		expect(h.sent).toEqual([]); expect(h.audio).toEqual([]);
+		expect(h.failures).toHaveLength(reason==='closed'?0:1);
+		if(reason==='timed-out') expect(h.failures[0]).toBeInstanceOf(VoicePlaybackTimeout);
+	} finally {h.session.stop();vi.useRealTimers()}
+});
+test('a previous autonomous reply cannot satisfy the newly requested marked readback',async()=>{
+	const h=harness();
+	try {
+		await h.session.event({type:'output_transcript.added',item:{text:summary}});
+		frames(h.session,speech,10);
+		const pending=h.session.sendSpeakable(summary,'m');
+		await h.session.event(final('assistant',summary));
+		frames(h.session,silence,30); await pending;
+		expect(h.verified).toEqual([]); expect(h.audio).toEqual([]); expect(h.marks).toEqual([]);
+		frames(h.session,speech,10); await h.session.event(final('assistant',summary));
+		frames(h.session,silence,30); await h.marked;
+		expect(h.marks).toEqual(['m']);
+	} finally {h.session.stop()}
+});
+test('late timers and bursty RTP cannot stretch buffered speech or omit its first frames',async()=>{
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	try {
+		await h.session.sendSpeakable('Tea or coffee?');
+		for(let i=0;i<50;i++) {if(i%10===0) now+=300; h.session.rtp(speech)}
+		await h.session.event(final('assistant','Tea or coffee?'));
+		// A small initial lead fills the handset jitter buffer, never its 64-frame queue.
+		expect(h.audio.length).toBeLessThanOrEqual(8);
+		for(let i=0;i<30;i++) {now+=31;vi.advanceTimersByTime(31)}
+		// One second of PCM must be delivered on its sample clock, not 50 late timers.
+		expect(h.audio).toHaveLength(50); expect(h.marks).toEqual([]);
+	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
+});
+test('a long playback stall retains every frame without flooding the handset queue',async()=>{
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	try {
+		await h.session.sendSpeakable('Tea or coffee?'); frames(h.session,speech,100);
+		await h.session.event(final('assistant','Tea or coffee?'));
+		const before=h.audio.length;
+		now+=2000;vi.advanceTimersByTime(20);
+		expect(h.audio.length-before).toBeLessThanOrEqual(8);
+		for(let i=0;i<100;i++) {now+=20;vi.advanceTimersByTime(20)}
+		expect(h.audio).toHaveLength(100); expect(h.failures).toEqual([]);
+	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
+});
+test('provider warmup silence is not replayed before the verified question',async()=>{
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	try {
+		await h.session.sendSpeakable('Tea or coffee?');
+		for(let i=0;i<500;i++) {h.session.rtp(silence);now+=20}
+		for(let i=0;i<10;i++) {h.session.rtp(speech);now+=20}
+		await h.session.event(final('assistant','Tea or coffee?'));
+		for(let i=0;i<6;i++) {now+=20;vi.advanceTimersByTime(20)}
+		expect(h.audio).toContain(speech); expect(h.marks).toEqual([]);
+	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
+});
 test('default voice diagnostics contain only bounded categories, not speech or provider identifiers',()=>{
 	const log=vi.spyOn(logger,'info').mockImplementation(()=>{});
 	try {
@@ -77,16 +178,18 @@ test('buffered opening audio without a transcript cannot leave a joined caller w
 		expect(h.audio).toHaveLength(0); expect(h.failures[0]?.message).toMatch(/playback/i);
 	} finally {h.session.stop();vi.useRealTimers()}
 });
-test('a microphone startup transient cannot cancel the unheard opening',async()=>{
-	const h=harness(), question='Tea or coffee?';
+test.each(['before','during'] as const)('microphone startup %s playback cannot cut off the opening',async when=>{
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness(), question='Tea or coffee?';
 	try {
 		await h.session.sendSpeakable(question);
-		h.session.input(speech);
-		for(let i=0;i<30;i++) h.session.input(silence);
+		if(when==='before') h.session.input(speech);
 		frames(h.session,speech,10);
 		await h.session.event(final('assistant',question));
-		expect(h.audio[0]).toBe(speech); expect(h.failures).toEqual([]); expect(h.marks).toEqual([]);
-	} finally {h.session.stop()}
+		if(when==='during') h.session.input(speech);
+		for(let i=0;i<12;i++) {now+=20;vi.advanceTimersByTime(20)}
+		expect(h.audio).toHaveLength(10); expect(h.failures).toEqual([]); expect(h.marks).toEqual([]);
+	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
 });
 test.each(['audible','caller','closed'] as const)('no silent-opening retry after %s', async state=>{
 	vi.useFakeTimers();

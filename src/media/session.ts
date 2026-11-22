@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs';
+import narrate from '../../prompts/narrate.md' with { type: 'text' };
 import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
 import { buildDelegationContextAppend, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import type { VoiceTrace } from './trace';
-const narrate = readFileSync(new URL('../../prompts/narrate.md', import.meta.url), 'utf8');
 
 export interface VoiceCallbacks {
 	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void | 'consulting' | 'deciding';
@@ -15,23 +14,23 @@ export interface VoiceCallbacks {
 }
 interface Reading {
 	target: {mark:string} | {text:string; retry:boolean};
-	phase: 'sending' | 'awaiting' | 'verifying' | 'verified' | 'discarding' | 'marked' | 'played' | 'confirming';
+	phase: 'waiting' | 'sending' | 'awaiting' | 'verifying' | 'verified' | 'discarding' | 'marked' | 'played' | 'confirming';
 	candidate?: string;
 	expires: number;
-	frames: { pcm: Uint8Array; received: number }[];
+	frames: Uint8Array[];
 	cursor: number;
 	playStart?: number;
-	nextFrameAt: number;
 	lastVoicedAt: number;
 	audibleFrames: number;
 	quietFrames: number;
 	lastFrameAt: number;
 }
 interface Onset { id: string; providerSeen: boolean }
-// RTP and sideband have no common watermark. Decoded quiet PCM or a bounded
-// receive gap after real voiced output fences only the forwarded PCM prefix.
-// Neither endpoint observation means physical handset playout.
+// Ordered PCM and assistant-final events do not identify physical playout.
+// Decoded quiet PCM or a bounded receive gap after real voiced output fences
+// only the forwarded PCM prefix; the handset must acknowledge presentation.
 const FRAME_MS = 20, QUIET_FRAMES = 30, INACTIVE_MS = 1200;
+const PLAYOUT_LEAD_MS = 100;
 const FIRST_VOICE_MS = 10_000;
 const FIRST_PLAYBACK_MS = 20_000;
 export class VoicePlaybackTimeout extends Error {
@@ -71,6 +70,12 @@ export class VoiceSession {
 	#revision = 0;
 	#writing = false;
 	#sending = false;
+	#assistantActive = false;
+	#outputPending = false;
+	#quietOutput = QUIET_FRAMES;
+	#lastOutputVoiceAt = -Infinity;
+	#idleWait?: () => void;
+	#idleWake?: NodeJS.Timeout;
 	#seen = new Set<string>();
 	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace) {}
 
@@ -78,9 +83,27 @@ export class VoiceSession {
 		clearTimeout(this.#expiry); this.#clearAudioDeadline(); this.#clearWake();
 		if (this.#reading) this.#reading.frames.length = 0;
 		this.#reading = undefined;
+		clearTimeout(this.#idleWake); this.#idleWake = undefined;
+		const idle = this.#idleWait; this.#idleWait = undefined; idle?.();
 	}
 	#clearAudioDeadline() {
 		clearTimeout(this.#awaitingAudio); this.#awaitingAudio = undefined;
+	}
+	#outputIdle() {
+		const idle = !this.#assistantActive && (this.#quietOutput >= QUIET_FRAMES || performance.now() - this.#lastOutputVoiceAt >= INACTIVE_MS);
+		if (idle) this.#outputPending = false;
+		return idle;
+	}
+	#releaseIdle() {
+		if (!this.#idleWait || this.#assistantActive) return;
+		clearTimeout(this.#idleWake); this.#idleWake = undefined;
+		if (this.#outputIdle()) {
+			this.#clearAudioDeadline();
+			const resume = this.#idleWait; this.#idleWait = undefined; resume();
+		} else {
+			this.#idleWake = setTimeout(() => this.#releaseIdle(), Math.max(1, Math.ceil(this.#lastOutputVoiceAt + INACTIVE_MS - performance.now())));
+			this.#idleWake.unref();
+		}
 	}
 	stop() {
 		this.#live = false; this.#onset = undefined; this.#seen.clear(); this.#clearReadback();
@@ -111,9 +134,9 @@ export class VoiceSession {
 	#speech(provider: boolean) {
 		this.trace?.step(provider ? 'onset.provider' : 'onset.local');
 		const waiting = this.#reading;
-		if (!provider && waiting && 'text' in waiting.target && waiting.playStart === undefined) {
-			// Mic energy is not recognized speech. A tap or capture startup must
-			// not discard an unheard question or cancel its playback deadline.
+		if (!provider && waiting && 'text' in waiting.target) {
+			// Mic energy is not recognized speech. Capture startup must not cut
+			// narration, including when the phone opens its mic at first playback.
 			waiting.candidate ??= crypto.randomUUID();
 			return;
 		}
@@ -168,12 +191,16 @@ export class VoiceSession {
 			return;
 		}
 		if (r.playStart === undefined) { r.playStart = now; this.#clearAudioDeadline(); this.trace?.step('rtp.replay.started') }
-		const frame = r.frames[r.cursor];
-		// Respect real receive gaps as well as the 20 ms sample duration.
-		const due = Math.max(r.nextFrameAt, r.playStart + (frame.received - r.frames[0].received));
+		// PCM already contains pauses. Network arrival gaps and late JS timers
+		// must not become extra silence; keep a small lead for the phone buffer.
+		let due = r.playStart + r.cursor * FRAME_MS - PLAYOUT_LEAD_MS;
+		if (now - due > PLAYOUT_LEAD_MS) {
+			// A long host stall must not flood the handset's bounded queue.
+			r.playStart = now - r.cursor * FRAME_MS;
+			due = now - PLAYOUT_LEAD_MS;
+		}
 		if (due > now) { this.#wakeAtTime(r, due); return }
-		++r.cursor; r.nextFrameAt = now + FRAME_MS;
-		const write = this.cb.onAudio(frame.pcm);
+		const write = this.cb.onAudio(r.frames[r.cursor++]);
 		if (!write) { this.#pump(r); return }
 		this.#writing = true;
 		void write.then(() => {
@@ -189,9 +216,11 @@ export class VoiceSession {
 	rtp(pcm: Uint8Array) {
 		if (!this.#live) return;
 		if (pcm.length !== 960) throw new Error('Invalid voice output');
-		const r = this.#reading;
+		const r = this.#reading, voiced = energy(pcm) >= 64 ** 2;
+		if (voiced) { this.#quietOutput = 0; this.#lastOutputVoiceAt = performance.now() }
+		else this.#quietOutput = Math.min(QUIET_FRAMES, this.#quietOutput + 1);
+		if (r?.phase === 'waiting') { if (this.#quietOutput >= QUIET_FRAMES) this.#releaseIdle(); return }
 		if (this.#cutOutput || !r || r.phase==='discarding') return; // Never stream speculative audio.
-		const voiced = energy(pcm) >= 64 ** 2;
 		if (r.phase === 'marked' || r.phase === 'played' || r.phase === 'confirming') {
 			if (voiced) this.#interrupt(); return;
 		}
@@ -203,7 +232,10 @@ export class VoiceSession {
 		// The peer transfers a distinct immutable buffer per decoded frame.
 		// Capture from the append itself: a gap is not a reliable start marker.
 		const received = performance.now(); r.lastFrameAt = received;
-		r.frames.push({pcm, received});
+		// Keep only 100 ms of pre-roll, not seconds of provider warmup silence.
+		// This retains quiet consonant onsets without replaying the setup delay.
+		if (!r.audibleFrames && !voiced && r.frames.length===5) r.frames.shift();
+		r.frames.push(pcm);
 		if (voiced) {
 			if (++r.audibleFrames === 1) {
 				this.trace?.step('rtp.first_voiced');
@@ -231,13 +263,27 @@ export class VoiceSession {
 		if (mark !== undefined && (!bounded(mark, 128) || this.#onset || this.#ambiguous)) throw new Error('Cannot bind voice readback');
 		const now = performance.now();
 		const r:Reading = this.#reading = { target:mark === undefined ? {text,retry} : {mark}, phase:'sending', expires:now + READBACK_LIFETIME,
-			frames:[], cursor:0, nextFrameAt:0, lastVoicedAt:-Infinity, audibleFrames:0, quietFrames:0, lastFrameAt:-Infinity };
+			frames:[], cursor:0, lastVoicedAt:-Infinity, audibleFrames:0, quietFrames:0, lastFrameAt:-Infinity };
 		this.#expiry = setTimeout(() => {
 			if (r !== this.#reading) return;
 			this.#interrupt();
 			if ('text' in r.target) this.fail(new UngroundedSpeechError());
 		}, READBACK_LIFETIME); this.#expiry.unref();
-		this.#cutOutput = false; this.#sending = true;
+		this.#cutOutput = false;
+		if (this.#outputPending && !this.#outputIdle()) {
+			// A live model can start replying before the caller's final transcript.
+			// Never append narration into that turn or capture its clipped audio tail.
+			r.phase = 'waiting'; this.trace?.step('speakable.waiting');
+			const idle = Promise.withResolvers<void>(); this.#idleWait = idle.resolve;
+			this.#awaitingAudio = setTimeout(() => {
+				if (this.#reading === r) { this.#interrupt(); this.fail(new VoicePlaybackTimeout()) }
+			}, FIRST_PLAYBACK_MS);
+			this.#awaitingAudio.unref(); this.#releaseIdle();
+			await idle.promise;
+			if (!this.#live || this.#reading !== r || revision !== this.#revision) return;
+			r.phase = 'sending';
+		}
+		this.#sending = true;
 		// A successful context append is not audio. Retry only unmarked speech;
 		// never replay or authorize a decision readback from this timer.
 		if (mark === undefined) {
@@ -270,7 +316,10 @@ export class VoiceSession {
 				case 'unknown':
 					if (event.wireType === 'input_audio_buffer.speech_started') this.#speech(true);
 					else if (!mutedReply && ['turn.interrupted','response.cancelled','output_audio_buffer.cleared'].includes(event.wireType)) this.#interrupt();
-					else if (!mutedReply && event.wireType === 'output_audio_buffer.started' && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r);
+					else if (event.wireType === 'output_audio_buffer.started') {
+						this.#assistantActive = true; this.#outputPending = true;
+						if (!mutedReply && r && r.phase !== 'waiting' && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r);
+					}
 					return;
 				case 'delegation.created': {
 					const id = event.item.id;
@@ -282,15 +331,26 @@ export class VoiceSession {
 				}
 				case 'error': throw new Error('Codex voice connection failed');
 				case 'input_transcript.added': if (!this.#onset && r && !r.candidate) this.#interrupt(); return;
-				case 'output_audio.delta': case 'output_transcript.added':
-					if (!mutedReply && r && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r); return;
+				case 'output_audio.delta': {
+					if (!event.audio || event.audio.length > 64000 || !/^[A-Za-z0-9+/]+$/.test(event.audio)) throw new Error('Invalid ordered voice audio');
+					const pcm = Buffer.from(event.audio, 'base64');
+					if (!pcm.length || pcm.length % 960 !== 0) throw new Error('Invalid ordered voice audio');
+					for (let offset = 0; offset < pcm.length; offset += 960) this.rtp(pcm.subarray(offset, offset + 960));
+					return;
+				}
+				case 'output_transcript.added':
+					this.#assistantActive = true; this.#outputPending = true;
+					if (!mutedReply && r && r.phase !== 'waiting' && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r); return;
 				case 'turn.done': break;
 				default: return;
 			}
 			const { role, transcript } = event.turn;
+			if (role === 'assistant') this.#assistantActive = false;
 			if (role === 'assistant' && mutedReply) return;
 			if (!bounded(transcript)) { this.#onset = undefined; this.#ambiguous = false; this.#interrupt(); return }
 			if (role === 'assistant') {
+				this.#releaseIdle();
+				if (r?.phase === 'waiting') return;
 				this.cb.onTranscript(role, transcript);
 				if (!r) return;
 				if (r.phase==='discarding') {await this.#retrySpeech(r);return}

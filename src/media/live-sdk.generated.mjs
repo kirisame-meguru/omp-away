@@ -309,6 +309,30 @@ function chunkLiveContext(text) {
   return chunks;
 }
 
+// src/media/protocol.ts
+import { isRecord as isRecord2 } from "@oh-my-pi/pi-utils";
+function parseLiveServerEvent2(payload) {
+  let value = payload;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!isRecord2(value) || value.type !== "session.output_audio.delta")
+    return parseLiveServerEvent(value);
+  const { delta, start_ms: start, end_ms: end } = value;
+  if (typeof delta !== "string" || typeof start !== "number" || typeof end !== "number" || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0) {
+    return { type: "error", message: "Invalid ordered voice audio" };
+  }
+  const duration = end - start;
+  if (duration <= 0 || duration > 1000 || duration % 20 !== 0 || delta.length !== duration * 64 || !/^[A-Za-z0-9+/]+$/.test(delta)) {
+    return { type: "error", message: "Invalid ordered voice audio" };
+  }
+  return { type: "output_audio.delta", audio: delta };
+}
+
 // node_modules/@oh-my-pi/pi-coding-agent/src/config/registry.ts
 import { logger as logger2, parseFlag } from "@oh-my-pi/pi-utils";
 function settingsOf(scope) {
@@ -1142,7 +1166,7 @@ class LiveTransport {
   #handleSidebandEvent(payload) {
     if (this.#state === "closing" || this.#state === "closed")
       return;
-    const event = parseLiveServerEvent(payload);
+    const event = parseLiveServerEvent2(payload);
     if (!event)
       return;
     try {
@@ -1152,7 +1176,7 @@ class LiveTransport {
   #handleServerEvent(payload) {
     if (this.#state === "closing" || this.#state === "closed")
       return;
-    const event = parseLiveServerEvent(payload);
+    const event = parseLiveServerEvent2(payload);
     if (!event || this.#sideband?.readyState === WebSocket.OPEN && event.type !== "error")
       return;
     try {
