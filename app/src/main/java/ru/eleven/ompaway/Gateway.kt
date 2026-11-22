@@ -14,6 +14,8 @@ class Gateway : Application() {
     internal lateinit var store: InboxStore
         private set
     private val main = Handler(Looper.getMainLooper())
+    private val audioSettings by lazy { CallAudioSettings(this) }
+    internal val speakerEnabled get() = audioSettings.speakerEnabled
     private val tokenState = TokenUpdates()
     @Volatile private var session: Session? = null
     private var observer: (() -> Unit)? = null
@@ -51,6 +53,15 @@ class Gateway : Application() {
 
     private fun current() = session ?: Session().also { session = it }
     private fun changed() { observer?.invoke() }
+
+    internal fun setSpeakerEnabled(enabled: Boolean) {
+        if (call?.setSpeakerEnabled(enabled) == false) {
+            status = "Audio route could not be changed. Previous setting kept."
+        } else {
+            audioSettings.speakerEnabled = enabled
+        }
+        changed()
+    }
 
     internal fun foreground(render: () -> Unit) {
         observer = render

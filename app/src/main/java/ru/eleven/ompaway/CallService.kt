@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -12,6 +13,7 @@ import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
@@ -50,12 +52,45 @@ internal class CallService(
     private var ownsFocus = false
     private var previousMode: Int? = null
     private var started = false
+    private var speakerEnabled = CallAudioSettings(app).speakerEnabled
+    private var routedSpeaker = false
+    private var previousSpeakerphone: Boolean? = null
 
     // Serial channel reader owns each PCM array; do not copy or return it to a pool.
     fun receive(pcm: ByteArray) { if (live.get() && (pcm.size != BYTES || !queue.offer(pcm))) fail() }
     fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail() }
 
     fun invalidate() { live.set(false); captureReady.countDown() }
+
+    fun setSpeakerEnabled(enabled: Boolean): Boolean {
+        if (!live.get()) return false
+        if (started) {
+            try { if (!routeSpeaker(enabled)) return false }
+            catch (_: RuntimeException) { return false }
+        }
+        speakerEnabled = enabled
+        return true
+    }
+
+    @Suppress("DEPRECATION")
+    private fun routeSpeaker(enabled: Boolean): Boolean {
+        if (enabled) {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val speaker = audio.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    ?: return false
+                if (!audio.setCommunicationDevice(speaker)) return false
+            } else {
+                if (previousSpeakerphone == null) previousSpeakerphone = audio.isSpeakerphoneOn
+                audio.isSpeakerphoneOn = true
+            }
+            routedSpeaker = true
+        } else if (routedSpeaker) {
+            if (Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice()
+            else audio.isSpeakerphoneOn = false
+            routedSpeaker = false
+        }
+        return true
+    }
 
     fun start() {
         if (started || !live.get()) return
@@ -68,6 +103,7 @@ internal class CallService(
         try {
             previousMode = audio.mode
             audio.mode = AudioManager.MODE_IN_COMMUNICATION
+            check(routeSpeaker(speakerEnabled)) { "Speaker unavailable" }
             worker("Away playout", ::playback)
         } catch (_: RuntimeException) { fail() }
     }
@@ -195,6 +231,7 @@ internal class CallService(
         }
     }
 
+    @Suppress("DEPRECATION")
     override fun close() {
         invalidate()
         synchronized(gate) {
@@ -202,6 +239,12 @@ internal class CallService(
             output?.let { runCatching { it.pause(); it.flush() } }
         }
         queue.clear()
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (routedSpeaker) runCatching { audio.clearCommunicationDevice() }
+        } else if (audio.mode == AudioManager.MODE_IN_COMMUNICATION) {
+            previousSpeakerphone?.let { runCatching { audio.isSpeakerphoneOn = it } }
+        }
+        routedSpeaker = false; previousSpeakerphone = null
         previousMode?.let { if (audio.mode == AudioManager.MODE_IN_COMMUNICATION) runCatching { audio.mode = it } }
         previousMode = null
         if (ownsFocus) { audio.abandonAudioFocusRequest(focus); ownsFocus = false }

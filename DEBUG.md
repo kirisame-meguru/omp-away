@@ -28,6 +28,18 @@ adb -s $serial shell am start -n ru.eleven.ompaway/.InboxActivity
 
 Do not use `:app:connectedDebugAndroidTest` on a paired device: its cleanup uninstalls the app and removes pairing. Use the explicit serial-directed install/instrument commands above to preserve data. A physical phone requires its owner's permission before installing or starting an audio test; emulator results do not prove physical-phone playback.
 
+## Speaker mode
+
+Use **Speaker: on/off** in the inbox before or during a call. The choice is saved for later calls; it defaults to off. On selects the built-in loudspeaker without changing volume. Off returns routing to Android's normal communication-device policy, including a connected headset. Hangup releases the app's speaker route and restores its previous audio mode.
+
+For authorized physical-phone debugging, the isolated audio test can enable the same saved setting without opening the paired inbox. It plays a short tone and verifies the hardware speaker route:
+
+```powershell
+adb -s $serial shell am instrument -w -e speakerMode on -e class ru.eleven.ompaway.CallAudioTest#joinedAudioCapturesAndReachesHardwareWithoutOpeningThePairedInbox ru.eleven.ompaway.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+This deliberately leaves speaker mode enabled. Use the inbox toggle, or the same command with `speakerMode off`, to turn it off. The optional desktop speech bridge accepts the same argument.
+
 ## Pair, ring and call
 
 1. Generate a fresh pairing invite on your own desktop. Scan it in the app (camera permission is optional if using **Pair from clipboard**). Compare **all twelve emoji** in order on both screens and approve both. Do not screenshot or paste the QR payload in logs. An invalid/used ticket, mismatch or changed pin must not allow a call. To replace a pairing intentionally, revoke the old route on the desktop/relay and clear the app's storage via Settings before obtaining a new invite. There is no trust-on-error option.

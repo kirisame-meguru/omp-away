@@ -19,6 +19,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.ToggleButton
 import com.google.zxing.integration.android.IntentIntegrator
 import com.journeyapps.barcodescanner.CaptureActivity
 import java.text.DateFormat
@@ -72,6 +73,11 @@ class InboxActivity : Activity() {
         text(app.status, 16)
         notice?.let { text(it, 14) }
         app.pushWarning?.let { text(it, 14) }
+        column.addView(ToggleButton(this).apply {
+            textOn = "Speaker: on"; textOff = "Speaker: off"; isAllCaps = false
+            isChecked = app.speakerEnabled
+            setOnCheckedChangeListener { _, enabled -> if (resumed) app.setSpeakerEnabled(enabled) }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         if (!Invites.allowed(this)) {
             text("Notifications are off. Open this inbox to see pending requests.", 14)
             button("Enable invitations") {

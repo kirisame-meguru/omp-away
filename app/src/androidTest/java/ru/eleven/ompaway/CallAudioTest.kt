@@ -2,8 +2,10 @@ package ru.eleven.ompaway
 
 import android.app.Activity
 import android.content.Intent
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -17,10 +19,43 @@ import org.junit.Test
 import kotlin.math.sin
 
 class CallAudioTest {
+    @Test fun speakerPreferenceRoutesNewCallsAndDoesNotLeakIntoTheNextCall() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val activity = instrumentation.startActivitySync(Intent(context, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val preferences = context.getSharedPreferences("away.audio.v1", android.content.Context.MODE_PRIVATE)
+        val previous = preferences.getBoolean("speaker", false)
+        val audio = context.getSystemService(AudioManager::class.java)
+        val previousMode = audio.mode
+        val failures = AtomicInteger()
+        var call: CallService? = null
+        try {
+            for (speaker in listOf(true, false)) {
+                check(preferences.edit().putBoolean("speaker", speaker).commit())
+                val next = CallService(context, "route-test", {}, {}, { failures.incrementAndGet() })
+                call = next
+                instrumentation.runOnMainSync { next.start() }
+                awaitSpeaker(audio, speaker)
+                if (speaker) {
+                    instrumentation.runOnMainSync { assertTrue(next.setSpeakerEnabled(false)) }
+                    awaitSpeaker(audio, false)
+                    instrumentation.runOnMainSync { assertTrue(next.setSpeakerEnabled(true)) }
+                    awaitSpeaker(audio, true)
+                }
+                instrumentation.runOnMainSync { next.close() }
+                assertEquals("Call audio mode leaked after hangup", previousMode, audio.mode)
+            }
+            assertEquals("Audio routing failed", 0, failures.get())
+        } finally {
+            instrumentation.runOnMainSync { call?.close(); activity.finish() }
+            check(preferences.edit().putBoolean("speaker", previous).commit())
+        }
+    }
     @Test fun isolatedDesktopSpeechReachesHardwareWithMicrophoneRunning() {
         val port = InstrumentationRegistry.getArguments().getString("desktopAudioPort")?.toIntOrNull()
         assumeTrue("Requires the isolated desktop voice probe over adb reverse", port != null && port in 1024..65535)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        configureSpeaker()
         val context = instrumentation.targetContext
         val activity = instrumentation.startActivitySync(Intent(context, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
@@ -44,6 +79,7 @@ class CallAudioTest {
                         else -> error("Invalid isolated audio packet")
                     }
                     assertEquals("Real audio failed", 0, failures.get())
+                    if (CallAudioSettings(context).speakerEnabled) awaitSpeaker(context.getSystemService(AudioManager::class.java), true)
                     assertEquals("Opening and options did not physically drain", 2, played.get())
                 } finally { instrumentation.runOnMainSync { call.close() } }
             }
@@ -52,6 +88,7 @@ class CallAudioTest {
     @Test fun joinedAudioCapturesAndReachesHardwareWithoutOpeningThePairedInbox() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        configureSpeaker()
         val activity = instrumentation.startActivitySync(Intent(context, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val audio = context.getSystemService(AudioManager::class.java)
         val captured = CountDownLatch(1)
@@ -93,6 +130,7 @@ class CallAudioTest {
             assertTrue("Output never reached a physical presentation timestamp", drained.await(8, TimeUnit.SECONDS))
             assertEquals("Audio lifecycle failed", 0, failures.get())
             assertEquals("Playback must make the call ready exactly once", 1, ready.get())
+            if (CallAudioSettings(context).speakerEnabled) awaitSpeaker(audio, true)
             assertTrue("Playback started before the microphone route was ready", captureAtReady.get() > 0)
             val status = android.os.Bundle().apply {
                 putInt("captureFrames", frames.get()); putInt("hotMicFrames", loud.get())
@@ -101,5 +139,22 @@ class CallAudioTest {
             }
             instrumentation.sendStatus(0, status)
         } finally { instrumentation.runOnMainSync { call.close(); activity.finish() } }
+    }
+    private fun configureSpeaker() {
+        val mode = InstrumentationRegistry.getArguments().getString("speakerMode") ?: return
+        require(mode == "on" || mode == "off") { "speakerMode must be on or off" }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val app = instrumentation.targetContext.applicationContext as Gateway
+        instrumentation.runOnMainSync { app.setSpeakerEnabled(mode == "on") }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun awaitSpeaker(audio: AudioManager, enabled: Boolean) {
+        fun selected() = if (Build.VERSION.SDK_INT >= 31)
+            audio.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        else audio.isSpeakerphoneOn
+        val deadline = SystemClock.elapsedRealtime() + 3000
+        while (selected() != enabled && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
+        assertEquals("Wrong communication output route", enabled, selected())
     }
 }
