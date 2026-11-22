@@ -16,8 +16,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
+import android.util.Log
 import java.io.IOException
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -30,6 +32,7 @@ internal class CallService(
     private val send: (ByteArray) -> Unit,
     private val played: (String) -> Unit,
     private val failed: () -> Unit,
+    private val ready: () -> Unit = {},
 ) : AutoCloseable {
     private val app = context.applicationContext
     private val audio = checkNotNull(app.getSystemService(AudioManager::class.java))
@@ -41,6 +44,7 @@ internal class CallService(
     private val queue = ArrayBlockingQueue<Any>(64) // 1.28 seconds; never acknowledge discarded audio
     private val gate = Any()
     private val live = AtomicBoolean(true)
+    private val captureReady = CountDownLatch(1)
     private var recording: AudioRecord? = null
     private var output: AudioTrack? = null
     private var ownsFocus = false
@@ -51,7 +55,7 @@ internal class CallService(
     fun receive(pcm: ByteArray) { if (live.get() && (pcm.size != BYTES || !queue.offer(pcm))) fail() }
     fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail() }
 
-    fun invalidate() { live.set(false) }
+    fun invalidate() { live.set(false); captureReady.countDown() }
 
     fun start() {
         if (started || !live.get()) return
@@ -65,7 +69,6 @@ internal class CallService(
             previousMode = audio.mode
             audio.mode = AudioManager.MODE_IN_COMMUNICATION
             worker("Away playout", ::playback)
-            worker("Away capture", ::capture)
         } catch (_: RuntimeException) { fail() }
     }
 
@@ -75,7 +78,7 @@ internal class CallService(
     }, name).start()
 
     private fun fail() {
-        if (live.getAndSet(false)) failed()
+        if (live.getAndSet(false)) { captureReady.countDown(); failed() }
     }
 
     private fun capture() {
@@ -96,6 +99,7 @@ internal class CallService(
             val buffer = ByteArray(BYTES)
             var offset = 0
             var nextPrivacyCheck = 0L
+            var first = true
             while (live.get()) {
                 val now = SystemClock.elapsedRealtime()
                 if (now >= nextPrivacyCheck) {
@@ -108,6 +112,7 @@ internal class CallService(
                 offset += n
                 if (offset == BYTES) {
                     synchronized(gate) { if (live.get()) send(buffer) } // channel takes its own snapshot synchronously
+                    if (first) { first = false; captureReady.countDown() }
                     offset = 0
                 }
             }
@@ -129,7 +134,7 @@ internal class CallService(
             check(track.state == AudioTrack.STATE_INITIALIZED)
             synchronized(gate) {
                 if (!live.get()) return
-                output = track; track.play()
+                output = track
             }
             var framesWritten = 0L
             val silence = ByteArray(BYTES)
@@ -138,8 +143,21 @@ internal class CallService(
             while (live.get()) {
                 when (val next = queue.poll(40, TimeUnit.MILLISECONDS)) {
                     is ByteArray -> {
+                        if (framesWritten == 0L) {
+                            // Opening the microphone can reconfigure the phone's voice route.
+                            // Finish that before playing any of the question.
+                            worker("Away capture", ::capture)
+                            if (!captureReady.await(1500, TimeUnit.MILLISECONDS)) throw IOException("Microphone not ready")
+                            synchronized(gate) {
+                                if (!live.get()) return
+                                track.play()
+                            }
+                        }
                         write(track, next)
                         framesWritten += BYTES / 2
+                        if (framesWritten == BYTES / 2L && live.get()) {
+                            ready()
+                        }
                         receivedAudio = true
                     }
                     is String -> {
@@ -156,6 +174,7 @@ internal class CallService(
                                 write(track, silence); padding += BYTES / 2; framesWritten += BYTES / 2
                             } else Thread.sleep(5)
                         }
+                        Log.i("AwayAudio", "playout_fence underruns=${track.underrunCount}")
                         synchronized(gate) { if (live.get()) played(next) }
                         receivedAudio = false
                     }
@@ -177,7 +196,7 @@ internal class CallService(
     }
 
     override fun close() {
-        live.set(false)
+        invalidate()
         synchronized(gate) {
             recording?.let { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) runCatching { it.stop() } }
             output?.let { runCatching { it.pause(); it.flush() } }

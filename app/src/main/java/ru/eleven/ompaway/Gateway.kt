@@ -19,7 +19,7 @@ class Gateway : Application() {
     private var observer: (() -> Unit)? = null
     private var syncJob: ((Boolean) -> Unit)? = null
     private val timeout = Runnable { finishSync(true) }
-    private val joinTimeout = Runnable { if (call != null && !talking) endCall("Desktop did not join. Request remains pending.") }
+    private val joinTimeout = Runnable { if (call != null && !talking) endCall("Voice did not become ready. Request remains pending.") }
     @Volatile private var call: CallService? = null
     internal val callId: String? get() = call?.id
     private var endingId: String? = null
@@ -163,10 +163,16 @@ class Gateway : Application() {
         lateinit var media: CallService
         media = CallService(this, id, { pcm -> s.channel.sendPcm(pcm) }, { mark -> s.channel.played(id, mark) }, {
             main.post { if (call === media) endCall("Audio interrupted. Request remains pending.") }
+        }, {
+            main.post {
+                if (call === media && observer != null) {
+                    main.removeCallbacks(joinTimeout); talking = true; status = "In call"; changed()
+                }
+            }
         })
         call = media; talking = false; status = "Joining…"
         Invites.cancel(this, id)
-        main.postDelayed(joinTimeout, 18_000)
+        main.postDelayed(joinTimeout, 90_000)
         s.channel.join(id); changed()
     }
 
@@ -227,7 +233,7 @@ class Gateway : Application() {
             stream = media
             ui {
                 if (media != null && call === media && observer != null && verifiedInbox && requestId in store.state.pending) {
-                    main.removeCallbacks(joinTimeout); talking = true; status = "In call"
+                    status = "Waiting for the desktop's voice…"
                     media.start(); changed()
                 } else channel.hangup(requestId)
             }

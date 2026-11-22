@@ -59,7 +59,11 @@ class CallAudioTest {
         val failures = AtomicInteger()
         val loud = AtomicInteger()
         val frames = AtomicInteger()
+        val microphone = CountDownLatch(1)
+        val ready = AtomicInteger()
+        val captureAtReady = AtomicInteger(-1)
         val call = CallService(context, "audio-test", { pcm ->
+            microphone.countDown()
             var energy = 0.0
             for (i in pcm.indices step 2) {
                 val sample = ((pcm[i].toInt() and 255) or (pcm[i + 1].toInt() shl 8)).toShort().toInt()
@@ -67,10 +71,14 @@ class CallAudioTest {
             }
             if (energy / 480 >= 800.0 * 800) loud.incrementAndGet()
             if (frames.incrementAndGet() >= 50) captured.countDown()
-        }, { if (it == "drain") drained.countDown() }, { failures.incrementAndGet(); drained.countDown() })
+        }, { if (it == "drain") drained.countDown() }, { failures.incrementAndGet(); drained.countDown() }, {
+            captureAtReady.set(frames.get()); ready.incrementAndGet()
+        })
         try {
             instrumentation.runOnMainSync { call.start() }
-            assertTrue("Microphone did not capture", captured.await(5, TimeUnit.SECONDS))
+            // Real AudioRecord startup is asynchronous; test against its first callback.
+            assertFalse("Microphone started before any desktop audio", microphone.await(1, TimeUnit.SECONDS))
+            assertEquals("Call became ready before any desktop audio", 0, ready.get())
             // This tone tests AudioTrack, not model speech or confirmation authority.
             for (frame in 0 until 50) {
                 val pcm = ByteArray(960)
@@ -81,8 +89,11 @@ class CallAudioTest {
                 call.receive(pcm)
             }
             call.mark("drain")
+            assertTrue("Microphone did not start with playback", captured.await(5, TimeUnit.SECONDS))
             assertTrue("Output never reached a physical presentation timestamp", drained.await(8, TimeUnit.SECONDS))
             assertEquals("Audio lifecycle failed", 0, failures.get())
+            assertEquals("Playback must make the call ready exactly once", 1, ready.get())
+            assertTrue("Playback started before the microphone route was ready", captureAtReady.get() > 0)
             val status = android.os.Bundle().apply {
                 putInt("captureFrames", frames.get()); putInt("hotMicFrames", loud.get())
                 putInt("communicationDeviceType", if (Build.VERSION.SDK_INT >= 31) audio.communicationDevice?.type ?: -1 else -1)
