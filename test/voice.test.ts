@@ -40,12 +40,20 @@ test('silent output after join retries the brief once, then signals failure rath
 		expect(failures[0]?.message).toMatch(/no voice audio/i);
 	} finally {session.stop();vi.useRealTimers()}
 });
+test('buffered opening audio without a transcript cannot leave a joined caller waiting silently',async()=>{
+	vi.useFakeTimers(); const h=harness();
+	try {
+		await h.session.sendSpeakable('Which lane should we use?'); frames(h.session,speech,10);
+		vi.advanceTimersByTime(30_000);
+		expect(h.audio).toHaveLength(0); expect(h.failures[0]?.message).toMatch(/playback/i);
+	} finally {h.session.stop();vi.useRealTimers()}
+});
 test.each(['audible','caller','closed'] as const)('no silent-opening retry after %s', async state=>{
 	vi.useFakeTimers();
 	const h=harness();
 	try {
 		await h.session.sendSpeakable('Which lane should we use?');
-		if(state==='audible') h.session.rtp(speech);
+		if(state==='audible') {frames(h.session,speech,10); await h.session.event(final('assistant','Which lane should we use?'))}
 		else if(state==='caller') h.session.input(speech);
 		else h.session.stop();
 		vi.advanceTimersByTime(30_000);

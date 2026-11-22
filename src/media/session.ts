@@ -30,6 +30,10 @@ interface Onset { id: string; providerSeen: boolean }
 // Neither endpoint observation means physical handset playout.
 const FRAME_MS = 20, QUIET_FRAMES = 30, INACTIVE_MS = 1200;
 const FIRST_VOICE_MS = 10_000;
+const FIRST_PLAYBACK_MS = 20_000;
+export class VoicePlaybackTimeout extends Error {
+	constructor() { super('Voice audio arrived but verified playback did not start') }
+}
 export class NoVoiceAudioError extends Error {
 	constructor() { super('No voice audio received from the voice service') }
 }
@@ -134,7 +138,7 @@ export class VoiceSession {
 			} else this.#clearReadback();
 			return;
 		}
-		if (r.playStart === undefined) { r.playStart = now; this.trace?.step('rtp.replay.started') }
+		if (r.playStart === undefined) { r.playStart = now; this.#clearAudioDeadline(); this.trace?.step('rtp.replay.started') }
 		const frame = r.frames[r.cursor];
 		// Respect real receive gaps as well as the 20 ms sample duration.
 		const due = Math.max(r.nextFrameAt, r.playStart + (frame.received - r.frames[0].received));
@@ -172,8 +176,17 @@ export class VoiceSession {
 		const received = performance.now(); r.lastFrameAt = received;
 		r.frames.push({pcm, received});
 		if (voiced) {
-			if (this.#awaitingAudio) { this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline() }
-			if (++r.audibleFrames === 1) this.trace?.step('rtp.first_voiced');
+			if (++r.audibleFrames === 1) {
+				this.trace?.step('rtp.first_voiced');
+				if (this.#awaitingAudio) {
+					this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline();
+					this.#awaitingAudio = setTimeout(() => {
+						if (this.#reading !== r) return;
+						this.#interrupt(); this.fail(new VoicePlaybackTimeout());
+					}, FIRST_PLAYBACK_MS);
+					this.#awaitingAudio.unref();
+				}
+			}
 			r.lastVoicedAt = received; r.quietFrames = 0;
 		} else if (r.audibleFrames) ++r.quietFrames;
 		this.#pump(r);
