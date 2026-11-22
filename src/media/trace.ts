@@ -16,6 +16,7 @@ const steps = ['onset.local','onset.provider','interrupt','speech.started.callba
 	'rtp.replay.started','rtp.replay.limit','rtp.first_voiced','rtp.voice.none','rtp.voice.partial','rtp.voice.enough',
 	'rtp.quiet.none','rtp.quiet.partial','rtp.quiet.enough','rtp.writes.pending','rtp.writes.drained','rtp.receive.idle','rtp.receive.recent',
 	'rtp.end.quiet_frames','rtp.end.receive_gap','rtp.end.quiet_gap',
+	'speakable.first_voiced','speakable.retry','speakable.no_audio',
 	'consult.claimed','decision.claimed','readback.verified','readback.rejected','speakable.sent','readback.sent','mark.emitted','mark.played','voice.ready'] as const;
 export interface VoiceTrace {
 	step(event: typeof steps[number]): void;

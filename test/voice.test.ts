@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test, vi } from 'bun:test';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +26,31 @@ async function readback({session:s,marked}: ReturnType<typeof harness>) {
 	await s.event(final('assistant',summary)); frames(s,silence,30); await marked;
 }
 
+test('silent output after join retries the brief once, then signals failure rather than hanging', async () => {
+	vi.useFakeTimers();
+	const sent: LiveClientMessage[] = [], failures:Error[]=[];
+	const session=new VoiceSession({onAudio(){},onMark(){},onInterrupt(){},onReadback:()=>false,onSpeechStarted(){},onTranscript(){}},
+		async message=>{sent.push(message)},error=>{failures.push(error)});
+	try {
+		await session.sendSpeakable('Which lane should we use?');
+		session.rtp(silence);
+		vi.advanceTimersByTime(30_000);
+		expect(sent).toHaveLength(2);
+		expect(failures[0]?.message).toMatch(/no voice audio/i);
+	} finally {session.stop();vi.useRealTimers()}
+});
+test.each(['audible','caller','closed'] as const)('no silent-opening retry after %s', async state=>{
+	vi.useFakeTimers();
+	const h=harness();
+	try {
+		await h.session.sendSpeakable('Which lane should we use?');
+		if(state==='audible') h.session.rtp(speech);
+		else if(state==='caller') h.session.input(speech);
+		else h.session.stop();
+		vi.advanceTimersByTime(30_000);
+		expect(h.sent).toHaveLength(1); expect(h.failures).toEqual([]);
+	} finally {h.session.stop();vi.useRealTimers()}
+});
 test('natural paraphrase, actual audio drain, handset ACK, then a fresh yes', async () => {
 	const h=harness(); await readback(h);
 	expect(h.verified).toEqual([['m',summary]]); expect(h.marks).toEqual(['m']);

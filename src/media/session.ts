@@ -28,6 +28,10 @@ interface Onset { id: string; providerSeen: boolean }
 // receive gap after real voiced output fences only the forwarded PCM prefix.
 // Neither endpoint observation means physical handset playout.
 const FRAME_MS = 20, QUIET_FRAMES = 30, INACTIVE_MS = 1200;
+const FIRST_VOICE_MS = 10_000;
+export class NoVoiceAudioError extends Error {
+	constructor() { super('No voice audio received from the voice service') }
+}
 // At most 45 seconds / 2.16 MB of decoded PCM; total readback lifetime
 // includes verification, paced replay, physical receipt and the caller's reply.
 const BUFFER_FRAMES = 2250, READBACK_LIFETIME = 120_000;
@@ -45,6 +49,7 @@ export class VoiceSession {
 	#live = true;
 	#reading?: Reading;
 	#expiry?: NodeJS.Timeout;
+	#awaitingAudio?: NodeJS.Timeout;
 	#wake?: NodeJS.Timeout;
 	#wakeAt = Infinity;
 	#onset?: Onset;
@@ -64,7 +69,11 @@ export class VoiceSession {
 		if (this.#reading) this.#reading.frames.length = 0;
 		this.#reading = undefined;
 	}
+	#clearAudioDeadline() {
+		clearTimeout(this.#awaitingAudio); this.#awaitingAudio = undefined;
+	}
 	stop() {
+		this.#clearAudioDeadline();
 		this.#live = false; this.#onset = undefined; this.#seen.clear(); this.#clearReadback();
 	}
 	#interrupt() {
@@ -72,6 +81,7 @@ export class VoiceSession {
 		++this.#revision; this.#clearReadback(); this.trace?.step('interrupt'); this.cb.onInterrupt();
 	}
 	#speech(provider: boolean) {
+		this.#clearAudioDeadline(); // Never repeat the old question over the caller.
 		this.trace?.step(provider ? 'onset.provider' : 'onset.local');
 		this.#cutOutput = true;
 		if (this.#ambiguous) return;
@@ -156,6 +166,9 @@ export class VoiceSession {
 			} else if (r.audibleFrames) ++r.quietFrames;
 			this.#pump(r); return;
 		}
+		if (this.#awaitingAudio && energy(pcm) >= 64 ** 2) {
+			this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline();
+		}
 		this.#forward(pcm);
 	}
 	#forward(pcm: Uint8Array) {
@@ -171,8 +184,12 @@ export class VoiceSession {
 			if (this.#reading && this.#live) this.#pump(this.#reading);
 		});
 	}
-	async sendSpeakable(text: string, mark?: string) {
+	sendSpeakable(text: string, mark?: string) {
+		return this.#speak(text, mark, true);
+	}
+	async #speak(text: string, mark: string | undefined, retry: boolean) {
 		if (!this.#live || !bounded(text) || this.#sending) throw new Error('Cannot append voice context');
+		this.#clearAudioDeadline();
 		if (this.#reading) this.#interrupt();
 		const revision = this.#revision;
 		let r: Reading | undefined;
@@ -184,6 +201,17 @@ export class VoiceSession {
 			this.#expiry = setTimeout(() => { if (r === this.#reading) this.#interrupt() }, READBACK_LIFETIME); this.#expiry.unref();
 		}
 		this.#cutOutput = false; this.#sending = true;
+		// A successful context append is not audio. Retry only unmarked speech;
+		// never replay or authorize a decision readback from this timer.
+		if (!r) {
+			this.#awaitingAudio = setTimeout(() => {
+				this.#awaitingAudio = undefined;
+				if (!retry || this.#sending) { this.trace?.step('speakable.no_audio'); this.fail(new NoVoiceAudioError()); return }
+				this.trace?.step('speakable.retry');
+				void this.#speak(text, undefined, false).catch(() => { if (this.#live) this.fail(new NoVoiceAudioError()) });
+			}, FIRST_VOICE_MS);
+			this.#awaitingAudio.unref();
+		}
 		try {
 			for (const chunk of chunkLiveContext(text)) {
 				if (!this.#live || revision !== this.#revision) return;

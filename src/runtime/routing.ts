@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type DecisionCall, type Preferences, type SideContext } from "../decisions";
 import { openVoice, type VoiceCall, type VoiceOptions } from "../media";
+import { NoVoiceAudioError } from "../media/session";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
 
 export type AskContext = SideContext & VoiceOptions["ctx"] & { cwd:string };
@@ -127,7 +128,10 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 					readback.phase="sent";
 					void gateway!.sendControl(device,{type:"mark",requestId:id,mark}).catch(()=>fail(call));
 				},
-				onEnd:()=>fail(call),
+				onEnd:reason=>{
+					if (current(call) && reason instanceof NoVoiceAudioError) report("No speech audio arrived from the voice service");
+					fail(call);
+				},
 			});
 			if (!current(call)) {await voice.close();return}
 			call.voice=voice;

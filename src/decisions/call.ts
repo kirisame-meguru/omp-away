@@ -24,11 +24,12 @@ interface CallOptions {
 interface Readback {mark:string; draft:Draft; phase:"waiting"|"verifying"|"verified"|"played"}
 const directYes=/^yes(?:[, ]+\s*(?:please\s+)?submit(?:\s+it)?)?[.!]?$/i;
 const repeat=/^(?:(?:please )?repeat (?:the |that |your )?(?:readback|answer)|(?:please )?say that again|(?:please )?repeat that)[.!?]?$/i;
+const greeting=/^(?:(?:hello|hey|hi)(?: there)?[\s,.!?]*)+$/i;
 const ignored:DecisionReply={kind:"ignored"}, stale:DecisionReply={kind:"stale"};
 export function createCall(opt:CallOptions):DecisionCall {
 	const life=new AbortController();
 	const used=new Set<string>();
-	let briefReady=false, submitting=false, proposal:Draft|undefined, reading:Readback|undefined;
+	let currentBrief="", submitting=false, proposal:Draft|undefined, reading:Readback|undefined;
 	let speaking:{id:string;armed?:Readback}|undefined;
 	let work:AbortController|undefined;
 	function invalidate() {
@@ -36,7 +37,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 	}
 	function close() {
 		if(life.signal.aborted) return;
-		invalidate(); proposal=undefined; briefReady=false; used.clear(); life.abort(); opt.close();
+		invalidate(); proposal=undefined; currentBrief=""; used.clear(); life.abort(); opt.close();
 	}
 	function takeId(id:string) {
 		if(typeof id!=="string" || !id || id.length>256 || used.has(id)) return false;
@@ -58,7 +59,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 		finally { close(); }
 	}
 	async function consult(question:string) {
-		if(!briefReady || life.signal.aborted || submitting) throw Error("call-unavailable");
+		if(!currentBrief || life.signal.aborted || submitting) throw Error("call-unavailable");
 		invalidate();
 		if(typeof question!=="string" || !question.trim() || Buffer.byteLength(question)>2048) throw Error("consult-unavailable");
 		const token=work=new AbortController();
@@ -75,7 +76,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 			if(life.signal.aborted) throw Error("call-ended");
 			const brief=await untilAbort(opt.brief,life.signal);
 			if(life.signal.aborted) throw Error("call-ended");
-			briefReady=true;
+			currentBrief=brief;
 			return brief + " Tell me what you would like, or ask a question. I'll read the proposed answer back before you decide whether to submit it.";
 		},
 		consult,
@@ -84,7 +85,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 			if(life.signal.aborted || submitting) return;
 			const previous=speaking, armed=reading?.phase==="played" ? reading : undefined;
 			invalidate();
-			if(!takeId(id) || previous || !briefReady) return;
+			if(!takeId(id) || previous || !currentBrief) return;
 			speaking={id,armed};
 		},
 		async speechFinished(id,text) {
@@ -93,11 +94,13 @@ export function createCall(opt:CallOptions):DecisionCall {
 			const {armed}=speaking; speaking=undefined;
 			if(typeof text!=="string" || !text.trim() || Buffer.byteLength(text)>4096) return ignored;
 			const utterance=text.trim();
+			// A greeting is never assent, even immediately after a played readback.
+			if(greeting.test(utterance)) return {kind:"say",text:currentBrief};
 			if(directYes.test(utterance)) {
 				if(armed) return submit(armed);
 				return proposal ? read(proposal,true) : ignored;
 			}
-			if(repeat.test(utterance)) return proposal ? read(proposal) : ignored;
+			if(repeat.test(utterance)) return proposal ? read(proposal) : {kind:"say",text:currentBrief};
 			if(/^(?:no|nope|cancel|stop|discard|never mind|do not submit|don't submit)[.!]?$/i.test(utterance)) { proposal=undefined; return ignored; }
 			const token=work=new AbortController();
 			try {
@@ -121,7 +124,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 					return {kind:"say",text:await consult(text)};
 				}
 				proposal=extractDraft(opt.form,text,intent,previous);
-				return proposal ? read(proposal) : ignored;
+				return proposal ? read(proposal) : {kind:"say",text:currentBrief};
 			} catch { return token.signal.aborted || life.signal.aborted ? stale : {kind:"say",text:"The coding session could not interpret that answer. Nothing was submitted."}; }
 			finally { if(work===token) work=undefined; }
 		},

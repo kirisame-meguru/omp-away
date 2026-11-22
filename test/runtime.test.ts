@@ -70,6 +70,15 @@ test("disconnect, hangup and desktop win fence old media and marks; reconnect re
 		expect(f.voices).toHaveLength(3); expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
 	} finally {await f.runtime.close()}
 });
+test("a greeting after joining repeats the pending question without proposing or submitting",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
+		const v=f.voices[0]; v.onSpeechStarted("g"); v.onTranscript("user","Hello, hello.","g"); await tick();
+		expect(f.spoken.slice(1)).toEqual([{text:expect.stringContaining("Which lane should we use?"),mark:undefined}]);
+		v.onSpeechStarted("y"); v.onTranscript("user","Yes.","y"); await tick();
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
 test("only new affirmative speech after the verified summary drains reaches the original request",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); f.join("phone","A"); await tick(); const v=f.voices[0];
