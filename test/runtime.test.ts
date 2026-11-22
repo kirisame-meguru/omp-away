@@ -75,7 +75,7 @@ test("a greeting after joining repeats the pending question without proposing or
 		expect(f.spoken).toEqual([{text:"Private lane?",instruction:false}]);
 		const v=f.voices[0]; v.onSpeechStarted("g"); v.onTranscript("user","Hello, hello.","g"); await tick();
 		expect(f.spoken.slice(1)).toEqual([{text:"Private lane?",instruction:false}]);
-		v.onSpeechStarted("y"); v.onTranscript("user","Yes.","y"); await tick();
+		v.onSpeechStarted("y"); v.onTranscript("user","Yeah.","y"); await tick();
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
@@ -144,7 +144,7 @@ test("asking for the options lists the enabled native labels without favoring on
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-test("real voice streams before a final transcript and a separate caller yes submits without playback gates",async()=>{
+test("real voice accepts Yeah and closes the submitted call instead of repeating the question",async()=>{
 	const f=await realVoiceFixture(), speech=new Uint8Array(960).fill(8);
 	try {
 		f.session.rtp(speech); await tick(); expect(f.audioOut).toEqual(["phone"]);
@@ -155,9 +155,15 @@ test("real voice streams before a final transcript and a separate caller yes sub
 		expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
 		f.wire.onPcm("phone",speech);
 		await f.session.event({type:"unknown",wireType:"turn.interrupted"});
-		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes."}}); await tick();
+		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"Okay, submitting."}});
+		expect(f.submitted).toEqual([]);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yeah..."}}); await tick();
 		expect(f.failures).toEqual([]); expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
 		expect(f.sideCalls).toEqual([]);
+		expect(f.voices[0].signal?.aborted).toBe(true);
+		expect(f.controls.filter(c=>c.message.type==="ended")).toEqual([{device:"phone",message:{type:"ended",requestId:"A"}}]);
+		expect(f.controls.at(-1)?.message).toEqual({type:"inbox",items:[]});
+		expect(()=>f.session.input(speech)).toThrow("Invalid voice input");
 	} finally {await f.runtime.close()}
 });
 test("real VoiceSession preserves the local mic onset across an invalid delegation and consults only for the caller",async()=>{

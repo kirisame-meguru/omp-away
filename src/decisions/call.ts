@@ -19,7 +19,7 @@ interface CallOptions {
 	close():void;
 	submit(values: Draft["values"]):Promise<"accepted"|"stale">;
 }
-const directYes=/^(?:yes(?:[, ]+\s*(?:please|(?:please\s+)?submit(?:\s+it)?))?|submit(?:\s+it)?|go ahead|that's correct|that is correct)[.!]?$/i;
+const directYes=/^(?:(?:yes|yeah|yep|yup|sure|ok(?:ay)?)(?:[,\s]+(?:please|(?:please\s+)?(?:submit(?:\s+it)?|go\s+ahead)))?|submit(?:\s+it)?|go\s+ahead|that['’]s\s+correct|that\s+is\s+correct)[.!…]*$/iu;
 const repeat=/^(?:(?:please )?repeat (?:the |that |your )?(?:readback|answer)|(?:please )?say that again|(?:please )?repeat that)[.!?]?$/i;
 const greeting=/^(?:(?:hello|hey|hi)(?: there)?[\s,.!?]*)+$/i;
 const ignored:DecisionReply={kind:"ignored"}, stale:DecisionReply={kind:"stale"};

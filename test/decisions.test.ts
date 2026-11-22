@@ -31,14 +31,15 @@ function readback(reply:DecisionReply){
 	if(reply.kind!=="say" || !reply.draft) throw Error("Expected a structured proposal");
 	return {draft:reply.draft,text:reply.text};
 }
-test('an explicit yes submits the current native draft without verification or a playback acknowledgment',async()=>{
+test.each(["Yes.","Yeah.","Yep!","Yup","Sure.","Okay.","OK.","Yeah, go ahead.","Yeah, please submit it.","Yeah…"])
+('explicit affirmative %s submits the native draft without model checks',async affirmative=>{
 	const f=fixture(); try {
 		f.core.offer({...f.ask("X"),html:choiceHtml},f.ctx,"project");
 		const call=f.core.join("X")!; await call.brief();
 		f.setReply(()=>{throw Error("No extra model check is allowed")});
 		const result=await speak(call,"Coffee."); expect(readback(result).draft).toEqual([{field:"Tea or coffee?",answer:"Coffee"}]);
 		expect(f.writes).toEqual([]);
-		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect((await speak(call,affirmative)).kind).toBe("accepted");
 		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
 	} finally {f.core.close()}
 });
@@ -120,7 +121,7 @@ test('pending extraction cannot resurrect a draft after desktop completion',asyn
 		expect((await pending).kind).toBe("stale"); expect(f.core.list()).toEqual([]); expect(f.writes).toEqual([]);
 	} finally {slow.resolve(extraction());f.core.close()}
 });
-test.each(["No.","Cancel","Yes, but change it to two","Would that be safe?","Don't submit","Yes, that sounds interesting."])
+test.each(["No.","Cancel","Yes, but change it to two","Would that be safe?","Don't submit","Yes, that sounds interesting.","Yeah?","Yeah, no.","Sure, if it is safe.","Okay, don't submit."])
 ('negative, conditional or conversational speech is not confirmation: %s',async text=>{
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); await speak(call,proposal);
