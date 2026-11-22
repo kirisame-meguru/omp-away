@@ -33,6 +33,23 @@ function mentioned(evidence:string, label:string) {
 	const atom = key(label).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
 	return !!atom && new RegExp(`(?:^|[^\\p{L}\\p{N}])${atom}(?:$|[^\\p{L}\\p{N}])`,"u").test(key(evidence));
 }
+
+/** An entire, unambiguous native option label needs no semantic inference. */
+export function exactChoiceDraft(form: DecisionForm, utterance: string): Draft | undefined {
+	if (form.native.fields.length!==1 || /[\r\n?]/u.test(utterance)) return;
+	const [item]=form.native.fields;
+	if (item.kind!=="choice" || item.field.multi || isArrayChoice(item.field)) return;
+	const answer=key(utterance.replace(/[.!]+$/u,""));
+	let value:string|undefined;
+	for (const option of item.enabled) {
+		if (key(spansText(option.label).trim() || option.value)!==answer) continue;
+		if (value!==undefined) return;
+		value=option.value;
+	}
+	if (value===undefined) return;
+	return extractDraft(form,utterance,{fields:[{name:item.field.name,value,evidence:utterance}]});
+}
+
 /** A model proposes, never validates. Hidden fields stay local. Every editable field needs speech evidence. */
 export function extractDraft(form: DecisionForm, utterance: string, data:unknown, previous?:Draft): Draft | undefined {
 	if (!record(data) || Object.keys(data).length!==1) return;

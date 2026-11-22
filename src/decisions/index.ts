@@ -53,7 +53,8 @@ export class DecisionCoordinator {
 		const life=new AbortController();
 		const item={requestId:ask.requestId,project:project.slice(0,128),question:form.question,createdAt:this.#clock.now()};
 		// Publish the entry before invoking host hooks (which may synchronously retire it).
-		const brief=Promise.resolve().then(()=>side(ctx,form,"brief",{},life.signal)).catch(()=>{
+		const selfContained=form.native.fields.length===1 && form.native.fields[0].kind==="choice" && !!form.question.trim();
+		const brief=selfContained ? Promise.resolve(form.question) : Promise.resolve().then(()=>side(ctx,form,"brief",{},life.signal)).catch(()=>{
 			if(!life.signal.aborted) this.#opt.error?.("brief-unavailable");
 			return undefined;
 		});

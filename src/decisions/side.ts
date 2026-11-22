@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { DecisionForm } from "./form";
 
 export interface SideContext {
-	runEphemeralTurn?(options:{promptText:string;tools:false;signal:AbortSignal;purpose:string;dedupeReply:false;maxContextBytes:number;onTextDelta:(text:string)=>void}):Promise<{replyText:string;assistantMessage:{stopReason:string}}>;
+	runEphemeralTurn?(options:{promptText:string;tools:false;signal:AbortSignal;purpose:string;dedupeReply:false;maxContextBytes:number;minimizeEffort?:boolean;onTextDelta:(text:string)=>void}):Promise<{replyText:string;assistantMessage:{stopReason:string}}>;
 }
 const purposes=["brief","consult","extract","verify","confirm","speech"] as const;
 type SidePurpose=typeof purposes[number];
@@ -24,13 +25,15 @@ export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):
 export async function side(ctx: SideContext, form: DecisionForm, kind:SidePurpose, data: Record<string,unknown>, signal: AbortSignal): Promise<string> {
 	const byteCap = kind === "extract" || kind==="verify" ? 8192 : 2048;
 	signal.throwIfAborted();
+	const started=performance.now();
+	let completed=false;
 	const operation=new AbortController();
 	const stop=()=>operation.abort();
 	signal.addEventListener("abort",stop,{once:true});
 	const timeout=setTimeout(stop,60_000);
 	let received=0;
 	try {
-		const result=await untilAbort(()=>ctx.runEphemeralTurn?.({promptText:`${prompts[kind]}\nForm: ${form.description}\n${JSON.stringify(data)}`,tools:false,signal:operation.signal,purpose:`away-${kind}`,maxContextBytes:4*1024*1024,dedupeReply:false,onTextDelta(text){
+		const result=await untilAbort(()=>ctx.runEphemeralTurn?.({promptText:`${prompts[kind]}\nForm: ${form.description}\n${JSON.stringify(data)}`,tools:false,signal:operation.signal,purpose:`away-${kind}`,maxContextBytes:4*1024*1024,minimizeEffort:kind!=="brief" && kind!=="consult",dedupeReply:false,onTextDelta(text){
 			received+=Buffer.byteLength(text);
 			if(received>byteCap) throw Error("reply-too-large");
 		}}),operation.signal);
@@ -38,7 +41,11 @@ export async function side(ctx: SideContext, form: DecisionForm, kind:SidePurpos
 		if(result?.assistantMessage?.stopReason!=="stop" || typeof result.replyText!=="string") throw Error();
 		const text=result.replyText.trim();
 		if(!text || Buffer.byteLength(text)>byteCap) throw Error();
+		completed=true;
 		return text;
 	} catch { throw Error(`${kind}-unavailable`); }
-	finally { clearTimeout(timeout); signal.removeEventListener("abort",stop); }
+	finally {
+		clearTimeout(timeout); signal.removeEventListener("abort",stop);
+		logger.debug("Away decision timing",{stage:kind,elapsedMs:Math.round(performance.now()-started),completed});
+	}
 }
