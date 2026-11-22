@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type DecisionCall, type Preferences, type SideContext } from "../decisions";
 import { openVoice, type VoiceCall, type VoiceOptions } from "../media";
-import { NoVoiceAudioError, UngroundedSpeechError, VoicePlaybackTimeout } from "../media/session";
+import { NoVoiceAudioError } from "../media/session";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
 
 export type AskContext = SideContext & VoiceOptions["ctx"] & { cwd:string };
@@ -17,7 +17,6 @@ type Settings = Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"pytho
 interface Transports { gateway:typeof startSecureDesktop; voice:typeof openVoice }
 interface Joined {
 	device:string; id:string; decision:DecisionCall; voice?:VoiceCall; streaming:boolean;
-	readback?:{mark:string;phase:"summarizing"|"verifying"|"verified"|"sent"};
 }
 
 // A routing grammar for a single English informational question, not an authorization
@@ -78,61 +77,38 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			const voice=await transports.voice({ctx,brief,signal:decision.signal,
 				onSpeechStarted(utterance) {
 					if (!current(call) || !call.streaming) return;
-					++revision; onset=utterance; call.readback=undefined;
-					// This onset might be the first affirmative after playback. Let the
-					// decision own it; interrupt() here would erase its armed draft.
+					++revision; onset=utterance;
+					// Snapshot the draft at the caller's onset, not at a later ASR final.
 					decision.speechStarted(utterance);
 				},
 				onTranscript(role,text,utterance) {
 					if (!current(call) || !call.streaming || role!=="user") return;
-					if (!utterance) {++revision; onset=undefined;call.readback=undefined;decision.interrupt();return}
+					if (!utterance) {++revision; onset=undefined;decision.interrupt();return}
 					if (onset!==utterance) return; // A duplicate final cannot cancel a live consultation.
 					onset=undefined;
 					if (informationalQuestion(text)) {
 						const turn=revision;
-						// consult invalidates the draft/readback and consumes the speech onset. It
-						// cannot submit. Claim synchronously so media can suppress speculative audio.
+						// Consultation invalidates confirmation and cannot submit.
 						void decision.consult(text.trim()).then(async answer=>{
 							if (current(call) && revision===turn) await call.voice!.sendSpeakable(answer);
 						}).catch(()=>{if (current(call) && revision===turn) fail(call)});
-						return "consulting" as const;
+						return;
 					}
 					const turn=revision;
 					void decision.speechFinished(utterance,text).then(async reply=>{
 						if (!current(call) || revision!==turn || reply.kind!=="say") return;
-						call.readback=reply.mark ? {mark:reply.mark,phase:"summarizing"} : undefined;
-						await call.voice!.sendSpeakable(reply.text,reply.mark);
+						await call.voice!.sendSpeakable(reply.text,!!reply.draft);
 					}).catch(()=>{if (current(call) && revision===turn) fail(call)});
-					return "deciding" as const;
 				},
 				onInterrupt() {
 					if (!current(call)) return;
-					++revision; onset=undefined; call.readback=undefined;decision.interrupt();
+					++revision; onset=undefined; decision.interrupt();
 				},
 				onAudio(pcm) {
 					if (current(call) && call.streaming) return gateway!.sendPcm(device,pcm).catch(()=>fail(call));
 				},
-				onSpeech:(expected,actual)=>current(call) && call.streaming && decision.verifySpeech(expected,actual),
-				async onReadback(mark,text) {
-					const readback=call.readback;
-					if (!current(call) || !call.streaming || !readback || readback.mark!==mark || readback.phase!=="summarizing") return false;
-					readback.phase="verifying";
-					const verified=await decision.verifyReadback(mark,text);
-					if (!current(call) || call.readback!==readback) return false;
-					if (!verified) {call.readback=undefined;return false}
-					readback.phase="verified";
-					return true;
-				},
-				onMark(mark) {
-					const readback=call.readback;
-					if (!current(call) || !call.streaming || !readback || readback.mark!==mark || readback.phase!=="verified") return;
-					readback.phase="sent";
-					void gateway!.sendControl(device,{type:"mark",requestId:id,mark}).catch(()=>fail(call));
-				},
 				onEnd:reason=>{
 					if (current(call) && reason instanceof NoVoiceAudioError) report("No speech audio arrived from the voice service");
-					if (current(call) && reason instanceof UngroundedSpeechError) report("The voice reply did not match the desktop form");
-					if (current(call) && reason instanceof VoicePlaybackTimeout) report("Voice audio arrived, but verified playback did not start");
 					fail(call);
 				},
 			});
@@ -160,18 +136,8 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				case "silence": if (requests.get(message.requestId)?.audience.has(device)) core.silence(message.requestId); break;
 				case "join": await join(device,message.requestId); break;
 				case "hangup": if (active?.device===device && active.id===message.requestId) active.decision.close(); break;
-				case "played": {
-					const call=active;
-					if (!call || !current(call) || !call.streaming || call.device!==device || call.id!==message.requestId) return;
-					const readback=call.readback;
-					if (!readback || readback.phase!=="sent" || readback.mark!==message.mark) return;
-					call.readback=undefined;
-					try {
-						if (call.voice!.played(message.mark)) await call.decision.played(message.mark);
-						else call.decision.interrupt();
-					} catch {fail(call)}
-					break;
-				}
+				// Old handset acknowledgments are compatibility traffic, not authorization.
+				case "played": break;
 			}
 		},
 	});

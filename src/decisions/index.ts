@@ -2,7 +2,7 @@ import type { PendingAsk } from "../index";
 import { createCall, type DecisionCall } from "./call";
 import { type DecisionForm, prepare } from "./form";
 import { preferences, type Preferences } from "./preferences";
-import { type Exchange, side, type SideContext } from "./side";
+import type { Exchange, SideContext } from "./side";
 
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
@@ -21,7 +21,7 @@ interface Options {
 }
 interface Entry {
 	item:InboxItem; ask:PendingAsk; ctx:SideContext; form:DecisionForm; history:Exchange[];
-	life:AbortController; brief:Promise<string|undefined>; cancelTimer?:()=>void;
+	life:AbortController; cancelTimer?:()=>void;
 	silenced:boolean; rang:boolean; submitted:boolean;
 }
 const realtime:Clock={ now:Date.now,after(ms,fn){const timer=setTimeout(fn,ms); return ()=>clearTimeout(timer);} };
@@ -52,13 +52,7 @@ export class DecisionCoordinator {
 		if(!form) { this.#opt.error?.("unsupported-form"); return false; }
 		const life=new AbortController();
 		const item={requestId:ask.requestId,project:project.slice(0,128),question:form.question,createdAt:this.#clock.now()};
-		// Publish the entry before invoking host hooks (which may synchronously retire it).
-		const selfContained=form.native.fields.length===1 && form.native.fields[0].kind==="choice" && !!form.question.trim();
-		const brief=selfContained ? Promise.resolve(form.question) : Promise.resolve().then(()=>side(ctx,form,"brief",{},life.signal)).catch(()=>{
-			if(!life.signal.aborted) this.#opt.error?.("brief-unavailable");
-			return undefined;
-		});
-		const entry:Entry={item,ask,ctx,form,history:[],life,brief,silenced:false,rang:false,submitted:false};
+		const entry:Entry={item,ask,ctx,form,history:[],life,silenced:false,rang:false,submitted:false};
 		this.#pending.set(ask.requestId,entry); this.#route(entry); this.#opt.changed?.(); return true;
 	}
 	#route(e:Entry) {
@@ -86,7 +80,6 @@ export class DecisionCoordinator {
 		if(this.#active || !entry || entry.submitted || this.#closed) return;
 		this.silence(id);
 		const call=createCall({form:entry.form,ctx:entry.ctx,history:entry.history,
-			brief:async()=>{const brief=await entry.brief; if(!brief) throw Error("brief-unavailable"); return brief;},
 			close:()=>{if(this.#active?.call===call) this.#active=undefined;},
 			submit:async values=>{
 				if(this.#active?.call!==call || this.#pending.get(id)!==entry || entry.submitted) return "stale";

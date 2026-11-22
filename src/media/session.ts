@@ -4,47 +4,25 @@ import { buildDelegationContextAppend, buildSessionContextAppend, chunkLiveConte
 import type { VoiceTrace } from './trace';
 
 export interface VoiceCallbacks {
-	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void | 'consulting' | 'deciding';
+	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void;
 	onSpeechStarted(utteranceId: string): void;
 	onInterrupt(): void;
 	onAudio(pcm: Uint8Array): void | Promise<void>;
-	onSpeech(expected: string, actual: string): boolean | Promise<boolean>;
-	onReadback(mark: string, actualAssistantFinal: string): boolean | Promise<boolean>;
-	onMark(mark: string): void;
 }
-interface Reading {
-	target: {mark:string} | {text:string; retry:boolean};
-	phase: 'waiting' | 'sending' | 'awaiting' | 'verifying' | 'verified' | 'discarding' | 'marked' | 'played' | 'confirming';
-	candidate?: string;
-	expires: number;
+interface Output {
 	frames: Uint8Array[];
 	cursor: number;
 	playStart?: number;
-	lastVoicedAt: number;
-	audibleFrames: number;
+	voiced: boolean;
 	quietFrames: number;
-	lastFrameAt: number;
 }
 interface Onset { id: string; providerSeen: boolean }
-// Ordered PCM and assistant-final events do not identify physical playout.
-// Decoded quiet PCM or a bounded receive gap after real voiced output fences
-// only the forwarded PCM prefix; the handset must acknowledge presentation.
-const FRAME_MS = 20, QUIET_FRAMES = 30, INACTIVE_MS = 1200;
-const PLAYOUT_LEAD_MS = 100;
-const FIRST_VOICE_MS = 10_000;
-const FIRST_PLAYBACK_MS = 20_000;
-export class VoicePlaybackTimeout extends Error {
-	constructor() { super('Voice audio arrived but verified playback did not start') }
-}
+const FRAME_MS = 20, QUIET_FRAMES = 30, PLAYOUT_LEAD_MS = 100;
+// Bound transport backpressure, not the length of a spoken response.
+const QUEUED_FRAMES = 250, FIRST_VOICE_MS = 10_000;
 export class NoVoiceAudioError extends Error {
 	constructor() { super('No voice audio received from the voice service') }
 }
-export class UngroundedSpeechError extends Error {
-	constructor() { super('Voice response did not match the desktop question or answer') }
-}
-// At most 45 seconds / 2.16 MB of decoded PCM; total readback lifetime
-// includes verification, paced replay, physical receipt and the caller's reply.
-const BUFFER_FRAMES = 2250, READBACK_LIFETIME = 120_000;
 function energy(pcm: Uint8Array) {
 	const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 	let sum = 0;
@@ -53,108 +31,50 @@ function energy(pcm: Uint8Array) {
 }
 function bounded(s: string, max = 8192) { return typeof s === 'string' && s.length <= max && s.trim().length > 0 && !s.includes('\0') }
 
-/** Caller speech reaches exactly one request-scoped decision owner. Provider delegations
- * never get an execution capability, and no transcript can substitute for handset playout. */
+/** Audio streams independently of decision handling. Only a bound caller turn
+ * can reach the decision owner; assistant speech and delegations cannot submit. */
 export class VoiceSession {
 	#live = true;
-	#reading?: Reading;
-	#expiry?: NodeJS.Timeout;
+	#output?: Output;
 	#awaitingAudio?: NodeJS.Timeout;
 	#wake?: NodeJS.Timeout;
-	#wakeAt = Infinity;
 	#onset?: Onset;
 	#ambiguous = false;
 	#inputHot = false;
 	#quietInput = 0;
-	#cutOutput = false;
 	#revision = 0;
 	#writing = false;
 	#sending = false;
-	#assistantActive = false;
-	#outputPending = false;
-	#quietOutput = QUIET_FRAMES;
-	#lastOutputVoiceAt = -Infinity;
-	#idleWait?: () => void;
-	#idleWake?: NodeJS.Timeout;
 	#seen = new Set<string>();
 	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace) {}
 
-	#clearReadback() {
-		clearTimeout(this.#expiry); this.#clearAudioDeadline(); this.#clearWake();
-		if (this.#reading) this.#reading.frames.length = 0;
-		this.#reading = undefined;
-		clearTimeout(this.#idleWake); this.#idleWake = undefined;
-		const idle = this.#idleWait; this.#idleWait = undefined; idle?.();
+	#clearAudio() {
+		clearTimeout(this.#wake); this.#wake = undefined;
+		this.#output = undefined;
 	}
 	#clearAudioDeadline() {
 		clearTimeout(this.#awaitingAudio); this.#awaitingAudio = undefined;
 	}
-	#outputIdle() {
-		const idle = !this.#assistantActive && (this.#quietOutput >= QUIET_FRAMES || performance.now() - this.#lastOutputVoiceAt >= INACTIVE_MS);
-		if (idle) this.#outputPending = false;
-		return idle;
-	}
-	#releaseIdle() {
-		if (!this.#idleWait || this.#assistantActive) return;
-		clearTimeout(this.#idleWake); this.#idleWake = undefined;
-		if (this.#outputIdle()) {
-			this.#clearAudioDeadline();
-			const resume = this.#idleWait; this.#idleWait = undefined; resume();
-		} else {
-			this.#idleWake = setTimeout(() => this.#releaseIdle(), Math.max(1, Math.ceil(this.#lastOutputVoiceAt + INACTIVE_MS - performance.now())));
-			this.#idleWake.unref();
-		}
-	}
 	stop() {
-		this.#live = false; this.#onset = undefined; this.#seen.clear(); this.#clearReadback();
-	}
-	#interrupt() {
-		if (this.#reading) this.#cutOutput = true;
-		++this.#revision; this.#clearReadback(); this.trace?.step('interrupt'); this.cb.onInterrupt();
-	}
-	#overlap(r:Reading) {
-		if ('mark' in r.target) { this.#interrupt(); return }
-		if (r.phase==='discarding') return;
-		// Keep the requested narration, but never play overlapping unchecked audio.
-		++this.#revision; this.#clearWake(); this.#clearAudioDeadline();
-		r.frames.length=0; r.phase='discarding';
-		this.cb.onInterrupt();
-		this.#awaitingAudio=setTimeout(()=>{
-			if (this.#reading===r) {this.#interrupt();this.fail(new UngroundedSpeechError())}
-		}, FIRST_PLAYBACK_MS);
-		this.#awaitingAudio.unref();
-	}
-	async #retrySpeech(r:Reading) {
-		this.#interrupt();
-		if ('text' in r.target) {
-			if (r.target.retry) await this.#speak(r.target.text,undefined,false);
-			else this.fail(new UngroundedSpeechError());
-		}
+		this.#live = false; ++this.#revision;
+		this.#onset = undefined; this.#seen.clear(); this.#clearAudio(); this.#clearAudioDeadline();
 	}
 	#speech(provider: boolean) {
 		this.trace?.step(provider ? 'onset.provider' : 'onset.local');
-		const waiting = this.#reading;
-		if (!provider && waiting && 'text' in waiting.target) {
-			// Mic energy is not recognized speech. Capture startup must not cut
-			// narration, including when the phone opens its mic at first playback.
-			waiting.candidate ??= crypto.randomUUID();
-			return;
-		}
 		this.#clearAudioDeadline();
-		this.#cutOutput = true;
+		if (provider) this.#clearAudio();
 		if (this.#ambiguous) return;
 		if (this.#onset) {
-			// Pauses within an ordinary proposal do not split the provider turn.
-			if (!provider && this.#reading?.phase !== 'confirming') return;
-			if (provider && !this.#onset.providerSeen) { this.#onset.providerSeen = true; return }
-			this.#ambiguous = true; this.#onset = undefined; this.#interrupt(); return;
+			// Pauses in a caller's sentence are not separate decisions.
+			if (!provider) return;
+			if (!this.#onset.providerSeen) { this.#onset.providerSeen = true; return }
+			this.#ambiguous = true; this.#onset = undefined; ++this.#revision;
+			this.cb.onInterrupt(); return;
 		}
-		const r = this.#reading;
-		// A delayed provider onset by itself cannot prove that the phone user
-		// started speaking after physical playout. Require a fresh handset PCM edge.
-		if (!provider && r?.phase === 'played' && performance.now() < r.expires) { r.phase = 'confirming'; ++this.#revision }
-		else this.#interrupt();
+		++this.#revision;
 		this.#onset = { id: crypto.randomUUID(), providerSeen: provider };
+		// Capture the current draft at onset, never after a delayed final transcript.
+		// Raw microphone energy does not mute audio: route startup can be noisy.
 		this.cb.onSpeechStarted(this.#onset.id); this.trace?.step('speech.started.callback');
 	}
 	input(pcm: Uint8Array) {
@@ -164,161 +84,90 @@ export class VoiceSession {
 			if (!this.#inputHot) { this.#inputHot = true; this.#speech(false) }
 		} else if (this.#inputHot && ++this.#quietInput >= 20) this.#inputHot = false;
 	}
-	#clearWake() {
-		clearTimeout(this.#wake); this.#wake = undefined; this.#wakeAt = Infinity;
-	}
-	#wakeAtTime(r: Reading, at: number) {
-		if (at >= this.#wakeAt) return;
-		this.#clearWake(); this.#wakeAt = at;
-		this.#wake = setTimeout(() => { this.#clearWake(); this.#pump(r) }, Math.max(0, Math.ceil(at - performance.now())));
-		this.#wake.unref();
-	}
-	#pump(r: Reading) {
-		if (this.#reading !== r || r.phase !== 'verified' || this.#writing || this.#onset || r.audibleFrames < 5) return;
-		const now = performance.now();
-		if (now >= r.expires) { this.#interrupt(); return }
-		// When silence continues indefinitely, fence its first complete tail.
-		// Any later voiced frame already captured extends the required prefix.
-		const tail = r.quietFrames >= QUIET_FRAMES, gapAt = r.lastVoicedAt + INACTIVE_MS;
-		const fence = r.frames.length - (tail ? r.quietFrames - QUIET_FRAMES : 0);
-		if (r.cursor >= fence) {
-			if (!tail && now < gapAt) { this.#wakeAtTime(r, gapAt); return }
-			this.trace?.step(tail ? 'rtp.end.quiet_frames' : now - r.lastFrameAt >= INACTIVE_MS ? 'rtp.end.receive_gap' : 'rtp.end.quiet_gap');
-			this.#clearWake(); r.frames.length = 0;
-			if ('mark' in r.target) {
-				r.phase = 'marked'; this.cb.onMark(r.target.mark); this.trace?.step('mark.emitted');
-			} else this.#clearReadback();
+	#pump(output: Output) {
+		if (!this.#live || this.#output !== output || this.#writing || !output.voiced) return;
+		if (output.cursor === output.frames.length) {
+			if (output.quietFrames >= QUIET_FRAMES) {
+				this.trace?.step('rtp.end.quiet_frames'); this.#output = undefined;
+			}
 			return;
 		}
-		if (r.playStart === undefined) { r.playStart = now; this.#clearAudioDeadline(); this.trace?.step('rtp.replay.started') }
-		// PCM already contains pauses. Network arrival gaps and late JS timers
-		// must not become extra silence; keep a small lead for the phone buffer.
-		let due = r.playStart + r.cursor * FRAME_MS - PLAYOUT_LEAD_MS;
+		const now = performance.now();
+		if (output.playStart === undefined) {
+			output.playStart = now; this.trace?.step('rtp.replay.started');
+		}
+		// Only sample-clock pacing and a small handset lead remain; no transcript gate.
+		let due = output.playStart + output.cursor * FRAME_MS - PLAYOUT_LEAD_MS;
 		if (now - due > PLAYOUT_LEAD_MS) {
-			// A long host stall must not flood the handset's bounded queue.
-			r.playStart = now - r.cursor * FRAME_MS;
+			output.playStart = now - output.cursor * FRAME_MS;
 			due = now - PLAYOUT_LEAD_MS;
 		}
-		if (due > now) { this.#wakeAtTime(r, due); return }
-		const write = this.cb.onAudio(r.frames[r.cursor++]);
-		if (!write) { this.#pump(r); return }
+		if (due > now) {
+			if (!this.#wake) this.#wake = setTimeout(() => { this.#wake = undefined; this.#pump(output) }, Math.ceil(due - now));
+			return;
+		}
+		const frame = output.frames[output.cursor++];
+		if (output.cursor >= 64) {
+			output.playStart += output.cursor * FRAME_MS;
+			output.frames.copyWithin(0, output.cursor);
+			output.frames.length -= output.cursor; output.cursor = 0;
+		}
+		let write: void | Promise<void>;
+		try { write = this.cb.onAudio(frame) }
+		catch { this.stop(); this.fail(new Error('Handset audio delivery failed')); return }
+		if (!write) { this.#pump(output); return }
 		this.#writing = true;
 		void write.then(() => {
 			this.#writing = false;
-			if (this.#reading && this.#live) this.#pump(this.#reading);
+			if (this.#output) this.#pump(this.#output);
 		}, () => { if (this.#live) { this.stop(); this.fail(new Error('Handset audio delivery failed')) } });
-	}
-	played(mark: string) {
-		const r = this.#reading;
-		if (!this.#live || !r || r.phase !== 'marked' || performance.now() >= r.expires || this.#onset || this.#inputHot || !('mark' in r.target) || r.target.mark !== mark) return false;
-		r.phase = 'played'; this.trace?.step('mark.played'); return true;
 	}
 	rtp(pcm: Uint8Array) {
 		if (!this.#live) return;
 		if (pcm.length !== 960) throw new Error('Invalid voice output');
-		const r = this.#reading, voiced = energy(pcm) >= 64 ** 2;
-		if (voiced) { this.#quietOutput = 0; this.#lastOutputVoiceAt = performance.now() }
-		else this.#quietOutput = Math.min(QUIET_FRAMES, this.#quietOutput + 1);
-		if (r?.phase === 'waiting') { if (this.#quietOutput >= QUIET_FRAMES) this.#releaseIdle(); return }
-		if (this.#cutOutput || !r || r.phase==='discarding') return; // Never stream speculative audio.
-		if (r.phase === 'marked' || r.phase === 'played' || r.phase === 'confirming') {
-			if (voiced) this.#interrupt(); return;
+		const output = this.#output ??= {frames:[],cursor:0,voiced:false,quietFrames:0};
+		const voiced = energy(pcm) >= 64 ** 2;
+		if (!output.voiced && !voiced && output.frames.length === 5) output.frames.shift();
+		if (output.frames.length - output.cursor >= QUEUED_FRAMES) {
+			this.stop(); this.fail(new Error('Handset audio delivery stalled')); return;
 		}
-		if (r.frames.length >= BUFFER_FRAMES || performance.now() >= r.expires) {
-			this.trace?.step('rtp.replay.limit'); this.#interrupt();
-			if ('text' in r.target) this.fail(new UngroundedSpeechError());
-			return;
-		}
-		// The peer transfers a distinct immutable buffer per decoded frame.
-		// Capture from the append itself: a gap is not a reliable start marker.
-		const received = performance.now(); r.lastFrameAt = received;
-		// Keep only 100 ms of pre-roll, not seconds of provider warmup silence.
-		// This retains quiet consonant onsets without replaying the setup delay.
-		if (!r.audibleFrames && !voiced && r.frames.length===5) r.frames.shift();
-		r.frames.push(pcm);
 		if (voiced) {
-			if (++r.audibleFrames === 1) {
-				this.trace?.step('rtp.first_voiced');
-				if (this.#awaitingAudio) {
-					this.trace?.step('speakable.first_voiced'); this.#clearAudioDeadline();
-					this.#awaitingAudio = setTimeout(() => {
-						if (this.#reading !== r) return;
-						this.#interrupt(); this.fail(new VoicePlaybackTimeout());
-					}, FIRST_PLAYBACK_MS);
-					this.#awaitingAudio.unref();
-				}
-			}
-			r.lastVoicedAt = received; r.quietFrames = 0;
-		} else if (r.audibleFrames) ++r.quietFrames;
-		this.#pump(r);
+			if (!output.voiced) this.trace?.step('rtp.first_voiced');
+			output.voiced = true; output.quietFrames = 0; this.#clearAudioDeadline();
+		} else if (output.voiced) {
+			if (output.quietFrames >= QUIET_FRAMES) return;
+			++output.quietFrames;
+		}
+		output.frames.push(pcm); this.#pump(output);
 	}
-	sendSpeakable(text: string, mark?: string) {
-		return this.#speak(text, mark, true);
-	}
-	async #speak(text: string, mark: string | undefined, retry: boolean) {
+	async sendSpeakable(text: string, instruction = false) {
 		if (!this.#live || !bounded(text) || this.#sending) throw new Error('Cannot append voice context');
-		this.#clearAudioDeadline();
-		if (this.#reading) this.#interrupt();
 		const revision = this.#revision;
-		if (mark !== undefined && (!bounded(mark, 128) || this.#onset || this.#ambiguous)) throw new Error('Cannot bind voice readback');
-		const now = performance.now();
-		const r:Reading = this.#reading = { target:mark === undefined ? {text,retry} : {mark}, phase:'sending', expires:now + READBACK_LIFETIME,
-			frames:[], cursor:0, lastVoicedAt:-Infinity, audibleFrames:0, quietFrames:0, lastFrameAt:-Infinity };
-		this.#expiry = setTimeout(() => {
-			if (r !== this.#reading) return;
-			this.#interrupt();
-			if ('text' in r.target) this.fail(new UngroundedSpeechError());
-		}, READBACK_LIFETIME); this.#expiry.unref();
-		this.#cutOutput = false;
-		if (this.#outputPending && !this.#outputIdle()) {
-			// A live model can start replying before the caller's final transcript.
-			// Never append narration into that turn or capture its clipped audio tail.
-			r.phase = 'waiting'; this.trace?.step('speakable.waiting');
-			const idle = Promise.withResolvers<void>(); this.#idleWait = idle.resolve;
-			this.#awaitingAudio = setTimeout(() => {
-				if (this.#reading === r) { this.#interrupt(); this.fail(new VoicePlaybackTimeout()) }
-			}, FIRST_PLAYBACK_MS);
-			this.#awaitingAudio.unref(); this.#releaseIdle();
-			await idle.promise;
-			if (!this.#live || this.#reading !== r || revision !== this.#revision) return;
-			r.phase = 'sending';
-		}
-		this.#sending = true;
-		// A successful context append is not audio. Retry only unmarked speech;
-		// never replay or authorize a decision readback from this timer.
-		if (mark === undefined) {
-			this.#awaitingAudio = setTimeout(() => {
-				this.#awaitingAudio = undefined;
-				if (!retry || this.#sending) { this.trace?.step('speakable.no_audio'); this.fail(new NoVoiceAudioError()); return }
-				this.trace?.step('speakable.retry');
-				void this.#speak(text, undefined, false).catch(() => { if (this.#live) this.fail(new NoVoiceAudioError()) });
-			}, FIRST_VOICE_MS);
-			this.#awaitingAudio.unref();
-		}
+		this.#sending = true; this.#clearAudioDeadline();
+		this.#awaitingAudio = setTimeout(() => {
+			this.#awaitingAudio = undefined;
+			if (this.#live) { this.stop(); this.fail(new NoVoiceAudioError()) }
+		}, FIRST_VOICE_MS);
+		this.#awaitingAudio.unref();
 		try {
-			const message = mark === undefined ? narrate + JSON.stringify(text) : text;
+			const message = instruction ? text : narrate + JSON.stringify(text);
 			for (const chunk of chunkLiveContext(message)) {
 				if (!this.#live || revision !== this.#revision) return;
 				await this.send(buildSessionContextAppend(chunk, 'speakable'));
 			}
-			if (!this.#live || revision !== this.#revision) return;
-			r.phase = 'awaiting'; this.trace?.step(mark === undefined ? 'speakable.sent' : 'readback.sent');
-		} catch (error) { if (r && this.#reading === r) this.#interrupt(); throw error }
-		finally { this.#sending = false }
+			this.trace?.step(instruction ? 'readback.sent' : 'speakable.sent');
+		} finally { this.#sending = false }
 	}
 	async event(event: LiveServerEvent) {
 		if (!this.#live) return;
 		try {
 			this.trace?.sideband(event);
-			const r = this.#reading;
-			const mutedReply = this.#cutOutput && r?.phase === 'confirming';
 			switch (event.type) {
 				case 'unknown':
 					if (event.wireType === 'input_audio_buffer.speech_started') this.#speech(true);
-					else if (!mutedReply && ['turn.interrupted','response.cancelled','output_audio_buffer.cleared'].includes(event.wireType)) this.#interrupt();
-					else if (event.wireType === 'output_audio_buffer.started') {
-						this.#assistantActive = true; this.#outputPending = true;
-						if (!mutedReply && r && r.phase !== 'waiting' && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r);
+					else if (['turn.interrupted','response.cancelled','output_audio_buffer.cleared'].includes(event.wireType)) {
+						this.#clearAudio(); this.#clearAudioDeadline();
+						if (!this.#onset) { ++this.#revision; this.cb.onInterrupt() }
 					}
 					return;
 				case 'delegation.created': {
@@ -330,7 +179,9 @@ export class VoiceSession {
 					return;
 				}
 				case 'error': throw new Error('Codex voice connection failed');
-				case 'input_transcript.added': if (!this.#onset && r && !r.candidate) this.#interrupt(); return;
+				case 'input_transcript.added':
+					if (!this.#onset?.providerSeen && !this.#ambiguous) this.#speech(true);
+					return;
 				case 'output_audio.delta': {
 					if (!event.audio || event.audio.length > 64000 || !/^[A-Za-z0-9+/]+$/.test(event.audio)) throw new Error('Invalid ordered voice audio');
 					const pcm = Buffer.from(event.audio, 'base64');
@@ -338,54 +189,19 @@ export class VoiceSession {
 					for (let offset = 0; offset < pcm.length; offset += 960) this.rtp(pcm.subarray(offset, offset + 960));
 					return;
 				}
-				case 'output_transcript.added':
-					this.#assistantActive = true; this.#outputPending = true;
-					if (!mutedReply && r && r.phase !== 'waiting' && r.phase !== 'sending' && r.phase !== 'awaiting') this.#overlap(r); return;
 				case 'turn.done': break;
 				default: return;
 			}
 			const { role, transcript } = event.turn;
-			if (role === 'assistant') this.#assistantActive = false;
-			if (role === 'assistant' && mutedReply) return;
-			if (!bounded(transcript)) { this.#onset = undefined; this.#ambiguous = false; this.#interrupt(); return }
 			if (role === 'assistant') {
-				this.#releaseIdle();
-				if (r?.phase === 'waiting') return;
-				this.cb.onTranscript(role, transcript);
-				if (!r) return;
-				if (r.phase==='discarding') {await this.#retrySpeech(r);return}
-				if (r.phase !== 'awaiting' || this.#onset || this.#ambiguous) { this.#interrupt(); return }
-				r.phase = 'verifying';
-				let valid = false;
-				try {
-					if ('mark' in r.target) valid = await this.cb.onReadback(r.target.mark, transcript);
-					else valid = await this.cb.onSpeech(r.target.text, transcript);
-				} catch { /* No decision-owner approval. */ }
-				if (!this.#live || this.#reading !== r || r.phase !== 'verifying') return;
-				if (!valid) {
-					this.trace?.step('readback.rejected');
-					await this.#retrySpeech(r);
-					return;
-				}
-				r.phase = 'verified'; this.trace?.step('readback.verified');
-				if (this.trace) {
-					this.trace.step(!r.audibleFrames ? 'rtp.voice.none' : r.audibleFrames < 5 ? 'rtp.voice.partial' : 'rtp.voice.enough');
-					this.trace.step(!r.quietFrames ? 'rtp.quiet.none' : r.quietFrames < QUIET_FRAMES ? 'rtp.quiet.partial' : 'rtp.quiet.enough');
-					this.trace.step(this.#writing ? 'rtp.writes.pending' : 'rtp.writes.drained');
-					this.trace.step(performance.now() - r.lastFrameAt >= INACTIVE_MS ? 'rtp.receive.idle' : 'rtp.receive.recent');
-				}
-				this.#pump(r); return;
+				if (bounded(transcript)) this.cb.onTranscript(role, transcript);
+				return;
 			}
-			const deferred = !this.#onset && r?.candidate;
-			const onset = this.#onset ?? (deferred ? {id:deferred,providerSeen:false} : undefined);
+			const onset = this.#ambiguous ? undefined : this.#onset;
 			this.#onset = undefined; this.#ambiguous = false;
-			if (r?.phase === 'confirming' && onset && performance.now() < r.expires) this.#clearReadback();
-			else if (r) this.#interrupt();
-			if (deferred) { this.cb.onSpeechStarted(deferred); this.trace?.step('speech.started.callback') }
-			const claim = this.cb.onTranscript(role, transcript, onset?.id);
-			this.#cutOutput = !!onset && (claim === 'deciding' || claim === 'consulting');
-			if (this.#cutOutput) { ++this.#revision; this.trace?.step(claim === 'consulting' ? 'consult.claimed' : 'decision.claimed') }
+			if (!bounded(transcript)) { this.cb.onInterrupt(); return }
+			this.cb.onTranscript(role, transcript, onset?.id);
 			this.trace?.step(onset ? 'final.user.bound' : 'final.user.unbound');
-		} catch { if (this.#live) this.fail(new Error('Voice event failed')) }
+		} catch { if (this.#live) { this.stop(); this.fail(new Error('Voice event failed')) } }
 	}
 }

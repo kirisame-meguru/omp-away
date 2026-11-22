@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-tui/html-form/data";
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { type FormValues, planAnswers, tagForm, type PreparedForm } from "../collab/form";
@@ -24,7 +23,7 @@ export function prepare(html: string): DecisionForm | undefined {
 	const names=new Map<string,number>();
 	for(const f of fields) {const k=audible(f.question || f.name); names.set(k,(names.get(k)??0)+1);}
 	for(const f of fields) if((names.get(audible(f.question || f.name)) ?? 0)>1) questions.set(f.name,`${f.question || f.name} (${f.name})`);
-	return {native,questions,description,question:fields.map(f=>f.question).join("; ").slice(0,256)};
+	return {native,questions,description,question:fields.map(f=>f.question || f.name).join("; ").slice(0,256)};
 }
 const record = (x:unknown): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const key = (s:string) => s.toLowerCase().normalize("NFC").replace(/\s+/g," ").trim();
@@ -100,18 +99,4 @@ export function extractDraft(form: DecisionForm, utterance: string, data:unknown
 	const voiceData=JSON.stringify({fields});
 	if(!budget(voiceData,4096)) return;
 	return {values:Object.freeze(values),fields:Object.freeze(fields),voiceData};
-}
-
-const prose=/^\p{L}+(?: \p{L}+)+[.!]?$/u;
-const sentence=(s:string)=>s[0]!.toLowerCase()+s.slice(1).replace(/[.!]$/u,"");
-/** Compare reconstructed fields, not delivery wording. Only plain prose has sentence-level ASR variation. */
-export function matchesReadback(form:DecisionForm, expected:FormValues, heard:FormValues):boolean {
-	// Both objects have passed planAnswers against this same form, including immutable hidden values.
-	for(const {field} of form.native.fields) {
-		const a=expected[field.name], b=heard[field.name];
-		if(isDeepStrictEqual(a,b)) continue;
-		if(field.kind!=="text" || (field.type!=="text" && field.type!=="textarea") || typeof a!=="string" || typeof b!=="string" ||
-			!prose.test(a) || !prose.test(b) || sentence(a)!==sentence(b)) return false;
-	}
-	return true;
 }
