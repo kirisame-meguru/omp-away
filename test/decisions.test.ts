@@ -43,6 +43,17 @@ test.each(["Yes.","Yeah.","Yep!","Yup","Sure.","Okay.","OK.","Yeah, go ahead.","
 		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
 	} finally {f.core.close()}
 });
+test('ASR punctuation and repeated replies still propose once and require a separate confirmation',async()=>{
+	const f=fixture(); try {
+		f.core.offer({...f.ask("X"),html:choiceHtml},f.ctx,"project");
+		const call=f.core.join("X")!; await call.brief();
+		f.setReply(()=>{throw Error("Repeated native words need no model interpretation")});
+		expect(readback(await speak(call,"Coffee? Coffee.")).draft).toEqual([{field:"Tea or coffee?",answer:"Coffee"}]);
+		expect(f.writes).toEqual([]);
+		expect((await speak(call,"Yeah? Yeah.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
+	} finally {f.core.close()}
+});
 test('all native questions open without waiting for a model summary',async()=>{
 	const f=fixture(), slow=Promise.withResolvers<string>(); f.setReply(()=>slow.promise);
 	try {
@@ -121,7 +132,7 @@ test('pending extraction cannot resurrect a draft after desktop completion',asyn
 		expect((await pending).kind).toBe("stale"); expect(f.core.list()).toEqual([]); expect(f.writes).toEqual([]);
 	} finally {slow.resolve(extraction());f.core.close()}
 });
-test.each(["No.","Cancel","Yes, but change it to two","Would that be safe?","Don't submit","Yes, that sounds interesting.","Yeah?","Yeah, no.","Sure, if it is safe.","Okay, don't submit."])
+test.each(["No.","Cancel","Yes, but change it to two","Would that be safe?","Don't submit","Yes, that sounds interesting.","Yeah, should we?","Yeah, no.","Yeah. Yeah, but not yet.","Sure, if it is safe.","Okay, don't submit."])
 ('negative, conditional or conversational speech is not confirmation: %s',async text=>{
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); await speak(call,proposal);
@@ -175,7 +186,7 @@ test('partial corrections cannot use a new request or its defaults as a previous
 	} finally {f.core.close()}
 });
 test.each([
-	["tentative question","Coffee?",choiceHtml], ["negation","Not coffee",choiceHtml], ["disabled choice","Retired",choiceHtml],
+	["informational question","Why coffee?",choiceHtml], ["mixed alternatives","Coffee, tea",choiceHtml], ["negation","Not coffee",choiceHtml], ["disabled choice","Retired",choiceHtml],
 	["ambiguous labels","Coffee",choiceHtml.replace('<option value="t" selected>Tea</option>','<option value="t" selected>COFFEE</option>')],
 ])('the exact-choice shortcut cannot select a %s',async(_name,answer,form)=>{
 	const f=fixture(); try {

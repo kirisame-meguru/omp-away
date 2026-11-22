@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { logger } from "@oh-my-pi/pi-utils";
 import { type Adapter, startAdapter } from "./collab/adapter";
 import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
@@ -93,17 +94,21 @@ export default function away(pi: ExtensionAPI): void {
 
 	function offer(toolCallId: string, call: Call) {
 		call.offered = true;
+		logger.info("Away native bridge", { stage:"offered", mobile:mobileConfigured });
 		const requestId = call.id;
 		const pending: PendingAsk = {
 			requestId, toolCallId, html: call.html,
 			async submitConfirmed(id, values) {
 				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
 				call.submitting = true;
+				logger.info("Away native bridge", { stage:"submit-started" });
 				try {
 					const snapshot = structuredClone(values);
 					if (await call.responder.submitConfirmed(id, snapshot) !== "accepted") return "stale";
 					const actual = await call.native.promise;
-					return actual !== undefined && Bun.deepEquals(actual, snapshot) ? "accepted" : "stale";
+					const matched=actual !== undefined && Bun.deepEquals(actual, snapshot);
+					logger.info("Away native bridge", { stage:"native-result", matched });
+					return matched ? "accepted" : "stale";
 				} finally { call.submitting = false; }
 			},
 		};
@@ -124,6 +129,7 @@ export default function away(pi: ExtensionAPI): void {
 		if (epoch !== generation) return;
 		const port = configuredPort(pi);
 		if (!port) {
+			logger.info("Away native bridge", { stage:"configuration-unavailable" });
 			ctx.ui.notify("Away unavailable: set collab.relayUrl=ws://127.0.0.1:<port>, collab.autoStart=control and ask.timeout=0 in this profile.", "error");
 			return;
 		}
@@ -139,10 +145,16 @@ export default function away(pi: ExtensionAPI): void {
 		try {
 			const next = await startAdapter(port, sessionId, {
 				ready() {
-					if (epoch === generation) { ready = true; ctx.ui.notify("Away: local guest ready", "info"); }
+					if (epoch === generation) {
+						ready = true; logger.info("Away native bridge", { stage:"adapter-ready" });
+						ctx.ui.notify("Away: local guest ready", "info");
+					}
 				},
 				unavailable(reason: string) {
-					if (epoch === generation) ctx.ui.notify(`Away unavailable: ${reason}`, "error");
+					if (epoch === generation) {
+						logger.info("Away native bridge", { stage:"adapter-unavailable" });
+						ctx.ui.notify(`Away unavailable: ${reason}`, "error");
+					}
 				},
 				lost() {
 					if (epoch === generation) { ready = false; discard(); }
@@ -166,6 +178,7 @@ export default function away(pi: ExtensionAPI): void {
 			if (epoch === generation) adapter = next;
 			else await next.close();
 		} catch {
+			logger.info("Away native bridge", { stage:"adapter-failed" });
 			if (epoch === generation) {
 				ready = false;
 				discard();
@@ -197,6 +210,7 @@ export default function away(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_, ctx) => { if (ctx.agent.kind === "main") return stop(); });
 
 	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName === "ask") logger.info("Away native bridge", { stage:"ask-seen", owned:owns(ctx), ready, adapter:!!adapter });
 		if (!owns(ctx) || event.toolName !== "ask" || !ready || !adapter || typeof event.input.html !== "string") return;
 		const source = pi.getAllTools().filter(tool => tool.name === "ask");
 		if (source.length !== 1 || source[0].sourceInfo.source !== "builtin" || source[0].sourceInfo.path !== "<builtin:ask>") return;

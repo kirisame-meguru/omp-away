@@ -20,7 +20,7 @@ export interface VoiceCall {
 /** Open one desktop-authenticated Codex call. The peer owns only ephemeral WebRTC
  * keys and the signaled SDP. Neither device nor media process receives the login. */
 export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
-	const { ctx, brief, signal, onEnd, onTranscript, onAudio, onInterrupt, onSpeechStarted } = options;
+	const { ctx, brief, signal, onEnd, onTranscript, onAudio, onInterrupt, onSpeechStarted, onCaption } = options;
 	signal?.throwIfAborted();
 	if (typeof brief !== 'string' || !brief.trim() || brief.length > 8192) throw new Error('Missing or oversize decision brief');
 	const sessionId = ctx.sessionManager.getSessionId(), authStorage = ctx.modelRegistry.authStorage;
@@ -32,7 +32,7 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 	let cleanup: Promise<void> | undefined;
 	const abort = () => { void close() };
 	let timer = setTimeout(() => { void close(new Error('Desktop voice setup timed out')) }, 60_000);
-	const session = new VoiceSession({ onTranscript, onAudio, onInterrupt, onSpeechStarted }, message => {
+	const session = new VoiceSession({ onTranscript, onAudio, onInterrupt, onSpeechStarted, onCaption }, message => {
 		if (!transport || controller.signal.aborted) return Promise.reject(new Error('Voice is closed'));
 		return transport.send(message);
 	}, reason => { void close(reason) }, trace);

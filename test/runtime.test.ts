@@ -45,6 +45,25 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 	const join = (dev:string,id:string) => wire.onMessage(dev,{type:"join",requestId:id});
 	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations,sideCalls};
 }
+test('captions go only to the opted-in active caller and cannot authorize submission',async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A");
+		await f.wire.onMessage("phone",{type:"join",requestId:"A",captions:true});
+		const voice=f.voices[0];
+		voice.onCaption?.("user","Coffee",false);
+		voice.onCaption?.("assistant","Submitting",true);
+		expect(f.controls.filter(c=>c.message.type==="transcript")).toEqual([
+			{device:"phone",message:{type:"transcript",requestId:"A",role:"user",text:"Coffee",final:false}},
+			{device:"phone",message:{type:"transcript",requestId:"A",role:"assistant",text:"Submitting",final:true}},
+		]);
+		expect(f.submitted).toEqual([]);
+		await f.wire.onMessage("phone",{type:"hangup",requestId:"A"});
+		voice.onCaption?.("user","late speech",true);
+		expect(f.controls.filter(c=>c.message.type==="transcript")).toHaveLength(2);
+		f.offer("B"); await f.join("phone","B");
+		expect(f.voices[1].onCaption).toBeUndefined();
+	} finally {await f.runtime.close()}
+});
 test("birth pins the audience; decline, stale and unauthenticated join never open voice or ring",async()=>{
 	const f=await fixture(); try {
 		f.offer("request-A"); f.wire.onConnect!("phone"); f.wire.onMessage("phone",{type:"silence",requestId:"request-A"});

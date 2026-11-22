@@ -10,20 +10,52 @@ import { logger } from '@oh-my-pi/pi-utils';
 
 const speech = new Uint8Array(960).fill(8), silence = new Uint8Array(960);
 const final = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
-function harness(write?: () => void | Promise<void>) {
+function harness(write?: () => void | Promise<void>, caption?: () => void) {
 	const sent: LiveClientMessage[] = [], starts: string[] = [], transcripts: unknown[][] = [];
-	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [];
+	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [], captions: unknown[][] = [];
 	const session = new VoiceSession({
 		onTranscript: (...args) => { transcripts.push(args) },
 		onSpeechStarted: id => { starts.push(id); events.push('speech') },
 		onAudio: frame => { audio.push(frame); return write?.() },
 		onInterrupt: () => { events.push('interrupt') },
+		onCaption: (...args) => { captions.push(args); caption?.() },
 	}, async message => { sent.push(message) }, error => { failures.push(error) });
-	return {session,sent,starts,transcripts,audio,events,failures};
+	return {session,sent,starts,transcripts,audio,events,failures,captions};
 }
 function frames(session:VoiceSession, frame:Uint8Array, count:number) {
 	for(let i=0;i<count;i++) session.rtp(frame);
 }
+test('live captions coalesce deltas, replace provisional text with the final turn, and stop at hangup',async()=>{
+	vi.useFakeTimers(); const h=harness();
+	try {
+		await h.session.event({type:'input_transcript.added',item:{text:'Cof'}});
+		await h.session.event({type:'input_transcript.added',item:{text:'fee'}});
+		await h.session.event({type:'output_transcript.added',item:{text:'Tea?'}});
+		vi.advanceTimersByTime(100);
+		expect(h.captions).toEqual([['user','Coffee',false],['assistant','Tea?',false]]);
+		expect(h.transcripts).toEqual([]);
+		await h.session.event(final('user','Coffee.'));
+		expect(h.captions.at(-1)).toEqual(['user','Coffee.',true]);
+		await h.session.event({type:'input_transcript.added',item:{text:'Yeah'}});
+		vi.advanceTimersByTime(100);
+		expect(h.captions.at(-1)).toEqual(['user','Yeah',false]);
+		await h.session.event({type:'output_transcript.added',item:{text:'More'}});
+		const count=h.captions.length;
+		h.session.stop(); vi.advanceTimersByTime(100);
+		expect(h.captions).toHaveLength(count);
+	} finally {h.session.stop();vi.useRealTimers()}
+});
+test('failed caption delivery cannot stop audio or discard a final caller decision',async()=>{
+	vi.useFakeTimers(); const h=harness(undefined,()=>{throw Error('Display unavailable')});
+	try {
+		await h.session.event({type:'input_transcript.added',item:{text:'Coffee'}});
+		vi.advanceTimersByTime(100);
+		await h.session.event(final('user','Coffee'));
+		h.session.rtp(speech);
+		expect(h.transcripts).toEqual([['user','Coffee',h.starts[0]]]);
+		expect(h.audio).toEqual([speech]); expect(h.failures).toEqual([]);
+	} finally {h.session.stop();vi.useRealTimers()}
+});
 test('audio reaches the handset before any assistant final or verification',async()=>{
 	const h=harness();
 	try {

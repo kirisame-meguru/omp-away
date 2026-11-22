@@ -59,7 +59,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 		call.decision.close(); // 'ended' must precede an error, including during the join handshake.
 		control(call.device,{type:"error",code:"voice-unavailable"});
 	}
-	async function join(device:string,id:string) {
+	async function join(device:string,id:string,captions=false) {
 		const entry=requests.get(id), ctx=entry?.ctx;
 		const decision=!active && entry?.audience.has(device) ? core.join(id) : undefined;
 		if (!ctx || !decision || !gateway) {control(device,{type:"error",code:"request-unavailable"});return}
@@ -75,6 +75,9 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			const brief=await decision.brief();
 			if (!current(call)) return;
 			const voice=await transports.voice({ctx,brief,signal:decision.signal,
+				onCaption:captions ? (role,text,final)=>{
+					if (current(call) && call.streaming) control(device,{type:"transcript",requestId:id,role,text,final});
+				} : undefined,
 				onSpeechStarted(utterance) {
 					if (!current(call) || !call.streaming) return;
 					++revision; onset=utterance;
@@ -134,7 +137,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			switch (message.type) {
 				case "list": inbox(device); break;
 				case "silence": if (requests.get(message.requestId)?.audience.has(device)) core.silence(message.requestId); break;
-				case "join": await join(device,message.requestId); break;
+				case "join": await join(device,message.requestId,message.captions===true); break;
 				case "hangup": if (active?.device===device && active.id===message.requestId) active.decision.close(); break;
 				// Old handset acknowledgments are compatibility traffic, not authorization.
 				case "played": break;

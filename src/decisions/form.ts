@@ -35,13 +35,15 @@ function mentioned(evidence:string, label:string) {
 
 /** An entire, unambiguous native option label needs no semantic inference. */
 export function exactChoiceDraft(form: DecisionForm, utterance: string): Draft | undefined {
-	if (form.native.fields.length!==1 || /[\r\n?]/u.test(utterance)) return;
+	if (form.native.fields.length!==1 || /[\r\n]/u.test(utterance)) return;
 	const [item]=form.native.fields;
 	if (item.kind!=="choice" || item.field.multi || isArrayChoice(item.field)) return;
-	const answer=key(utterance.replace(/[.!]+$/u,""));
+	const answer=key(utterance).replace(/[.!?…]+$/u,"").trim();
+	const repeated=answer.split(/\s*[,!.?…]+\s*/u);
 	let value:string|undefined;
 	for (const option of item.enabled) {
-		if (key(spansText(option.label).trim() || option.value)!==answer) continue;
+		const label=key(spansText(option.label).trim() || option.value);
+		if (label!==answer && !(repeated.length>1 && repeated.every(part=>part===label))) continue;
 		if (value!==undefined) return;
 		value=option.value;
 	}

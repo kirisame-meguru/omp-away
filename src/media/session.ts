@@ -8,6 +8,7 @@ export interface VoiceCallbacks {
 	onSpeechStarted(utteranceId: string): void;
 	onInterrupt(): void;
 	onAudio(pcm: Uint8Array): void | Promise<void>;
+	onCaption?(role: 'user' | 'assistant', text: string, final: boolean): void;
 }
 interface Output {
 	frames: Uint8Array[];
@@ -46,7 +47,32 @@ export class VoiceSession {
 	#writing = false;
 	#sending = false;
 	#seen = new Set<string>();
+	#captionText = {user:'',assistant:''};
+	#captionPending = new Set<'user' | 'assistant'>();
+	#captionTimer?: NodeJS.Timeout;
 	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace) {}
+	#deliverCaption(role: 'user' | 'assistant', text: string, final: boolean) {
+		try { this.cb.onCaption?.(role,text,final) }
+		catch { this.trace?.step('caption.delivery_failed') }
+	}
+
+	#caption(role: 'user' | 'assistant', text: string, final: boolean) {
+		if (!this.cb.onCaption) return;
+		if (final) {
+			this.#captionPending.delete(role); this.#captionText[role] = '';
+			if (!this.#captionPending.size) { clearTimeout(this.#captionTimer); this.#captionTimer = undefined }
+			if (bounded(text)) this.#deliverCaption(role,text,true);
+			return;
+		}
+		if (!text || text.includes('\0') || this.#captionText[role].length + text.length > 8192) return;
+		this.#captionText[role] += text; this.#captionPending.add(role);
+		this.#captionTimer ??= setTimeout(() => {
+			this.#captionTimer = undefined;
+			if (!this.#live) return;
+			for (const role of this.#captionPending) this.#deliverCaption(role,this.#captionText[role],false);
+			this.#captionPending.clear();
+		},100);
+	}
 
 	#clearAudio() {
 		clearTimeout(this.#wake); this.#wake = undefined;
@@ -57,6 +83,8 @@ export class VoiceSession {
 	}
 	stop() {
 		this.#live = false; ++this.#revision;
+		clearTimeout(this.#captionTimer); this.#captionTimer = undefined;
+		this.#captionPending.clear(); this.#captionText.user = this.#captionText.assistant = '';
 		this.#onset = undefined; this.#seen.clear(); this.#clearAudio(); this.#clearAudioDeadline();
 	}
 	#speech(provider: boolean) {
@@ -180,7 +208,11 @@ export class VoiceSession {
 				}
 				case 'error': throw new Error('Codex voice connection failed');
 				case 'input_transcript.added':
+					this.#caption('user',event.item.text,false);
 					if (!this.#onset?.providerSeen && !this.#ambiguous) this.#speech(true);
+					return;
+				case 'output_transcript.added':
+					this.#caption('assistant',event.item.text,false);
 					return;
 				case 'output_audio.delta': {
 					if (!event.audio || event.audio.length > 64000 || !/^[A-Za-z0-9+/]+$/.test(event.audio)) throw new Error('Invalid ordered voice audio');
@@ -193,6 +225,7 @@ export class VoiceSession {
 				default: return;
 			}
 			const { role, transcript } = event.turn;
+			this.#caption(role,transcript,true);
 			if (role === 'assistant') {
 				if (bounded(transcript)) this.cb.onTranscript(role, transcript);
 				return;

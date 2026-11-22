@@ -97,6 +97,7 @@ class Phone:
         self.stream = stream
         self.ref = secrets.token_hex(16)  # Local connection epoch, never selected by relay.
         self.joining = self.joined = None
+        self.captions = False
         self.marks = set()
 
     def incoming(self, msg):
@@ -105,12 +106,15 @@ class Phone:
             return
         if not route(rid):
             raise ProtocolError('invalid request')
-        if kind in ('join', 'silence', 'hangup') and fields(msg, 'type', 'requestId'):
-            if kind == 'join':
-                if self.joined or self.joining:
-                    raise ProtocolError('call already open')
-                self.joining = rid
-            elif kind == 'hangup' and rid not in (self.joining, self.joined):
+        if kind == 'join' and (fields(msg, 'type', 'requestId') or
+                               (fields(msg, 'type', 'requestId', 'captions') and type(msg['captions']) is bool)):
+            if self.joined or self.joining:
+                raise ProtocolError('call already open')
+            self.joining = rid
+            self.captions = msg.get('captions', False)
+            return
+        if kind in ('silence', 'hangup') and fields(msg, 'type', 'requestId'):
+            if kind == 'hangup' and rid not in (self.joining, self.joined):
                 raise ProtocolError('wrong call')
             return
         if kind == 'played' and fields(msg, 'type', 'requestId', 'mark') and rid == self.joined and marker(msg['mark']) and msg['mark'] in self.marks:
@@ -135,6 +139,12 @@ class Phone:
             if kind == 'ended' and rid in (self.joining, self.joined):
                 self.joined = self.joining = None
                 self.marks.clear()
+                self.captions = False
+                return
+        elif kind == 'transcript' and fields(msg, 'type', 'requestId', 'role', 'text', 'final'):
+            if (self.captions and route(rid) and rid == self.joined and msg['role'] in ('user', 'assistant') and
+                    isinstance(msg['text'], str) and 0 < len(msg['text']) <= 8192 and '\0' not in msg['text'] and
+                    type(msg['final']) is bool):
                 return
         elif kind == 'mark' and fields(msg, 'type', 'requestId', 'mark') and route(rid) and rid == self.joined and marker(msg['mark']):
             if len(self.marks) < 128 and msg['mark'] not in self.marks:

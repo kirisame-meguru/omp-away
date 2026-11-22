@@ -4,12 +4,14 @@ import { Framer, frame, mediaPacket, readMedia } from './framing';
 
 export type PhoneControl =
   | { type: 'list' }
-  | { type: 'join' | 'silence' | 'hangup'; requestId: string }
+  | { type: 'join'; requestId: string; captions?: boolean }
+  | { type: 'silence' | 'hangup'; requestId: string }
   | { type: 'played'; requestId: string; mark: string };
 export type DesktopControl =
   | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number }[] }
   | { type: 'joined' | 'ended'; requestId: string }
   | { type: 'mark'; requestId: string; mark: string }
+  | { type: 'transcript'; requestId: string; role: 'user' | 'assistant'; text: string; final: boolean }
   | { type: 'error'; code: string };
 
 export interface SecureDesktopOptions {
