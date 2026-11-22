@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omp-away-tunnel"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "cryptography>=45,<50",
+  "pyOpenSSL>=25.1,<27",
+  "pywin32>=306; sys_platform == 'win32'",
+]
+
+[tool.setuptools]
+packages = ["omp_away_tunnel"]
