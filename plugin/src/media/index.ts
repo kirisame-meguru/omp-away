@@ -1,5 +1,4 @@
 import type { ExtensionContext } from '@oh-my-pi/pi-coding-agent';
-import { VERSION } from '@oh-my-pi/pi-utils';
 import { LiveTransport, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import { spawnPeer, type MediaPeer } from './peer';
 import { VoiceSession, type VoiceCallbacks } from './session';
@@ -26,8 +25,11 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 	const { ctx, brief, signal, onEnd, onTranscript, onAudio, onInterrupt, onSpeechStarted, onCaption, log } = options;
 	signal?.throwIfAborted();
 	if (typeof brief !== 'string' || !brief.trim() || brief.length > 8192) throw new Error('Missing or oversize decision brief');
-	const sessionId = ctx.sessionManager.getSessionId(), authStorage = ctx.modelRegistry.authStorage;
-	if (!sessionId || !authStorage) throw new Error('The current desktop session cannot authenticate Codex voice');
+	// Host releases are not a compatibility contract; check the APIs used by OAuth signaling.
+	const sessionId = typeof ctx.sessionManager?.getSessionId === 'function' ? ctx.sessionManager.getSessionId() ?? '' : '';
+	const authStorage = ctx.modelRegistry?.authStorage;
+	if (typeof sessionId !== 'string' || !sessionId || typeof authStorage?.oauth?.access !== 'function' ||
+		typeof authStorage?.limits?.rotate !== 'function') throw new Error('The current desktop session cannot authenticate Codex voice');
 	const trace = openVoiceTrace(process.env.OMP_AWAY_VOICE_TRACE);
 	const controller = new AbortController(), ended = Promise.withResolvers<never>();
 	void ended.promise.catch(() => {});
@@ -50,11 +52,9 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 		return cleanup;
 	}
 	signal?.addEventListener('abort', abort, { once: true });
-	let stage = 'Desktop voice requires stock omp 19.1.0';
+	let stage = 'Unable to start the desktop media helper; provision plugin/media/.venv with uv';
 	async function start() {
-		if (VERSION !== '19.1.0') throw new Error('Unsupported host SDK');
 		controller.signal.throwIfAborted();
-		stage = 'Unable to start the desktop media helper; provision plugin/media/.venv with uv';
 		// WebRTC carries the microphone; output comes only from the ordered sideband.
 		// Mixing its PCM with independently timed RTP can clip or duplicate a turn.
 		peer = spawnPeer(() => {}, () => { void close(new Error('Desktop media peer unavailable')) }, process.env.OMP_AWAY_VOICE_TRACE ? trace.sctp : undefined);
