@@ -30,7 +30,7 @@ describe('private helper boundary', () => {
     expect(() => parser.end()).toThrow();
   });
   it('rejects non-HTTPS, credential-bearing and off-origin URLs before spawning', async () => {
-    for (const url of ['http://away.example.invalid', 'https://name:password@example.org', 'https://example.org/private?token=x']) {
+    for (const url of ['http://relay.example.org', 'https://name:password@example.org', 'https://example.org/private?token=x']) {
       await expect(startSecureDesktop({url, desktopToken:'A'.repeat(43), stateDir:'/unused',confirmPair:async()=>false,onMessage(){},onPcm(){},onLoss(){}})).rejects.toThrow();
     }
   });

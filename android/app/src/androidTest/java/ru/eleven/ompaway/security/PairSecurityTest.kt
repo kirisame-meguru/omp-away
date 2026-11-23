@@ -11,12 +11,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PairSecurityTest {
-    @Test fun invitationCannotRedirectTicketsOrIgnoreVersionAndPinFormat() {
+    @Test fun invitationAcceptsExplicitHttpsOriginsButRejectsAmbiguousDestinationsAndBadPins() {
         val pin = base64url(ByteArray(32))
-        val json = """{"v":1,"url":"https://away.example.invalid","ticket":"valid_ticket","desktopPin":"$pin","nonce":"$pin","secret":"$pin"}"""
+        val json = """{"v":1,"url":"https://relay.example","ticket":"valid_ticket","desktopPin":"$pin","nonce":"$pin","secret":"$pin"}"""
         assertEquals("valid_ticket", Invitation.parse(json).ticket)
-        for (changed in listOf(json.replace("away.example.invalid", "away.example.invalid.other"), json.replace("\"v\":1", "\"v\":2"),
-            json.replace(pin, pin + "="), json.replace("\"v\":1", "\"v\":1,\"v\":1"))) {
+        assertEquals("https://relay.example", Invitation.parse(json).origin)
+        assertEquals("https://other.example:8443", Invitation.parse(json.replace("relay.example", "other.example:8443")).origin)
+        for (changed in listOf(json.replace("https://relay.example", "http://relay.example"),
+            json.replace("relay.example", "user:password@relay.example"), json.replace("relay.example", "relay.example/path"),
+            json.replace("relay.example", "relay.example?q=x"), json.replace("relay.example", "relay.example#fragment"),
+            json.replace("\"v\":1", "\"v\":2"), json.replace(pin, pin + "="), json.replace("\"v\":1", "\"v\":1,\"v\":1"))) {
             assertTrue(runCatching { Invitation.parse(changed) }.isFailure)
         }
     }
@@ -35,6 +39,15 @@ class PairSecurityTest {
             vault.save(Route("device", token, pin, pin))
             val restored = Vault(ctx)
             assertEquals(token, restored.route()?.token)
+            assertNull(restored.route()?.origin)
+            restored.migrateOrigin("https://relay.example")
+            val migrated = Vault(ctx).route()!!
+            assertEquals("https://relay.example", migrated.origin)
+            assertEquals(token, migrated.token)
+            assertEquals(pin, migrated.phonePin)
+            assertEquals(pin, migrated.desktopPin)
+            assertEquals("device", migrated.deviceId)
+            assertTrue(runCatching { restored.migrateOrigin("https://other.example") }.isFailure)
             assertTrue(runCatching { restored.save(Route("device2", "new bearer", pin, pin)) }.isFailure)
             val prefs = base.getSharedPreferences(testPrefs, Context.MODE_PRIVATE)
             assertFalse(prefs.all.values.any { token in it.toString() })

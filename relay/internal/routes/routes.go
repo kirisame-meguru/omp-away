@@ -26,6 +26,10 @@ import (
 var uuid = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 var errBody = errors.New("invalid JSON object")
 
+// The colon cannot appear in a validated opaque request ID. Both namespaces
+// share the store's bounded retention/capacity, but never suppress each other.
+const invalidationNamespace = "invalidation:"
+
 type flight struct {
 	done   chan struct{}
 	status int
@@ -138,7 +142,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status(err))
 			return
 		}
-	case path == "/v1/enrollments" || path == "/v1/invites" || path == "/v1/control" || strings.HasPrefix(path, "/v1/tunnels/"):
+	case path == "/v1/enrollments" || path == "/v1/invites" || path == "/v1/invalidations" || path == "/v1/control" || strings.HasPrefix(path, "/v1/tunnels/"):
 		hash := sha256.Sum256([]byte(credential(r)))
 		if subtle.ConstantTimeCompare(hash[:], h.desktop[:]) != 1 {
 			w.WriteHeader(401)
@@ -190,7 +194,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(status(h.store.SetFCM(device, v[0])))
-	case "/v1/invites":
+	case "/v1/invites", "/v1/invalidations":
 		if !method(w, r, "POST") {
 			return
 		}
@@ -202,7 +206,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(400)
 			return
 		}
-		w.WriteHeader(h.invite(r.Context(), v[0], v[1]))
+		w.WriteHeader(h.wake(r.Context(), v[0], v[1], path == "/v1/invalidations"))
 	case "/v1/control":
 		if method(w, r, "GET") {
 			h.hub.Control(w, r)
@@ -316,10 +320,14 @@ func decode(d *json.Decoder, keys []string, vals *[2]string) error {
 	return nil
 }
 
-// Concurrent duplicates share one FCM outcome. Persist before send; an
-// ambiguous network error cannot safely be replayed during the dedup window.
-func (h *Handler) invite(ctx context.Context, id, request string) int {
-	key := id + ":" + request
+// Concurrent duplicates share one FCM outcome. Invitations retain ambiguous
+// reservations; invalidations are repeatable sync hints and may retry failures.
+func (h *Handler) wake(ctx context.Context, id, request string, invalidation bool) int {
+	namespace := ""
+	if invalidation {
+		namespace = invalidationNamespace
+	}
+	key := id + ":" + namespace + request
 	h.mu.Lock()
 	if existing := h.flights[key]; existing != nil {
 		h.mu.Unlock()
@@ -333,7 +341,7 @@ func (h *Handler) invite(ctx context.Context, id, request string) int {
 	f := &flight{done: make(chan struct{})}
 	h.flights[key] = f
 	h.mu.Unlock()
-	result := h.deliver(ctx, id, request)
+	result := h.deliver(ctx, id, request, invalidation)
 	h.mu.Lock()
 	f.status = result
 	close(f.done)
@@ -341,13 +349,17 @@ func (h *Handler) invite(ctx context.Context, id, request string) int {
 	h.mu.Unlock()
 	return result
 }
-func (h *Handler) deliver(ctx context.Context, id, request string) int {
-	token, dup, err := h.store.Reserve(id, request, h.now())
+func (h *Handler) deliver(ctx context.Context, id, request string, invalidation bool) int {
+	reservation := request
+	if invalidation {
+		reservation = invalidationNamespace + request
+	}
+	token, dup, err := h.store.Reserve(id, reservation, h.now())
 	if err != nil || dup {
 		return status(err)
 	}
 	if !h.pushes.Allow() {
-		if err := h.store.Rejected(id, request, ""); err != nil {
+		if err := h.store.Rejected(id, reservation, ""); err != nil {
 			return 500
 		}
 		return 429
@@ -356,13 +368,18 @@ func (h *Handler) deliver(ctx context.Context, id, request string) int {
 	defer cancel()
 	err = h.sender.Send(ctx, push.Invite(token, request))
 	if errors.Is(err, push.ErrUnregistered) {
-		if err = h.store.Rejected(id, request, token); err != nil {
+		if err = h.store.Rejected(id, reservation, token); err != nil {
 			return 500
 		}
 		return 410
 	}
 	if err != nil {
+		if invalidation {
+			if err := h.store.Rejected(id, reservation, ""); err != nil {
+				return 500
+			}
+		}
 		return 502
 	}
-	return status(h.store.Accepted(id, request))
+	return status(h.store.Accepted(id, reservation))
 }

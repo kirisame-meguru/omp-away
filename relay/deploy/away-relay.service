@@ -16,6 +16,10 @@ Environment=AWAY_DESKTOP_TOKEN_FILE=%d/desktop-token
 LoadCredential=desktop-token:/etc/omp-away/desktop.token
 Environment=GOOGLE_APPLICATION_CREDENTIALS=%d/google-adc
 LoadCredential=google-adc:/etc/omp-away/firebase-adc.json
+# GOOGLE_CLOUD_PROJECT overrides ADC project_id; required if ADC has no project_id.
+# Use the Android app's Firebase project and grant this credential FCM send access.
+# Replace example-project with your project ID before enabling this override.
+# Environment=GOOGLE_CLOUD_PROJECT=example-project
 StateDirectory=away-relay
 StateDirectoryMode=0700
 UMask=0077

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -53,7 +54,7 @@ func desktopCredential() (string, error) {
 	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Size() > 45 {
 		return "", errors.New(message)
 	}
-	if opened.Mode().Perm()&0077 != 0 && !managedCredential(name, opened) {
+	if !credentialPrivate(name, f, opened) {
 		return "", errors.New(message)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 46))
@@ -81,11 +82,11 @@ func run(ctx context.Context) error {
 	}
 	// systemd DynamicUser's StateDirectory can be a symlink to /var/lib/private.
 	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+	if err != nil || !info.IsDir() || !statePrivate(dir, info) {
 		return errors.New("state directory missing or not private")
 	}
 	dbName := filepath.Join(dir, "routes.db")
-	if info, err := os.Lstat(dbName); err == nil && (!info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0) {
+	if info, err := os.Lstat(dbName); err == nil && (!info.Mode().IsRegular() || !statePrivate(dbName, info)) {
 		return errors.New("routing database is not private")
 	}
 	db, err := registration.Open(dbName)
@@ -93,6 +94,12 @@ func run(ctx context.Context) error {
 		return errors.New("cannot open routing database")
 	}
 	defer db.Close()
+	// Check a newly created database too: Windows applies inherited DACLs, not
+	// the POSIX mode requested by bbolt. No routing secrets are written yet.
+	dbInfo, err := os.Lstat(dbName)
+	if err != nil || !dbInfo.Mode().IsRegular() || !statePrivate(dbName, dbInfo) {
+		return errors.New("routing database is not private")
+	}
 	sender, err := push.New(ctx)
 	if err != nil {
 		return errors.New("cannot initialize Firebase messaging with ADC")
@@ -135,6 +142,14 @@ func run(ctx context.Context) error {
 	return nil
 }
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println(versionText(runtime.GOOS, runtime.GOARCH))
+		return
+	}
+	if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: away-relay [--version]")
+		os.Exit(2)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx); err != nil {

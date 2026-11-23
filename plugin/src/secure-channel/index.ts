@@ -2,14 +2,17 @@ import { spawn } from 'node:child_process';
 import { delimiter, isAbsolute } from 'node:path';
 import { Framer, frame, isRoute as route, mediaPacket, readMedia } from './framing';
 import { preferences, preferencePatch, type Preferences } from '../decisions/preferences';
+import type { QuestionDisplay } from '../decisions/display';
 
 export type PhoneControl =
-  | { type: 'list' }
+  | { type: 'list'; details?: boolean }
   | { type: 'join'; requestId: string; captions?: boolean }
   | { type: 'silence' | 'hangup'; requestId: string }
   | { type: 'played'; requestId: string; mark: string };
 export type DesktopControl =
-  | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number }[] }
+  | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number; session?: string }[] }
+  | { type: 'question'; requestId: string; display: QuestionDisplay }
+  | { type: 'proposal'; requestId: string; text: string }
   | { type: 'joined' | 'ended'; requestId: string }
   | { type: 'mark'; requestId: string; mark: string }
   | { type: 'transcript'; requestId: string; role: 'user' | 'assistant'; text: string; final: boolean }
@@ -37,6 +40,7 @@ export interface SecureDesktop {
   devices(): Promise<string[]>;
   routing(patch?: Partial<Preferences>): Promise<Preferences>;
   ring(deviceId: string, requestId: string): Promise<void>;
+  invalidate(deviceId: string, requestId: string): Promise<void>;
   sendControl(deviceId: string, message: DesktopControl): Promise<void>;
   sendPcm(deviceId: string, pcm: Uint8Array): Promise<void>;
   close(): Promise<void>;
@@ -72,6 +76,7 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
   });
   let closing = false, stopped = false, seq = 0;
   let routingVersion = 0, routingReceived = false;
+  let retirementQueue: Promise<unknown> = Promise.resolve();
   const connected = new Map<string, string>();
   const pending = new Map<number, { resolve(value: unknown): void; reject(err: Error): void; timer: ReturnType<typeof setTimeout> }>();
   const ready = Promise.withResolvers<void>();
@@ -205,6 +210,13 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
     async ring(deviceId, requestId) {
       if (!route(deviceId) || !route(requestId)) throw new Error('Invalid invite route');
       await command('ring', {deviceId, requestId});
+    },
+    async invalidate(deviceId, requestId) {
+      if (!route(deviceId) || !route(requestId)) throw new Error('Invalid retirement route');
+      // A bulk authoritative close must not exhaust the bounded RPC window.
+      const result = retirementQueue.then(() => command('invalidate', {deviceId, requestId}));
+      retirementQueue = result.catch(() => {});
+      await result;
     },
     async sendControl(deviceId, message) { await command('control', {deviceId, ref: requireConnected(deviceId), message}); },
     async sendPcm(deviceId, pcm) {

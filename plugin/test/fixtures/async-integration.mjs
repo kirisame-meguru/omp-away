@@ -15,7 +15,7 @@ const turn = () => Bun.sleep(0);
 const results = [];
 for (const order of ["async-first", "away-first"]) {
   for (const scenario of ["phone", "desktop", "withdraw", "restore", "send-failure"]) {
-    const events = new EventBus(), handlers = new Map(), tools = new Map();
+    const events = new EventBus(), handlers = new Map(), tools = new Map(), renderers = new Map();
     const journal = [], sent = [], notices = [], voice = [], controls = [];
     let sessionId = "fixture", mobile, wire, pending = [];
     const ctx = {
@@ -29,6 +29,7 @@ for (const order of ["async-first", "away-first"]) {
     const api = {
       events, arktype, registerCommand() {}, getActiveTools: () => [], async setActiveTools() {},
       registerTool(tool) { tools.set(tool.name, tool); },
+      registerMessageRenderer(customType, renderer) { renderers.set(customType, renderer); },
       on(name, handler) { const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list); },
       appendEntry(customType, data) { journal.push({type:"custom",id:crypto.randomUUID(),parentId:null,timestamp:new Date().toISOString(),customType,data}); },
       sendMessage(message, options) {
@@ -47,6 +48,7 @@ for (const order of ["async-first", "away-first"]) {
           wire = options; options.onRouting({away:true,delayMs:null}); options.onConnect("phone");
           return { async devices(){return ["phone"]}, async close(){}, async pair(){throw Error("No pairing")},
             async routing(){return {away:true,delayMs:null}}, async ring(){}, async sendPcm(){},
+            async invalidate(){},
             async sendControl(_device,message){controls.push(message)},
           };
         },

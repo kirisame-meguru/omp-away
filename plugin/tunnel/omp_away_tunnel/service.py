@@ -11,8 +11,9 @@ import aiohttp
 from OpenSSL import SSL
 from .identity import IdentityStore, ROUTE, digest_bytes
 from .ipc import Stdio
-from .transport import ProtocolError, SecureStream, object_json, server_context
+from .transport import JSON_LIMIT, ProtocolError, SecureStream, encode, object_json, server_context
 from .broker import Broker, proxy
+from .controls import inbox_ids, question_display, text
 
 
 EMOJI = '🐶🐱🦊🐻🐼🐸🐵🐯🦁🐷🐨🐰🐙🐧🐳🐢'
@@ -101,10 +102,13 @@ class Phone:
         self.joining = self.joined = None
         self.captions = False
         self.marks = set()
+        self.details = False
+        self.requests = set()
 
     def incoming(self, msg):
         kind, rid = msg.get('type'), msg.get('requestId')
-        if kind == 'list' and fields(msg, 'type'):
+        if kind == 'list' and (fields(msg, 'type') or fields(msg, 'type', 'details') and type(msg['details']) is bool):
+            self.details = msg.get('details', False)
             return
         if not route(rid):
             raise ProtocolError('invalid request')
@@ -125,11 +129,21 @@ class Phone:
         raise ProtocolError('invalid phone control')
 
     def outgoing(self, msg):
+        try:
+            if not isinstance(msg, dict) or len(encode(msg)) > JSON_LIMIT:
+                raise ProtocolError('invalid desktop frame')
+        except (ValueError, TypeError, UnicodeError):
+            raise ProtocolError('invalid desktop frame') from None
         kind, rid = msg.get('type'), msg.get('requestId')
-        if kind == 'inbox' and fields(msg, 'type', 'items') and isinstance(msg['items'], list):
-            if all(fields(i, 'requestId', 'project', 'question', 'createdAt') and route(i['requestId']) and
-                   isinstance(i['project'], str) and isinstance(i['question'], str) and type(i['createdAt']) is int and
-                   0 <= i['createdAt'] <= 2**53 - 1 for i in msg['items']):
+        if kind == 'inbox':
+            self.requests = inbox_ids(msg)
+            return
+        elif kind == 'question' and fields(msg, 'type', 'requestId', 'display'):
+            if self.details and route(rid) and rid in self.requests and question_display(msg['display']):
+                return
+        elif kind == 'proposal' and fields(msg, 'type', 'requestId', 'text'):
+            if (self.details and route(rid) and rid in self.requests and text(msg['text']) and
+                    (not msg['text'] or rid == self.joined)):
                 return
         elif kind == 'error' and fields(msg, 'type', 'code') and route(msg['code']):
             self.joining = None
@@ -171,6 +185,46 @@ class Service:
         self.connections = {}
         self.phones = {}
         self.background = set()
+        self.pending_invalidations = {}  # Bounded opaque routes, retained after their session exits.
+        self.invalidation_changed = asyncio.Event()
+
+    async def invalidate(self, device, request):
+        pair = (device, request)
+        if pair in self.pending_invalidations:
+            return
+        if len(self.pending_invalidations) >= 4096:
+            raise ProtocolError('retirement backlog full')
+        self.pending_invalidations[pair] = None
+        try:
+            await self.post('/v1/invalidations', {'deviceId': device, 'requestId': request}, False)
+        except Exception:
+            # Acknowledgment means accepted for delivery, not that FCM is authoritative.
+            self.pending_invalidations[pair] = time.monotonic() + 1
+            self.invalidation_changed.set()
+        else:
+            self.pending_invalidations.pop(pair, None)
+
+    async def retry_invalidations(self):
+        while True:
+            now = time.monotonic()
+            due = [pair for pair, deadline in self.pending_invalidations.items() if deadline is not None and deadline <= now]
+            for device, request in due:
+                pair = (device, request)
+                self.pending_invalidations[pair] = None
+                try:
+                    await self.post('/v1/invalidations', {'deviceId': device, 'requestId': request}, False)
+                except Exception:
+                    self.pending_invalidations[pair] = time.monotonic() + 30
+                else:
+                    self.pending_invalidations.pop(pair, None)
+            deadlines = [deadline for deadline in self.pending_invalidations.values() if deadline is not None]
+            delay = max(0, min(deadlines) - time.monotonic()) if deadlines else None
+            self.invalidation_changed.clear()
+            try:
+                async with asyncio.timeout(delay):
+                    await self.invalidation_changed.wait()
+            except TimeoutError:
+                pass
 
     async def confirm(self, device, emoji):
         ref = secrets.token_urlsafe(16)
@@ -287,8 +341,12 @@ class Service:
             elif op == 'pair':
                 ticket = await self.post('/v1/enrollments', {}, True)
                 result = self.pairs.issue(self.url, ticket)
-            elif op == 'ring' and device in self.identity.peers and route(cmd['requestId']):
-                await self.post('/v1/invites', {'deviceId': device, 'requestId': cmd['requestId']}, False)
+            elif (op in ('ring', 'invalidate') and fields(cmd, 'op', 'id', 'deviceId', 'requestId') and
+                  device in self.identity.peers and route(cmd['requestId'])):
+                if op == 'invalidate':
+                    await self.invalidate(device, cmd['requestId'])
+                else:
+                    await self.post('/v1/invites', {'deviceId': device, 'requestId': cmd['requestId']}, False)
             elif op == 'confirm' and type(cmd.get('accept')) is bool:
                 future = self.waiters.get(cmd['ref'])
                 if future is not None and not future.done():
@@ -321,6 +379,7 @@ class Service:
             ws = await self.connect('/v1/control')
             stack.push_async_callback(ws.close)
             control = asyncio.create_task(self.control(ws))
+            invalidations = asyncio.create_task(self.retry_invalidations())
             try:
                 await self.ipc.event(event='ready')
                 while True:
@@ -329,7 +388,9 @@ class Service:
                         break
                     if type(cmd.get('id')) is not int or not 0 < cmd['id'] < 2**32:
                         raise ProtocolError('invalid command id')
-                    if cmd['op'] in ('pair', 'ring') and len(self.background) < 16:
+                    if cmd['op'] == 'invalidate' and len(self.background) >= 16:
+                        await asyncio.wait(self.background, return_when=asyncio.FIRST_COMPLETED)
+                    if cmd['op'] in ('pair', 'ring', 'invalidate') and len(self.background) < 16:
                         task = asyncio.create_task(self.execute(cmd))
                         self.background.add(task)
                         task.add_done_callback(self.background.discard)
@@ -339,7 +400,8 @@ class Service:
                         await self.execute(cmd)
             finally:
                 control.cancel()
-                await asyncio.gather(control, return_exceptions=True)
+                invalidations.cancel()
+                await asyncio.gather(control, invalidations, return_exceptions=True)
                 await self.drop_all()
                 tasks = list(self.background)
                 for task in tasks:

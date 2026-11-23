@@ -1,17 +1,18 @@
 import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+import { spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { type FormValues, planAnswers, tagForm, type PreparedForm } from "../collab/form";
 import type { QuestionContext } from "../index";
+import { displayExcerpt, questionDisplay, type QuestionDisplay } from "./display";
 
-export interface DecisionForm { native: PreparedForm; questions:Map<string,string>; description: string; question: string; opening: string }
+export interface DecisionForm { native: PreparedForm; questions:Map<string,string>; description: string; question: string; opening: string; voiceSupported:boolean; display?:QuestionDisplay }
 export type SpokenDraft=ReadonlyArray<{readonly field:string; readonly answer:string | readonly string[] | null}>;
 export interface Draft { values: FormValues; fields: SpokenDraft; voiceData: string }
 const budget = (text: string, bytes: number) => Buffer.byteLength(text) <= bytes;
 export function prepare(html: string, context?: QuestionContext): DecisionForm | undefined {
 	if (!budget(html,65_536)) return;
 	const native = tagForm(html);
-	if (!native || native.fields.length > 32) return;
-	const parsed = parseHtmlForm(html);
+	if (!native) return;
+	const parsed = native.parsed;
 	const questions = new Map([...fieldQuestions(parsed)].map(([field,label])=>[field.name,label]));
 	const fields = native.fields.map(item => {
 		const {field} = item;
@@ -20,7 +21,6 @@ export function prepare(html: string, context?: QuestionContext): DecisionForm |
 		return {...common,type:"choice",array:isArrayChoice(field),multiple:field.multi,other:field.other,options:field.options.filter(o=>!o.disabled).map(o=>({value:o.value,label:spansText(o.label).trim() || o.value}))};
 	});
 	const description = JSON.stringify({context:formContext(parsed),fields,...(context ? {asyncQuestion:context} : {})});
-	if (!budget(description,16_384)) return;
 	const names=new Map<string,number>();
 	for(const f of fields) {const k=audible(f.question || f.name); names.set(k,(names.get(k)??0)+1);}
 	for(const f of fields) if((names.get(audible(f.question || f.name)) ?? 0)>1) questions.set(f.name,`${f.question || f.name} (${f.name})`);
@@ -29,8 +29,9 @@ export function prepare(html: string, context?: QuestionContext): DecisionForm |
 		return item.kind==="choice" ? `${question}\n${item.rows.join("; ")}` : question;
 	}).join("\n");
 	// Do not offer a voice call that would have to silently omit some choices.
-	if (!budget(opening,8192)) return;
-	return {native,questions,description,opening,question:fields.map(f=>f.question || f.name).join("; ").slice(0,256)};
+	const voiceSupported=native.fields.length<=32 && budget(description,16_384) && budget(opening,8192);
+	const display=questionDisplay(parsed);
+	return {native,questions,description,opening,display,voiceSupported,question:displayExcerpt((display?.fields.map(f=>f.label) ?? fields.map(f=>f.question || "Question")).join("; "),256)};
 }
 const record = (x:unknown): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const key = (s:string) => s.toLowerCase().normalize("NFC").replace(/\s+/g," ").trim();

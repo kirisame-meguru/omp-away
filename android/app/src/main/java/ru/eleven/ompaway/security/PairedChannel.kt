@@ -24,8 +24,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import ru.eleven.ompaway.QuestionDisplay
+import ru.eleven.ompaway.decodeQuestionDisplay
 
-data class InboxItem(val requestId: String, val project: String, val question: String, val createdAt: Long)
+data class InboxItem(val requestId: String, val project: String, val question: String, val createdAt: Long, val session: String? = null)
 
 /** One application-owned instance. Listener callbacks are serialized, off the main thread. */
 class PairedChannel(context: Context, private val listener: Listener) : Closeable {
@@ -33,6 +35,8 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         fun onVerify(emoji: String) {}
         fun onReady() {}
         fun onInbox(items: List<InboxItem>) {}
+        fun onQuestion(requestId: String, display: QuestionDisplay?) {}
+        fun onProposal(requestId: String, text: String) {}
         fun onJoined(requestId: String) {}
         fun onEnded(requestId: String) {}
         fun onPcm(pcm: ByteArray) {}
@@ -54,6 +58,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         var timeout: ScheduledFuture<*>? = null
         var tls: TlsPipe? = null
         var voice: Voice? = null
+        val pendingIds = HashSet<String>()
     }
 
     private val vault = Vault(context.applicationContext)
@@ -72,8 +77,14 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     private var tokenRetry: ScheduledFuture<*>? = null
     private var lastToken: String? = null
     private var tokenFailures = 0
+    private val details = DetailsNegotiation()
 
     fun isPaired(): Boolean = vault.paired()
+    fun needsRelayOrigin(): Boolean = vault.paired() && runCatching { vault.route()?.origin == null }.getOrDefault(false)
+    fun migrateRelayOrigin(origin: String) = post {
+        try { vault.migrateOrigin(origin); wanted = true; restore(); refreshToken() }
+        catch (_: Exception) { listener.onError("relay_origin_rejected") }
+    }
 
     private fun post(block: () -> Unit) {
         if (closed.get()) return
@@ -98,7 +109,8 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     }
     private fun loss(s: Session, code: String, retryable: Boolean) {
         if (s !== session) return
-        val reconnect = retryable && wanted && s.invite == null && vault.paired()
+        val fallback = details.retryLegacy(ready === s)
+        val reconnect = (retryable || fallback) && wanted && s.invite == null && vault.paired()
         if (!reconnect) wanted = false
         cleanup(); listener.onError(code)
         if (reconnect && !closed.get()) {
@@ -117,6 +129,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     private fun restore() {
         try {
             val route = vault.route() ?: error("Not paired")
+            if (route.origin == null) { wanted = false; listener.onError("relay_origin_required"); return }
             val identity = PhoneIdentity.open(IDENTITY, false)
             check(route.phonePin == identity.pin)
             val s = Session(identity, null, route); session = s
@@ -130,7 +143,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
             val invite = Invitation.parse(qrJson)
             val identity = PhoneIdentity.open(IDENTITY, true)
             val s = Session(identity, invite, null); session = s
-            val req = Request.Builder().url("$RELAY/v1/enroll").post(jsonBody(JSONObject().put("ticket", invite.ticket))).build()
+            val req = Request.Builder().url("${invite.origin}/v1/enroll").post(jsonBody(JSONObject().put("ticket", invite.ticket))).build()
             val call = http.newCall(req); s.enroll = call
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) = post { loss(s, "enrollment_failed", false) }
@@ -141,7 +154,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                         require(!src.request(8193))
                         bytesJson(src.readByteArray()).run {
                             fields("deviceId", "token")
-                            Route(text("deviceId"), text("token"), invite.desktop, identity.pin)
+                            Route(text("deviceId"), text("token"), invite.desktop, identity.pin, invite.origin)
                         }
                     } } catch (_: Exception) { post { loss(s, "enrollment_rejected", false) }; return }
                     post { current(s) { s.enroll = null; s.route = route; tunnel(s) } }
@@ -164,7 +177,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     private fun tunnel(s: Session) {
         val route = checkNotNull(s.route)
         timeout(s, 35, true)
-        val req = Request.Builder().url("$RELAY/v1/phone").header("Authorization", "Bearer ${route.token}").build()
+        val req = Request.Builder().url("${checkNotNull(route.origin)}/v1/phone").header("Authorization", "Bearer ${route.token}").build()
         s.ws = http.newWebSocket(req, object : WebSocketListener() {
             private val backlog = AtomicInteger()
             private val messages = AtomicInteger()
@@ -210,7 +223,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     private fun activate(s: Session) {
         s.timeout?.cancel(false); s.timeout = null
         ready = s; wanted = true; failures = 0
-        sendJson(s, JSONObject().put("type", "list")); listener.onReady()
+        sendJson(s, listMessage()); listener.onReady()
     }
     private fun sendJson(s: Session, obj: JSONObject) = checkNotNull(s.tls).send(frame(1, obj.toString().toByteArray()))
     private fun incoming(s: Session, kind: Int, bytes: ByteArray) {
@@ -237,13 +250,23 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         check(s === ready)
         when (type) {
             "inbox" -> {
-                msg.fields("type", "items")
-                val items = msg.getJSONArray("items"); val ids = HashSet<String>()
-                listener.onInbox(List(items.length()) { i -> items.getJSONObject(i).run {
-                    fields("requestId", "project", "question", "createdAt")
-                    val id = text("requestId"); require(ids.add(id))
-                    InboxItem(id, get("project") as String, get("question") as String, (get("createdAt") as Long).also { require(it >= 0) })
-                } })
+                val snapshot = decodeInboxSnapshot(msg)
+                s.pendingIds.clear()
+                for (item in snapshot) s.pendingIds.add(item.requestId)
+                listener.onInbox(snapshot)
+            }
+            "question" -> {
+                msg.fields("type", "requestId", "display")
+                val id = msg.text("requestId")
+                details.receivedDetails()
+                // A late detail must never resurrect a retired request or cross request boundaries.
+                if (id in s.pendingIds) listener.onQuestion(id, decodeQuestionDisplay(msg.optJSONObject("display")))
+            }
+            "proposal" -> {
+                msg.fields("type", "requestId", "text")
+                val id = msg.text("requestId"); val text = msg.get("text") as String
+                require(text.length <= 8192 && '\u0000' !in text)
+                if (id in s.pendingIds) listener.onProposal(id, text)
             }
             "joined" -> {
                 msg.fields("type", "requestId"); val v = checkNotNull(s.voice); check(!v.joined && v.id == msg.text("requestId"))
@@ -285,7 +308,8 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         val s = ready ?: return
         post { current(s) { if (s === ready) block(s) } }
     }
-    fun list() = action { sendJson(it, JSONObject().put("type", "list")) }
+    private fun listMessage() = JSONObject().put("type", "list").apply { if (details.enabled) put("details", true) }
+    fun list() = action { sendJson(it, listMessage()) }
     fun join(requestId: String) = action { s ->
         if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId, captions = true) }
     }
@@ -327,9 +351,10 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         val route: Route; val token: String
         try { route = vault.route() ?: return; token = vault.fcm() ?: return }
         catch (_: Exception) { listener.onError("push_token_unavailable"); return }
+        val origin = route.origin ?: return
         if (token == lastToken) return
         tokenRetry?.cancel(false); tokenRetry = null
-        val request = Request.Builder().url("$RELAY/v1/token").header("Authorization", "Bearer ${route.token}")
+        val request = Request.Builder().url("$origin/v1/token").header("Authorization", "Bearer ${route.token}")
             .put(jsonBody(JSONObject().put("fcmToken", token))).build()
         val call = http.newCall(request); tokenCall = call
         call.enqueue(object : Callback {

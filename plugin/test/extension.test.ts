@@ -1,10 +1,17 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { setImmediate as tick } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import * as registry from "@oh-my-pi/pi-coding-agent/config/registry";
 import away, { type PendingAsk } from "../src";
 import * as runtime from "../src/runtime";
 import type { QuestionSource } from "../src/runtime/async-ask";
+import * as adapter from "../src/collab/adapter";
+import { connectRuntime } from "../src/runtime/routing";
+import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
+import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
+import type { DesktopControl, SecureDesktopOptions } from "../src/secure-channel";
 
 afterEach(() => mock.restore());
 
@@ -51,4 +58,61 @@ test("async offers work without native Collab, survive agent end and cannot outl
 		expect(await offered[0]!.submitConfirmed(offered[0]!.requestId, { target: "late" })).toBe("stale");
 		expect(submitted).toBe(0);
 	} finally { off(); await handlers.get("session_shutdown")!({}, ctx); }
+});
+
+test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("native %s retires the real offered capability and wakes only its audience",async reason=>{
+	const settings=new Map<string,registry.AnySetting>();
+	for (const [id,value] of Object.entries({"collab.autoStart":"control","ask.timeout":0,"collab.relayUrl":"ws://127.0.0.1:12345"})) {
+		const setting=new registry.Setting<unknown>(typeof value==="number" ? {id,type:"number",default:value} : {id,type:"string",default:value});
+		spyOn(setting,"get").mockReturnValue(value);
+		settings.set(id,setting);
+	}
+	spyOn(registry,"lookup").mockImplementation(key=>settings.get(key));
+	spyOn(runtime,"gatewayConfigured").mockReturnValue(true);
+	let native!:{request(value:CollabUiRequest):void;end(id:number):void;lost():void}, wire!:SecureDesktopOptions;
+	const invalidations:string[][]=[], controls:DesktopControl[]=[];
+	spyOn(adapter,"startAdapter").mockImplementation(async(port,_session,callbacks)=>{
+		native=callbacks; callbacks.ready?.();
+		return {port,async reply(){return true},async close(){}};
+	});
+	spyOn(runtime,"openAdmin").mockImplementation(async()=>{
+		const mobile=await connectRuntime({url:"https://example.invalid",desktopToken:"",stateDir:"",confirmPair:async()=>false},()=>{},{
+			async gateway(options) {wire=options;return {
+				async devices(){return ["phone"]},async pair(){throw Error("unexpected pairing")},
+				async routing(){return {away:true,delayMs:null}},async ring(){},async invalidate(device,id){invalidations.push([device,id])},
+				async sendControl(_device,message){controls.push(message)},async sendPcm(){},async close(){},
+			}},
+			async voice(){throw Error("read-only detail must not open voice")},
+		});
+		return {...mobile,async command(){},cancelEnrollment(){}};
+	});
+	type Handler=(event:unknown,ctx:ExtensionContext)=>unknown;
+	const handlers=new Map<string,Handler>();
+	const events=new EventBus();
+	const ctx={cwd:"/example/project",agent:{kind:"main"},mode:"tui",isIdle:()=>true,
+		sessionManager:{getSessionId:()=>"owner",getSessionName:()=>"Native review"},ui:{notify(){}}} as unknown as ExtensionContext;
+	const api={events,pi:{settings:{}},registerCommand(){},getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
+		on(name:string,handler:Handler){handlers.set(name,handler)}} as unknown as ExtensionAPI;
+	away(api);
+	try {
+		await handlers.get("session_start")!({},ctx);
+		await tick(); // The host opens its mobile runtime independently of the native adapter.
+		const transformed=await handlers.get("tool_call")!({toolName:"ask",toolCallId:"tool",input:{html:'<form><label>Explain<textarea name="answer"></textarea></label></form>'}},ctx);
+		if (!transformed || typeof transformed!=="object" || !("input" in transformed) || !transformed.input || typeof transformed.input!=="object" || !("html" in transformed.input) || typeof transformed.input.html!=="string") throw Error("Native form was not prepared");
+		const html=transformed.input.html;
+		await handlers.get("tool_execution_start")!({toolName:"ask",toolCallId:"tool",args:{html}},ctx);
+		const title=[...fieldQuestions(parseHtmlForm(html)).values()][0]!;
+		native.request({kind:"editor",reqId:1,title,prefill:""});
+		wire.onConnect?.("phone"); await wire.onMessage("phone",{type:"list",details:true});
+		const detail=controls.find(message=>message.type==="question");
+		expect(detail).toMatchObject({type:"question",display:{fields:[{label:"Explain",kind:"text"}]}});
+		if (!detail || detail.type!=="question") throw Error("No native detail");
+		wire.onConnect?.("later-phone"); wire.onLoss("phone");
+		if (reason==="desktop-answer") await handlers.get("tool_execution_end")!({toolName:"ask",toolCallId:"tool",isError:false,result:{content:[{type:"text",text:'User answers:\n{"answer":"Local answer"}'}],details:{answers:[]}}},ctx);
+		if (reason==="cancel") native.end(1);
+		if (reason==="room-loss") native.lost();
+		if (reason==="agent-end") await handlers.get("agent_end")!({},ctx);
+		if (reason==="shutdown") await handlers.get("session_shutdown")!({},ctx);
+		expect(invalidations).toEqual([["phone",detail.requestId]]);
+	} finally {await handlers.get("session_shutdown")!({},ctx)}
 });

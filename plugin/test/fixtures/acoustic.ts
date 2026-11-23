@@ -68,6 +68,7 @@ export default function acoustic(pi:ExtensionAPI) {
         async gateway(options){wire=options;let prefs:Preferences={away:false,delayMs:null};options.onRouting?.(prefs);return {
           async routing(patch={}){prefs={...prefs,...patch};options.onRouting?.(prefs);return prefs},
           async devices(){return ['fixture']},async pair(){throw Error('No enrollment')},async close(){},async ring(){throw Error('No production notifications')},
+          async invalidate(){},
           async sendControl(_device,message){
             if(message.type==='joined'||message.type==='transcript'){
               const body=Buffer.from(JSON.stringify(message)),packet=Buffer.alloc(5+body.length);

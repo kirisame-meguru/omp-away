@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	firebase "firebase.google.com/go/v4"
@@ -16,11 +17,36 @@ import (
 
 var ErrUnregistered = errors.New("registration no longer valid")
 
+var errProjectMissing = errors.New("Firebase project ID required: set GOOGLE_CLOUD_PROJECT or use credentials with project_id")
+var errProjectID = errors.New("invalid Firebase project ID: use 6-30 lowercase letters, digits or hyphens, starting with a letter and ending with a letter or digit")
+
 type Sender interface {
 	Send(context.Context, *messaging.Message) error
 }
 
 type FCM struct{ client *messaging.Client }
+
+// An explicit project may differ from the credential's owning project, but it
+// must match the phone's Firebase configuration and grant the sender FCM access.
+func firebaseProjectID(override, credential string) (string, error) {
+	project := override
+	if project == "" {
+		project = credential
+	}
+	if project == "" {
+		return "", errProjectMissing
+	}
+	if len(project) < 6 || len(project) > 30 || project[0] < 'a' || project[0] > 'z' || project[len(project)-1] == '-' {
+		return "", errProjectID
+	}
+	for i := range len(project) {
+		c := project[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return "", errProjectID
+		}
+	}
+	return project, nil
+}
 
 func New(ctx context.Context) (*FCM, error) {
 	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -29,10 +55,14 @@ func New(ctx context.Context) (*FCM, error) {
 	if err != nil {
 		return nil, err
 	}
+	project, err := firebaseProjectID(os.Getenv("GOOGLE_CLOUD_PROJECT"), credentials.ProjectID)
+	if err != nil {
+		return nil, err
+	}
 	hc := oauth2.NewClient(ctx, credentials.TokenSource)
 	hc.CheckRedirect = noRedirect
 	hc.Timeout = 10 * time.Second
-	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: "omp-away"}, option.WithHTTPClient(hc))
+	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: project}, option.WithHTTPClient(hc))
 	if err != nil {
 		return nil, err
 	}

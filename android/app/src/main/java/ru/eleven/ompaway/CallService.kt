@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal fun presented(target: Long, position: Long, presentationNs: Long, nowNs: Long) =
     position >= target && presentationNs > 0 && presentationNs <= nowNs
 
-/** Activity-owned call, deliberately NOT an Android background/foreground service. */
+/** Gateway-owned audio engine; VoiceForegroundService holds the active call's Android lifecycle. */
 internal class CallService(
     context: Context, val id: String,
     private val send: (ByteArray) -> Unit,
@@ -121,8 +121,17 @@ internal class CallService(
     private fun capture() {
         val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(min > 0)
-        val record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(min, BYTES * 4)).build()
+        // Permission can be revoked after start() while the playout worker is opening capture.
+        if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            fail(); return
+        }
+        val record = try {
+            AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(min, BYTES * 4)).build()
+        } catch (_: SecurityException) {
+            // The permission can also change between the check and the platform allocation.
+            fail(); return
+        }
         var echo: AcousticEchoCanceler? = null
         try {
             check(record.state == AudioRecord.STATE_INITIALIZED)
@@ -140,7 +149,10 @@ internal class CallService(
             while (live.get()) {
                 val now = SystemClock.elapsedRealtime()
                 if (now >= nextPrivacyCheck) {
-                    check(record.activeRecordingConfiguration?.isClientSilenced != true && audio.mode != AudioManager.MODE_IN_CALL)
+                    if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
+                        record.activeRecordingConfiguration?.isClientSilenced == true || audio.mode == AudioManager.MODE_IN_CALL) {
+                        fail(); return
+                    }
                     nextPrivacyCheck = now + 200
                 }
                 val n = record.read(buffer, offset, BYTES - offset, AudioRecord.READ_NON_BLOCKING)
@@ -153,6 +165,8 @@ internal class CallService(
                     offset = 0
                 }
             }
+        } catch (_: SecurityException) {
+            fail()
         } finally {
             synchronized(gate) {
                 recording = null

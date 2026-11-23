@@ -1,5 +1,9 @@
 package ru.eleven.ompaway
 
+import android.Manifest
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
 import android.app.Activity
 import android.content.Intent
 import android.media.AudioDeviceInfo
@@ -10,6 +14,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.io.DataInputStream
 import java.net.InetAddress
 import java.net.Socket
@@ -22,6 +27,59 @@ import android.widget.TextView
 import ru.eleven.ompaway.security.bytesJson
 
 class CallAudioTest {
+    @Test fun permissionRevokedBeforeRecorderAllocationNeverStartsAudio() {
+        checkMicrophoneRevocation(atAllocation = true)
+    }
+
+    @Test fun permissionRevokedDuringCaptureStopsSendingAudio() {
+        checkMicrophoneRevocation(atAllocation = false)
+    }
+
+    private fun checkMicrophoneRevocation(atAllocation: Boolean) {
+        val instrument = InstrumentationRegistry.getInstrumentation()
+        val base = instrument.targetContext
+        assumeTrue(base.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        val checks = AtomicInteger()
+        val revoked = AtomicBoolean()
+        val context = object : ContextWrapper(base) {
+            override fun getApplicationContext(): Context = this
+            override fun checkSelfPermission(permission: String): Int {
+                if (permission != Manifest.permission.RECORD_AUDIO) return super.checkSelfPermission(permission)
+                val check = checks.incrementAndGet()
+                return if ((atAllocation && check > 1) || revoked.get()) PackageManager.PERMISSION_DENIED
+                    else PackageManager.PERMISSION_GRANTED
+            }
+        }
+        val activity = instrument.startActivitySync(Intent(base, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val failed = CountDownLatch(1)
+        val firstFrame = CountDownLatch(1)
+        val frames = AtomicInteger()
+        val failures = AtomicInteger()
+        val ready = AtomicInteger()
+        val call = CallService(context, "permission-revocation", {
+            frames.incrementAndGet(); firstFrame.countDown()
+        }, {}, { failures.incrementAndGet(); failed.countDown() }, { ready.incrementAndGet() })
+        try {
+            instrument.runOnMainSync { call.start() }
+            call.receive(ByteArray(960))
+            if (!atAllocation) {
+                assertTrue("Capture never reached the revocation point", firstFrame.await(5, TimeUnit.SECONDS))
+                revoked.set(true)
+            }
+            assertTrue("Revoked microphone permission did not terminate audio", failed.await(5, TimeUnit.SECONDS))
+            assertTrue("Allocation-boundary permission was not checked", checks.get() >= 2)
+            assertEquals(1, failures.get())
+            if (atAllocation) {
+                assertEquals(0, frames.get())
+                assertEquals(0, ready.get())
+            }
+            val stoppedAt = frames.get()
+            call.receive(ByteArray(960))
+            SystemClock.sleep(250)
+            assertEquals("Audio continued after permission failure", stoppedAt, frames.get())
+        } finally { instrument.runOnMainSync { call.close(); activity.finish() } }
+    }
+
     @Test fun speakerPreferenceRoutesNewCallsAndDoesNotLeakIntoTheNextCall() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -33,15 +91,20 @@ class CallAudioTest {
         val failures = AtomicInteger()
         var call: CallService? = null
         try {
-            for (speaker in listOf(true, false)) {
+            // "Off" releases the app override. Android may still choose the speaker,
+            // particularly on devices with no earpiece; capture policy rather than invent it.
+            if (Build.VERSION.SDK_INT >= 31) instrumentation.runOnMainSync { audio.clearCommunicationDevice() }
+            var normalDeviceId: Int? = null
+            for (speaker in listOf(false, true, false)) {
                 check(preferences.edit().putBoolean("speaker", speaker).commit())
                 val next = CallService(context, "route-test", {}, {}, { failures.incrementAndGet() })
                 call = next
                 instrumentation.runOnMainSync { next.start() }
-                awaitSpeaker(audio, speaker)
+                if (Build.VERSION.SDK_INT >= 31 && normalDeviceId == null) normalDeviceId = stableNormalDevice(audio)
+                awaitSpeaker(audio, speaker, normalDeviceId)
                 if (speaker) {
                     instrumentation.runOnMainSync { assertTrue(next.setSpeakerEnabled(false)) }
-                    awaitSpeaker(audio, false)
+                    awaitSpeaker(audio, false, normalDeviceId)
                     instrumentation.runOnMainSync { assertTrue(next.setSpeakerEnabled(true)) }
                     awaitSpeaker(audio, true)
                 }
@@ -209,12 +272,34 @@ class CallAudioTest {
     }
 
     @Suppress("DEPRECATION")
-    private fun awaitSpeaker(audio: AudioManager, enabled: Boolean) {
-        fun selected() = if (Build.VERSION.SDK_INT >= 31)
-            audio.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-        else audio.isSpeakerphoneOn
+    private fun awaitSpeaker(audio: AudioManager, enabled: Boolean, normalDeviceId: Int? = null) {
         val deadline = SystemClock.elapsedRealtime() + 3000
-        while (selected() != enabled && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
-        assertEquals("Wrong communication output route", enabled, selected())
+        if (Build.VERSION.SDK_INT >= 31) {
+            val expected = if (enabled) audio.availableCommunicationDevices.first { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }.id
+                else requireNotNull(normalDeviceId) { "Capture Android's normal route before asserting speaker off" }
+            while (audio.communicationDevice?.id != expected && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
+            assertTrue("Expected route disappeared", audio.availableCommunicationDevices.any { it.id == expected })
+            assertEquals("Wrong communication output device", expected, audio.communicationDevice?.id)
+        } else {
+            while (audio.isSpeakerphoneOn != enabled && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
+            assertEquals("Wrong legacy speaker override", enabled, audio.isSpeakerphoneOn)
+        }
+    }
+
+    @android.annotation.TargetApi(31)
+    private fun stableNormalDevice(audio: AudioManager): Int {
+        val deadline = SystemClock.elapsedRealtime() + 3000
+        var candidate: Int? = null
+        var stableSince = SystemClock.elapsedRealtime()
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val current = audio.communicationDevice?.id
+            val available = current != null && audio.availableCommunicationDevices.any { it.id == current }
+            if (!available || candidate != current) {
+                candidate = if (available) current else null
+                stableSince = SystemClock.elapsedRealtime()
+            } else if (candidate != null && SystemClock.elapsedRealtime() - stableSince >= 200) return candidate
+            SystemClock.sleep(20)
+        }
+        throw AssertionError("Android did not select a stable available communication device")
     }
 }

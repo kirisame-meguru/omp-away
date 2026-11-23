@@ -95,7 +95,196 @@ class BrokerTest(test_relay.RelayTest):
     async def run_service(self):
         await self.host.broker.run(self.service)
 
+    async def test_question_metadata_is_owned_and_replayed_after_merged_snapshots(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await second.command('control', **dest, message=dict(type='inbox', items=[]))
+        a = dict(requestId='a', project='A', question='Question A', createdAt=1)
+        b = dict(requestId='b', project='B', question='Question B', createdAt=2)
+        display = dict(v=1, context='', fields=[dict(id='f1', label='Choice', kind='single', required=False,
+                       options=[dict(id='o1', label='Safe label', disabled=False)])])
+        detail = dict(type='question', requestId='a', display=display)
+        self.assertTrue((await self.host.command('control', **dest, message=dict(type='inbox', items=[a])))['ok'])
+        await phone.read_frame()
+        self.assertTrue((await self.host.command('control', **dest, message=detail))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), detail)
+        self.assertFalse((await second.command('control', **dest, message=detail))['ok'])
+        self.assertTrue((await second.command('control', **dest, message=dict(type='inbox', items=[b])))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[a, b]))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), detail)
+        # Each generation buffers fresh detail until the complete snapshot;
+        # the next generation cannot replay the preceding generation's cache.
+        for generation in range(2):
+            await phone.send_json(dict(type='list', details=True))
+            for session in (self.host.local, second):
+                await session.expect('message')
+            await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+            if generation == 0:
+                await self.host.command('control', **dest, message=detail)
+            await second.command('control', **dest, message=dict(type='inbox', items=[b]))
+            self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[a, b]))
+            if generation == 0:
+                self.assertEqual(json.loads((await phone.read_frame())[1]), detail)
+        await phone.send_json(dict(type='join', requestId='a'))
+        await self.host.expect('message')
+        await self.host.command('control', **dest, message=dict(type='joined', requestId='a'))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='joined', requestId='a'))
+        await self.host.command('control', **dest, message=dict(type='ended', requestId='a'))
+        await phone.read_frame()
+        self.assertTrue((await self.host.command('control', **dest, message=dict(type='inbox', items=[])))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[b]))
+        self.assertFalse((await self.host.command('control', **dest, message=detail))['ok'])
+
+    async def test_retirement_posts_only_opaque_routes_and_rejects_another_session(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        item = dict(requestId='private-request', project='Private project', question='Private question', createdAt=1)
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[item]))
+        await phone.read_frame()
+        route = dict(deviceId='phone_1', requestId='private-request')
+        self.assertTrue((await self.host.command('ring', **route))['ok'])
+        self.assertFalse((await second.command('invalidate', **route))['ok'])
+        self.assertFalse((await self.host.command('invalidate', **route, question='leak'))['ok'])
+        self.assertTrue((await self.host.command('invalidate', **route))['ok'])
+        self.assertEqual(self.invites, [route])
+        self.assertEqual(self.invalidations, [route])
+        self.assertNotIn(b'Private question', self.capture)
+
+    async def test_session_loss_wakes_previously_invited_offline_phone(self):
+        identity = IdentityStore(self.root / 'phone')
+        self.service.identity.register('phone_1', identity.pin)
+        route = dict(deviceId='phone_1', requestId='request-offline')
+        self.assertTrue((await self.host.command('ring', **route))['ok'])
+        await self.host.local.close()
+        async with asyncio.timeout(4):
+            while not self.invalidations:
+                await asyncio.sleep(.01)
+        self.assertEqual(self.invalidations, [route])
+
+    async def test_active_proposal_survives_other_owner_snapshot_but_not_call_end(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await second.command('control', **dest, message=dict(type='inbox', items=[]))
+        item = dict(requestId='a', project='A', question='Choose', createdAt=1)
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[item]))
+        await phone.read_frame()
+        await phone.send_json(dict(type='join', requestId='a'))
+        await self.host.expect('message')
+        await self.host.command('control', **dest, message=dict(type='joined', requestId='a'))
+        await phone.read_frame()
+        proposal = dict(type='proposal', requestId='a', text='Choose: Safe label')
+        self.assertFalse((await second.command('control', **dest, message=proposal))['ok'])
+        self.assertTrue((await self.host.command('control', **dest, message=proposal))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), proposal)
+        await second.command('control', **dest, message=dict(type='inbox', items=[]))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[item]))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), proposal)
+        await self.host.command('control', **dest, message=dict(type='ended', requestId='a'))
+        await phone.read_frame()
+        await second.command('control', **dest, message=dict(type='inbox', items=[]))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[item]))
+        # A following control remains next; no retired proposal was replayed.
+        await self.host.command('control', **dest, message=dict(type='error', code='voice-unavailable'))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='error', code='voice-unavailable'))
+
+    async def test_failed_retirement_delivery_retries_after_owning_session_exits(self):
+        identity = IdentityStore(self.root / 'phone')
+        self.service.identity.register('phone_1', identity.pin)
+        self.fail_invalidations = 1
+        route = dict(deviceId='phone_1', requestId='retired-offline')
+        self.assertTrue((await self.host.command('ring', **route))['ok'])
+        self.assertTrue((await self.host.command('invalidate', **route))['ok'])
+        self.assertEqual(self.invalidations, [])
+        await self.host.local.close()
+        async with asyncio.timeout(4):
+            while not self.invalidations:
+                await asyncio.sleep(.01)
+        self.assertEqual(self.invalidations, [route])
+
+    async def test_oversized_merged_snapshot_cannot_retire_or_replace_other_owners(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await second.command('control', **dest, message=dict(type='inbox', items=[]))
+        a = [dict(requestId=f'a{i}', project='A' * 128, question='Q' * 256, createdAt=i) for i in range(80)]
+        b = [dict(requestId=f'b{i}', project='B' * 128, question='R' * 256, createdAt=i + 100) for i in range(80)]
+        self.assertTrue((await self.host.command('control', **dest, message=dict(type='inbox', items=a)))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=a))
+        self.assertFalse((await second.command('control', **dest, message=dict(type='inbox', items=b)))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='error', code='inbox-too-large'))
+        self.assertTrue((await second.command('control', **dest, message=dict(type='inbox', items=b[:1])))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=a + b[:1]))
+
+    async def test_reconciliation_owner_loss_completes_only_remaining_owners_snapshot(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        a = dict(requestId='a', project='A', question='A?', createdAt=1)
+        b = dict(requestId='b', project='B', question='B?', createdAt=2)
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+        await phone.read_frame()
+        await second.command('control', **dest, message=dict(type='inbox', items=[b]))
+        await phone.read_frame()
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+        waiting = asyncio.create_task(phone.read_frame())
+        await asyncio.sleep(.02)
+        self.assertFalse(waiting.done())
+        await second.close()
+        self.assertEqual(json.loads((await waiting)[1]), dict(type='inbox', items=[a]))
+
+    async def test_reconciliation_timeout_is_not_a_partial_snapshot_and_can_retry(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = dict(deviceId='phone_1', ref=connected['ref'])
+        a = dict(requestId='a', project='A', question='A?', createdAt=1)
+        b = dict(requestId='b', project='B', question='B?', createdAt=2)
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+        await phone.read_frame()
+        await second.command('control', **dest, message=dict(type='inbox', items=[b]))
+        await phone.read_frame()
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+        async with asyncio.timeout(6):
+            self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='error', code='inbox-unavailable'))
+        await phone.send_json(dict(type='list', details=True))
+        for session in (self.host.local, second):
+            await session.expect('message')
+        await self.host.command('control', **dest, message=dict(type='inbox', items=[a]))
+        await second.command('control', **dest, message=dict(type='inbox', items=[b]))
+        self.assertEqual(json.loads((await phone.read_frame())[1]), dict(type='inbox', items=[a, b]))
+
     async def asyncTearDown(self):
+        # Fixture shutdown must not turn session disconnects into new HTTPS wakeups.
+        self.host.broker.stop()
         await self.host.local.close()
         for session in self.sessions:
             await session.close()

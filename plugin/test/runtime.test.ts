@@ -1,4 +1,6 @@
 import { expect, test, vi } from "bun:test";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { connectAsyncQuestions, type AsyncQuestion, type QuestionSource } from "../src/runtime/async-ask";
 import { setImmediate as tick } from "node:timers/promises";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as fs from "node:fs";
@@ -24,6 +26,7 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 	let wire!: SecureDesktopOptions;
 	const voices: VoiceOptions[] = [], spoken: {text:string;instruction:boolean}[] = [], sideCalls:string[]=[];
 	const audioIn: Uint8Array[] = [], audioOut: string[] = [], rings: string[][] = [], submitted: unknown[] = [];
+	const invalidations:string[][]=[];
 	const controls: {device:string; message:DesktopControl}[] = [];
 	const consultations: {tools:boolean;promptText:string;signal:AbortSignal}[]=[];
 	const bus=shared ?? {current:{away:false,delayMs:null},clients:new Set<SecureDesktopOptions>()};
@@ -36,6 +39,7 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 			},
 			async devices(){return ["phone"]}, async pair(){throw Error("unexpected enrollment")}, async close(){bus.clients.delete(options)},
 			async ring(dev,id){rings.push([dev,id])},
+			async invalidate(dev,id){invalidations.push([dev,id])},
 			async sendControl(device,message){
 				controls.push({device,message});
 			},
@@ -53,8 +57,109 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 	} } as unknown as AskContext;
 	const offer = (id:string,html='<form><label for="l">Private lane?</label><select name="lane" id="l"><option value="blue">Blue</option><option value="red">Red</option></select></form>') => runtime.offer({requestId:id,toolCallId:`tool-${id}`,html, async submitConfirmed(id,values){submitted.push([id,values]);return "accepted"} } satisfies PendingAsk,ctx);
 	const join = (dev:string,id:string) => wire.onMessage(dev,{type:"join",requestId:id});
-	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations,sideCalls};
+	return {runtime,wire,voices,spoken,controls,rings,invalidations,ctx,audioIn,audioOut,submitted,offer,join,consultations,sideCalls};
 }
+test("details are negotiated, request-scoped, and cleared across reconnects",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); f.offer("B");
+		expect(f.controls.some(c=>c.message.type==="question")).toBe(false);
+		f.controls.length=0;
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		expect(f.controls.map(c=>c.message.type)).toEqual(["inbox","question","question"]);
+		expect(f.controls[1].message).toMatchObject({type:"question",requestId:"A",display:{v:1,fields:[{label:"Private lane?",options:[{label:"Blue"},{label:"Red"}]}]}});
+		f.wire.onConnect!("new-phone");
+		await f.wire.onMessage("new-phone",{type:"list",details:true});
+		expect(JSON.stringify(f.controls.filter(c=>c.device==="new-phone"))).not.toContain("Private lane");
+		f.wire.onLoss("phone"); f.controls.length=0; f.wire.onConnect!("phone");
+		expect(f.controls.map(c=>c.message.type)).toEqual(["inbox"]);
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test("proposal metadata comes from a validated draft, never assistant speech or captions",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.wire.onMessage("phone",{type:"list",details:true});
+		await f.join("phone","A"); const v=f.voices[0];
+		v.onCaption?.("assistant","Invented option",true);
+		expect(f.controls.some(c=>c.message.type==="proposal" && c.message.text!=="")).toBe(false);
+		v.onSpeechStarted("draft"); v.onTranscript("user","Blue.","draft"); await tick();
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message).toEqual({type:"proposal",requestId:"A",text:"Private lane?: Blue"});
+		v.onInterrupt();
+		expect(f.controls.at(-1)?.message).toEqual({type:"proposal",requestId:"A",text:""});
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test("retirement wakes the birth audience even offline, only once, before shutdown",async()=>{
+	const f=await fixture();
+	f.offer("A"); f.wire.onConnect!("new-phone"); f.offer("B");
+	f.runtime.end("A"); f.runtime.end("A");
+	expect(f.invalidations).toEqual([["phone","A"]]);
+	await f.runtime.close();
+	expect(f.invalidations).toEqual([["phone","A"],["phone","B"],["new-phone","B"]]);
+});
+test("accepted desktop submission retires request references and wakes its audience",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
+		const v=f.voices[0]; v.onSpeechStarted("draft"); v.onTranscript("user","Blue","draft"); await tick();
+		v.onSpeechStarted("yes"); v.onTranscript("user","Yes","yes"); await tick();
+		expect(f.invalidations).toEqual([["phone","A"]]);
+		expect(f.controls.at(-1)?.message).toEqual({type:"inbox",items:[]});
+		f.runtime.end("A"); expect(f.invalidations).toHaveLength(1);
+	} finally {await f.runtime.close()}
+});
+test("async withdrawal and source loss use the same projection and retirement authority",async()=>{
+	const f=await fixture(), events=new EventBus(), life=new AbortController();
+	let publish!:(questions:readonly AsyncQuestion[])=>void;
+	const question:AsyncQuestion={id:"canonical",requestId:"async-A",toolCallId:"async-tool",title:"Not the question",blockedWork:"Private work",createdAt:1,
+		html:'<form><input type="hidden" name="token" value="secret-capability"><label>Where?<select name="target"><option value="native-secret">Here</option></select></label></form>',
+		submitConfirmed(){return {kind:"accepted",answerId:"answer",delivery:"queued"}}};
+	const source:QuestionSource={version:1,sessionId:"session",signal:life.signal,subscribe(next){publish=next;next([question]);return ()=>{}}};
+	events.on("omp-async-ask:connect:v1",value=>{
+		if(value && typeof value==="object" && "accept" in value && typeof value.accept==="function") value.accept(source);
+	});
+	const connection=connectAsyncQuestions(events,"session",f.runtime,f.ctx as ExtensionContext,()=>{});
+	try {
+		f.wire.onConnect!("phone"); await f.wire.onMessage("phone",{type:"list",details:true});
+		expect(f.controls.find(c=>c.message.type==="inbox" && c.message.items.length)?.message).toMatchObject({items:[{question:"Where?"}]});
+		const wire=JSON.stringify(f.controls);
+		expect(wire).toContain('"label":"Here"'); expect(wire).not.toContain("secret-capability"); expect(wire).not.toContain("native-secret"); expect(wire).not.toContain("Not the question");
+		publish([]); expect(f.invalidations).toEqual([["phone","async-A"]]);
+		publish([{...question,id:"second",requestId:"async-B"}]); life.abort();
+		expect(f.invalidations).toEqual([["phone","async-A"],["phone","async-B"]]);
+	} finally {connection.close();await f.runtime.close()}
+});
+test("oversized inbox never sends a partial authoritative snapshot",async()=>{
+	const f=await fixture(); try {
+		for(let i=0;i<400;i++) f.offer(`request-${i}`,'<form><label>'+"Q".repeat(256)+'<input name="answer"></label></form>');
+		f.wire.onConnect!("phone");
+		expect(f.controls.some(c=>c.message.type==="inbox")).toBe(false);
+		expect(f.controls.at(-1)?.message).toEqual({type:"error",code:"inbox-too-large"});
+	} finally {await f.runtime.close()}
+});
+test("session names use real context while old or unsafe metadata keeps project fallback",async()=>{
+	const f=await fixture(); try {
+		f.ctx.sessionManager.getSessionName=()=>"Release review";
+		f.offer("named"); f.ctx.sessionManager.getSessionName=()=>"/private/session/path";
+		f.offer("unsafe"); f.ctx.sessionManager.getSessionName=()=>undefined;
+		f.offer("unnamed"); f.wire.onConnect!("phone");
+		expect(f.controls.at(-1)?.message).toMatchObject({type:"inbox",items:[
+			{requestId:"named",session:"Release review",project:"project"},
+			{requestId:"unsafe",project:"project"},{requestId:"unnamed",project:"project"},
+		]});
+		const wire=JSON.stringify(f.controls);
+		expect(wire).not.toContain("/private/session/path"); expect(wire).not.toContain('"session":"session"');
+	} finally {await f.runtime.close()}
+});
+test("an oversized voice readback keeps its complete visual display and rejects joining clearly",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone");
+		f.offer("large",'<form><label>Choose<select name="x"><option value="a">'+"A".repeat(4500)+'</option><option value="b">'+"B".repeat(4500)+'</option></select></label></form>');
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		expect(f.controls.at(-1)?.message).toMatchObject({type:"question",requestId:"large"});
+		await f.join("phone","large");
+		expect(f.controls.at(-1)?.message).toEqual({type:"error",code:"voice-unavailable"});
+		expect(f.voices).toHaveLength(0); expect(f.invalidations).toHaveLength(0);
+	} finally {await f.runtime.close()}
+});
 test("shared routing updates pending asks once, new sessions inherit, and active calls keep their authority",async()=>{
 	const bus:RoutingBus={current:{away:false,delayMs:null},clients:new Set()};
 	const a=await fixture(undefined,undefined,"",bus), b=await fixture(undefined,undefined,"",bus);

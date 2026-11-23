@@ -98,7 +98,7 @@ internal class EnrollmentGate(val emoji: String) {
     fun cancel() { stage = Stage.CLOSED }
 }
 
-internal class Route(val deviceId: String, val token: String, val desktopPin: String, val phonePin: String)
+internal class Route(val deviceId: String, val token: String, val desktopPin: String, val phonePin: String, val origin: String? = null)
 
 internal class Vault(context: Context) {
     private val prefs = context.getSharedPreferences("away.sealed.v1", Context.MODE_PRIVATE)
@@ -134,10 +134,23 @@ internal class Vault(context: Context) {
     }
     fun save(route: Route) = synchronized(Vault::class.java) {
         check(!paired()) { "Cannot replace paired keys" }
-        put("route", JSONObject().put("deviceId", route.deviceId).put("token", route.token)
-            .put("desktopPin", route.desktopPin).put("phonePin", route.phonePin).toString())
+        put("route", encodeRoute(route))
     }
-    fun route() = get("route")?.let { value -> JSONObject(value).run { Route(getString("deviceId"), getString("token"), getString("desktopPin"), getString("phonePin")) } }
+    private fun encodeRoute(route: Route) = JSONObject().put("deviceId", route.deviceId).put("token", route.token)
+        .put("desktopPin", route.desktopPin).put("phonePin", route.phonePin).apply {
+            route.origin?.let { put("origin", relayOrigin(it)) }
+        }.toString()
+    fun route() = get("route")?.let { value -> JSONObject(value).run {
+        Route(getString("deviceId"), getString("token"), getString("desktopPin"), getString("phonePin"),
+            if (has("origin")) relayOrigin(getString("origin")) else null)
+    } }
+    /** Legacy migration changes only the missing destination; existing keys/pins/tokens are never replaced. */
+    fun migrateOrigin(value: String) = synchronized(Vault::class.java) {
+        val origin = relayOrigin(value)
+        val old = checkNotNull(route())
+        check(old.origin == null) { "Relay already configured" }
+        put("route", encodeRoute(Route(old.deviceId, old.token, old.desktopPin, old.phonePin, origin)))
+    }
     fun fcm(): String? = get("fcm")
     fun setFcm(value: String) = put("fcm", value)
 }

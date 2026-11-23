@@ -3,17 +3,19 @@ import { createCall, type DecisionCall } from "./call";
 import { type DecisionForm, prepare } from "./form";
 import { preferences, type Preferences } from "./preferences";
 import type { Exchange, SideContext } from "./side";
+import { displayExcerpt } from "./display";
 
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
 export type { Preferences } from "./preferences";
 export type { SideContext } from "./side";
 
-export interface InboxItem { requestId:string; project:string; question:string; createdAt:number }
+export interface InboxItem { requestId:string; project:string; question:string; createdAt:number; session?:string }
 export interface Clock { now():number; after(ms:number, callback:()=>void):()=>void }
 interface Options {
 	invite(requestId:string):void | Promise<void>;
 	changed?():void;
+	retired?(requestId:string):void;
 	error?(code:string):void;
 	preferences?:Preferences;
 	clock?:Clock;
@@ -43,7 +45,7 @@ export class DecisionCoordinator {
 		this.#prefs=preferences(data);
 		for(const entry of this.#pending.values()) this.#route(entry);
 	}
-	offer(ask:PendingAsk,ctx:SideContext,project:string):boolean {
+	offer(ask:PendingAsk,ctx:SideContext,project:string,session?:string):boolean {
 		const key=ask.deduplicationKey ?? ask.toolCallId;
 		const createdAt=ask.createdAt ?? this.#clock.now();
 		if(this.#closed || this.#seen.has(ask.requestId) || this.#tools.has(key)) return false;
@@ -53,7 +55,7 @@ export class DecisionCoordinator {
 		try { form=prepare(ask.html,ask.context); } catch { /* An unsupported form must remain local. */ }
 		if(!form) { this.#opt.error?.("unsupported-form"); return false; }
 		const life=new AbortController();
-		const item={requestId:ask.requestId,project:project.slice(0,128),question:(ask.context?.title ?? form.question).slice(0,256),createdAt};
+		const item:InboxItem={requestId:ask.requestId,project:displayExcerpt(project,128),question:form.question,createdAt,...(session ? {session:displayExcerpt(session,128)} : {})};
 		const entry:Entry={item,ask,ctx,form,history:[],life,silenced:false,rang:false,submitted:false};
 		this.#pending.set(ask.requestId,entry); this.#route(entry); this.#opt.changed?.(); return true;
 	}
@@ -73,13 +75,15 @@ export class DecisionCoordinator {
 		if(wait===0) ring(); else e.cancelTimer=this.#clock.after(wait,ring);
 	}
 	list():InboxItem[] { return Array.from(this.#pending.values(),e=>({...e.item})); }
+	display(id:string) { return this.#pending.get(id)?.form.display; }
+	voiceAvailable(id:string) { return this.#pending.get(id)?.form.voiceSupported===true; }
 	silence(id:string):boolean {
 		const e=this.#pending.get(id); if(!e) return false;
 		e.silenced=true; e.cancelTimer?.(); e.cancelTimer=undefined; return true;
 	}
 	join(id:string):DecisionCall|undefined {
 		const entry=this.#pending.get(id);
-		if(this.#active || !entry || entry.submitted || this.#closed) return;
+		if(this.#active || !entry || !entry.form.voiceSupported || entry.submitted || this.#closed) return;
 		this.silence(id);
 		const call=createCall({form:entry.form,ctx:entry.ctx,history:entry.history,
 			close:()=>{if(this.#active?.call===call) this.#active=undefined;},
@@ -99,6 +103,7 @@ export class DecisionCoordinator {
 		if(this.#closed) return;
 		this.#seen.add(id);
 		const e=this.#pending.get(id); if(!e) return;
+		this.#opt.retired?.(id);
 		this.#pending.delete(id); e.cancelTimer?.(); e.life.abort(); e.history.length=0;
 		if(this.#active?.entry===e) this.#active.call.close();
 		this.#opt.changed?.();
@@ -107,7 +112,7 @@ export class DecisionCoordinator {
 		if(this.#closed) return;
 		// Seal first: even synchronous listener re-entry cannot acquire a closing capability.
 		this.#closed=true;
-		for(const e of this.#pending.values()) {e.cancelTimer?.(); e.life.abort(); e.history.length=0;}
+		for(const e of this.#pending.values()) {this.#opt.retired?.(e.item.requestId);e.cancelTimer?.(); e.life.abort(); e.history.length=0;}
 		this.#pending.clear(); this.#active?.call.close(); this.#seen.clear(); this.#tools.clear(); this.#opt.changed?.();
 	}
 }

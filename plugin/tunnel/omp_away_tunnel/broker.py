@@ -16,6 +16,7 @@ from .identity import digest_bytes, locked, private_directory, read_private_json
 from .ipc import IPC_JSON_LIMIT, decode_frame, frame_size
 from .preferences import load_preferences, patch_preferences, save_preferences
 from .transport import HEADER, JSON_LIMIT, ProtocolError, encode, object_json
+from .controls import inbox_ids, question_display, text
 
 
 ENDPOINT = 'gateway.json'
@@ -46,6 +47,9 @@ class Client:
     def __init__(self, writer):
         self.writer = writer
         self.inboxes = {}
+        self.details = {}
+        self.audience = set()  # Opaque (device, request) pairs survive phone disconnect.
+        self.retiring = {}
         self.pending = set()
         self.confirmations = set()
         self.routing = False
@@ -72,6 +76,9 @@ class Broker:
         self.clients = set()
         self.pending = {}
         self.active = {}
+        self.proposals = {}
+        self.snapshots = {}
+        self.snapshot_tasks = set()
         self.pair_owner = None
         self.pair_pending = False
         self.sequence = 0
@@ -80,6 +87,50 @@ class Broker:
         self.idle = None
         self.tasks = set()
         self.service = None
+
+    async def begin_snapshot(self, device, ref):
+        previous = self.snapshots.pop(device, None)
+        if previous:
+            previous['timer'].cancel()
+        snapshot = {'ref': ref, 'waiting': set(self.clients), 'failed': False}
+        self.snapshots[device] = snapshot
+        for client in self.clients:
+            client.details.pop(device, None)
+        async def timeout():
+            try:
+                await asyncio.sleep(5)
+                await self.fail_snapshot(device, snapshot, 'inbox-unavailable')
+            finally:
+                self.snapshot_tasks.discard(asyncio.current_task())
+        snapshot['timer'] = asyncio.create_task(timeout())
+        self.snapshot_tasks.add(snapshot['timer'])
+        await self.finish_snapshot(device)
+
+    async def fail_snapshot(self, device, snapshot, code):
+        if self.snapshots.get(device) is not snapshot or snapshot['failed']:
+            return
+        snapshot['failed'] = True
+        if snapshot['timer'] is not asyncio.current_task():
+            snapshot['timer'].cancel()
+        await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': snapshot['ref'],
+                                 'message': {'type': 'error', 'code': code}})
+
+    async def finish_snapshot(self, device):
+        snapshot = self.snapshots.get(device)
+        if not snapshot or snapshot['waiting'] or snapshot['failed']:
+            return
+        phone = self.service.phones.get(device)
+        if phone is None or phone.ref != snapshot['ref']:
+            return
+        try:
+            message = self.inbox(device)
+        except ProtocolError:
+            await self.fail_snapshot(device, snapshot, 'inbox-too-large')
+            return
+        self.snapshots.pop(device)
+        snapshot['timer'].cancel()
+        await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref, 'message': message})
+        await self.replay_details(device, phone)
 
     async def read(self):
         while True:
@@ -102,7 +153,7 @@ class Broker:
         self.sequence = self.sequence % 0xffffffff + 1
         while self.sequence in self.pending:
             self.sequence = self.sequence % 0xffffffff + 1
-        call_control = command['op'] == 'pcm' or command['op'] == 'control' and command['message']['type'] != 'inbox'
+        call_control = command['op'] == 'pcm' or command['op'] == 'control' and command['message']['type'] not in ('inbox', 'question')
         authority = self.active.get(command.get('deviceId')) if client is not None and call_control else None
         self.pending[self.sequence] = (client, local, command['op'], authority)
         if client is not None:
@@ -156,11 +207,12 @@ class Broker:
         if not isinstance(cmd, dict) or type(cmd.get('id')) is not int or not 0 < cmd['id'] < 2**32:
             raise ProtocolError('invalid command id')
         op = cmd.get('op')
-        if op not in ('devices', 'pair', 'ring', 'confirm', 'control', 'pcm', 'routing'):
+        if op not in ('devices', 'pair', 'ring', 'invalidate', 'confirm', 'control', 'pcm', 'routing'):
             raise ProtocolError('invalid session operation')
         if cmd['id'] in client.pending:
             raise ProtocolError('duplicate local command')
         try:
+            replay = None
             if self.commands.full() or len(client.pending) >= MAX_PENDING:
                 raise ProtocolError('local gateway busy')
             if op == 'routing':
@@ -171,9 +223,17 @@ class Broker:
                     raise ProtocolError('enrollment owned by another session')
                 self.pair_owner = client
                 self.pair_pending = True
-            elif op == 'ring':
-                if self.owner(cmd.get('deviceId'), cmd.get('requestId')) not in (None, client):
+            elif op in ('ring', 'invalidate'):
+                if cmd.keys() != {'op', 'id', 'deviceId', 'requestId'}:
+                    raise ProtocolError('invalid wakeup')
+                pair = (cmd['deviceId'], cmd['requestId'])
+                if (self.owner(*pair) not in (None, client) or
+                        any(pair in other.audience for other in self.clients if other is not client)):
                     raise ProtocolError('unowned request')
+                if op == 'ring':
+                    client.audience.add(pair)
+                else:
+                    client.retiring[cmd['id']] = pair
             elif op == 'confirm':
                 if cmd.get('ref') not in client.confirmations:
                     raise ProtocolError('unowned confirmation')
@@ -183,24 +243,91 @@ class Broker:
                 phone = self.service.phones.get(device)
                 if phone is None or cmd.get('ref') != phone.ref:
                     raise ProtocolError('stale phone')
+                snapshot = self.snapshots.get(device)
                 message = cmd.get('message')
                 if op == 'control' and isinstance(message, dict) and message.get('type') == 'inbox':
-                    phone.outgoing(message)  # Inbox validation does not mutate call state.
-                    merged = self.inbox(device, (client, message['items']))
+                    ids = inbox_ids(message)
+                    if snapshot:
+                        if snapshot['failed'] or any(self.owner(device, request) not in (None, client) for request in ids):
+                            raise ProtocolError('snapshot unavailable')
+                    else:
+                        try:
+                            merged = self.inbox(device, (client, message['items']))
+                        except ProtocolError as error:
+                            if str(error) == 'combined inbox too large':
+                                await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref,
+                                                         'message': {'type': 'error', 'code': 'inbox-too-large'}})
+                            raise
                     client.inboxes[device] = message['items']
+                    proposal = self.proposals.get(device)
+                    if proposal and proposal[0] is client and proposal[1]['requestId'] not in ids:
+                        self.proposals.pop(device, None)
+                    client.details.pop(device, None)  # Replaced by this owner's fresh per-request frames.
+                    client.audience.update((device, request) for request in ids)
+                    if snapshot:
+                        snapshot['waiting'].discard(client)
+                        client.event(event='reply', id=cmd['id'], ok=True, value=None)
+                        await self.finish_snapshot(device)
+                        return
                     cmd = {**cmd, 'message': merged}
+                    replay = (device, phone)
+                elif op == 'control' and isinstance(message, dict) and message.get('type') == 'question':
+                    if (message.keys() != {'type', 'requestId', 'display'} or not phone.details or
+                            self.owner(device, message.get('requestId')) is not client or not question_display(message['display'])):
+                        raise ProtocolError('unowned question metadata')
+                    client.details.setdefault(device, {})[message['requestId']] = message
+                    if snapshot:
+                        if snapshot['failed']:
+                            raise ProtocolError('snapshot unavailable')
+                        client.event(event='reply', id=cmd['id'], ok=True, value=None)
+                        return
+                elif op == 'control' and message == {'type': 'error', 'code': 'inbox-too-large'}:
+                    if snapshot:
+                        await self.fail_snapshot(device, snapshot, 'inbox-too-large')
+                        client.event(event='reply', id=cmd['id'], ok=True, value=None)
+                        return
                 else:
                     active = self.active.get(device)
                     if active is None or active[0] is not client:
                         raise ProtocolError('unowned call')
                     if op == 'control':
-                        if not isinstance(message, dict) or message.get('type') not in ('joined', 'ended', 'mark', 'transcript', 'error'):
+                        if not isinstance(message, dict) or message.get('type') not in ('joined', 'ended', 'mark', 'transcript', 'proposal', 'error'):
                             raise ProtocolError('invalid call control')
                         if message['type'] != 'error' and message.get('requestId') != active[1]:
                             raise ProtocolError('stale call')
+                        if message['type'] == 'proposal':
+                            if (message.keys() != {'type', 'requestId', 'text'} or not phone.details or
+                                    not text(message['text']) or self.owner(device, active[1]) is not client):
+                                raise ProtocolError('invalid proposal')
+                            if message['text']:
+                                self.proposals[device] = (client, message)
+                            else:
+                                self.proposals.pop(device, None)
+                            if snapshot:
+                                if snapshot['failed']:
+                                    raise ProtocolError('snapshot unavailable')
+                                client.event(event='reply', id=cmd['id'], ok=True, value=None)
+                                return
+                        elif message['type'] in ('ended', 'error'):
+                            self.proposals.pop(device, None)
             await self.enqueue(client, cmd)
+            if replay:
+                await self.replay_details(*replay)
         except (ValueError, KeyError, TypeError, OSError):
             client.event(event='reply', id=cmd['id'], ok=False)
+
+    async def replay_details(self, device, phone):
+        if not phone.details:
+            return
+        for item in self.inbox(device)['items']:
+            request = item['requestId']
+            owner = self.owner(device, request)
+            message = owner.details.get(device, {}).get(request) if owner else None
+            if message:
+                await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref, 'message': message})
+        proposal = self.proposals.get(device)
+        if proposal and self.owner(device, proposal[1]['requestId']) is proposal[0]:
+            await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref, 'message': proposal[1]})
 
     async def event(self, **msg):
         event = msg['event']
@@ -208,6 +335,10 @@ class Broker:
             pending = self.pending.pop(msg['id'], None)
             if pending:
                 client, local, op, authority = pending
+                if op == 'invalidate' and client is not None:
+                    pair = client.retiring.pop(local, None)
+                    if msg.get('ok') and pair is not None:
+                        client.audience.discard(pair)
                 if op == 'pair':
                     self.pair_pending = False
                     if client not in self.clients:
@@ -220,6 +351,8 @@ class Broker:
         if event == 'ready':
             self.ready = True
             msg = {**msg, 'routingVersion': 1}
+        elif event == 'connected':
+            await self.begin_snapshot(msg['deviceId'], msg['ref'])
         elif event == 'confirm':
             client = self.pair_owner
             if client in self.clients:
@@ -230,6 +363,8 @@ class Broker:
             return
         elif event == 'message':
             device, message = msg['deviceId'], msg['message']
+            if message['type'] == 'list':
+                await self.begin_snapshot(device, msg['ref'])
             if message['type'] != 'list':
                 request = message.get('requestId')
                 active = self.active.get(device)
@@ -241,13 +376,19 @@ class Broker:
                     # Phone.incoming already excludes simultaneous calls. Retain this
                     # owner through ended -> error; each join creates a new authority.
                     self.active[device] = (client, request)
+                    self.proposals.pop(device, None)
                 if client in self.clients:
                     client.event(**msg)
                 return
         elif event == 'lost':
+            snapshot = self.snapshots.pop(msg['deviceId'], None)
+            if snapshot:
+                snapshot['timer'].cancel()
             self.active.pop(msg['deviceId'], None)
+            self.proposals.pop(msg['deviceId'], None)
             for client in self.clients:
                 client.inboxes.pop(msg['deviceId'], None)
+                client.details.pop(msg['deviceId'], None)
         for client in tuple(self.clients):
             client.event(**msg)
 
@@ -265,6 +406,9 @@ class Broker:
         client.writer.close()
         if self.stopping:
             return
+        for device, request in client.audience:
+            await self.enqueue(None, {'op': 'invalidate', 'deviceId': device, 'requestId': request})
+        client.audience.clear()
         for ref in client.confirmations:
             waiter = self.service.waiters.get(ref)
             if waiter is not None and not waiter.done():
@@ -276,17 +420,28 @@ class Broker:
         for device, (owner, request) in tuple(self.active.items()):
             if owner is client:
                 self.active.pop(device)
+                self.proposals.pop(device, None)
                 phone = self.service.phones.get(device)
                 if phone and request in (phone.joining, phone.joined):
                     await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref, 'message': {'type': 'ended', 'requestId': request}})
-        for device in client.inboxes:
+        affected = set(client.inboxes) | {device for device, snapshot in self.snapshots.items() if client in snapshot['waiting']}
+        for device in affected:
+            snapshot = self.snapshots.get(device)
+            if snapshot:
+                snapshot['waiting'].discard(client)
+                await self.finish_snapshot(device)
+                continue
             phone = self.service.phones.get(device)
             if phone:
                 await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': phone.ref, 'message': self.inbox(device)})
+                await self.replay_details(device, phone)
         if not self.clients and not self.stopping:
             self.idle = asyncio.get_running_loop().call_later(10, self.stop)
 
     def stop(self):
+        if not self.clients and self.service and self.service.pending_invalidations:
+            self.idle = asyncio.get_running_loop().call_later(30, self.stop)
+            return
         if not self.stopping:
             self.stopping = True
             if self.commands.full():
@@ -350,9 +505,10 @@ class Broker:
                     self.idle.cancel()
                 server.close()
                 await server.wait_closed()
-                for task in tuple(self.tasks):
+                tasks = self.tasks | self.snapshot_tasks
+                for task in tuple(tasks):
                     task.cancel()
-                await asyncio.gather(*self.tasks, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
                 endpoint.unlink(missing_ok=True)
 
 

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { choiceValue, fieldError, fieldQuestions, isArrayChoice, textValue } from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, type ChoiceOption, type FormField, parseHtmlForm, spansText, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
+import { type ChoiceField, type ChoiceOption, type FormField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/key-hint-format";
 import { SYMBOL_PRESETS } from "@oh-my-pi/pi-tui/theme/symbols";
 import { type Element, parseHTML, serializeNode } from "@oh-my-pi/pi-utils/dom";
@@ -16,6 +16,7 @@ export interface PreparedForm {
 	html: string;
 	fields: Field[];
 	hidden: Map<string, string>;
+	parsed: HtmlForm;
 }
 
 /** Decorate only question text. Re-parse the result with the host's own parser; never rebuild a form from its fields. */
@@ -104,7 +105,7 @@ export function tagForm(source: string): PreparedForm | undefined {
 			fields.push({ kind: "choice", field, title, enabled, rows, checked: enabled.flatMap((o, i) => o.checked ? [i] : []) });
 		}
 	}
-	return { html, fields, hidden };
+	return { html, fields, hidden, parsed: original };
 }
 
 // The extension may have its own copy of pi-tui rather than the host's active theme singleton.

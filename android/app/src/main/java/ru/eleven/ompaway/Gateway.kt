@@ -16,6 +16,17 @@ class Gateway : Application() {
     private val main = Handler(Looper.getMainLooper())
     private val audioSettings by lazy { CallAudioSettings(this) }
     internal val speakerEnabled get() = audioSettings.speakerEnabled
+    internal val inviteSettings by lazy { InviteSettings(this) }
+    internal val needsRelayOrigin get() = current().channel.needsRelayOrigin()
+    internal fun migrateRelayOrigin(origin: String) {
+        if (observer == null || !idle) return
+        status = "Restoring relay setup without replacing paired keys…"
+        current().channel.migrateRelayOrigin(origin); changed()
+    }
+    private var requestedJoin: String? = null
+    private var voiceForeground = false
+    private var joinSent = false
+    private var invitationObserver: (() -> Unit)? = null
     private val tokenState = TokenUpdates()
     @Volatile private var session: Session? = null
     private var observer: (() -> Unit)? = null
@@ -54,6 +65,7 @@ class Gateway : Application() {
         super.onCreate()
         store = InboxStore(this)
         Invites.ensureChannel(this)
+        if (store.needsSync) SilenceJob.schedule(this)
     }
 
     internal fun onMainAndWait(action: Gateway.() -> Unit) {
@@ -63,7 +75,22 @@ class Gateway : Application() {
     }
 
     private fun current() = session ?: Session().also { session = it }
-    private fun changed() { observer?.invoke() }
+    private fun changed() { observer?.invoke(); invitationObserver?.invoke() }
+
+    internal fun observeInvitation(observer: (() -> Unit)?) { invitationObserver = observer }
+
+    internal fun invitationSettingsChanged() {
+        // A settings change is never a new invitation, and must stop existing ringing.
+        store.suppressExistingAlerts()
+        for (id in store.state.invited) {
+            Invites.cancel(this, id)
+            if (id !in store.state.closed && id !in store.state.silenced && id !in store.state.acknowledged && id != callId)
+                Invites.show(this, id, if (verifiedInbox) store.state.pending[id] else null)
+        }
+        changed()
+    }
+
+    internal fun acknowledge(id: String) { store.acknowledge(id); Invites.cancel(this, id) }
 
     internal fun setSpeakerEnabled(enabled: Boolean) {
         if (call?.setSpeakerEnabled(enabled) == false) {
@@ -84,8 +111,9 @@ class Gateway : Application() {
 
     internal fun background() {
         observer = null; voiceObserver = null
-        endCall(null)
-        if (syncJob == null || pairing) retire()
+        requestedJoin = null
+        if (!voiceForeground) endCall(null)
+        if (call == null && (syncJob == null || pairing)) retire()
     }
 
     internal fun connect() {
@@ -136,12 +164,16 @@ class Gateway : Application() {
     }
 
     internal fun receivedInvite(id: String, allowNotification: Boolean) {
-        when (store.invite(id, allowNotification)) {
-            Arrival.IGNORE -> return
-            Arrival.NOTIFY -> Invites.show(this, id)
-            Arrival.CACHE -> Unit
+        if (!validId(id)) return
+        store.wakeup(id, allowNotification)
+        // A wakeup is not proof of liveness; replace even known previews with a generic sync card.
+        if (allowNotification && id !in store.state.closed && id !in store.state.silenced &&
+            id !in store.state.acknowledged && id != callId) {
+            Invites.cancel(this, id)
+            Invites.show(this, id)
         }
         if (verifiedInbox) current().channel.list()
+        SilenceJob.schedule(this)
         changed()
     }
 
@@ -159,14 +191,14 @@ class Gateway : Application() {
         main.postDelayed(timeout, 22_000)
         main.post {
             if (syncJob !== done) return@post
-            if (store.state.silenced.isEmpty() || !paired) finishSync(false)
+            if (!paired) finishSync(false)
             else if (verifiedInbox) current().channel.list()
             else if (!current().connecting) connect()
         }
         return AutoCloseable {
             if (syncJob === done) {
                 syncJob = null; main.removeCallbacks(timeout)
-                if (observer == null) retire()
+                if (observer == null && call == null) retire()
             }
         }
     }
@@ -174,20 +206,38 @@ class Gateway : Application() {
     private fun finishSync(retry: Boolean) {
         val done = syncJob ?: return
         syncJob = null; main.removeCallbacks(timeout)
-        if (observer == null) retire()
+        if (!retry) store.needsSync = false
+        if (observer == null && call == null) retire()
         done(retry)
     }
 
     internal fun join(id: String) {
+        acknowledge(id)
+        if (observer == null || !validId(id)) return
+        if (!idle) { status = "End the current call before answering another request."; changed(); return }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            status = "Microphone permission is required. Nothing was joined."; changed(); return
+        }
+        requestedJoin = id
+        status = "Checking that this request is still pending…"
+        store.state.invalidateDetails()
+        if (verifiedInbox) current().channel.list() else connect()
+        changed()
+    }
+
+    private fun startCall(id: String) {
         val microphone = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (observer == null || !canJoin(store.state, id, verifiedInbox, idle, microphone)) return
+        if (observer == null || !canJoin(store.state, id, verifiedInbox, idle, microphone)) {
+            status = "Unable to answer here. Open Away and check microphone permission."; return
+        }
+        Invites.stopRinging(this)
         val s = current()
         lateinit var media: CallService
         media = CallService(this, id, { pcm -> s.channel.sendPcm(pcm) }, { mark -> s.channel.played(id, mark) }, {
             main.post { if (call === media) endCall("Audio interrupted. Request remains pending.") }
         }, {
             main.post {
-                if (call === media && observer != null) {
+                if (call === media && voiceForeground) {
                     main.removeCallbacks(joinTimeout); talking = true; status = "In call"; changed()
                 }
             }
@@ -196,24 +246,40 @@ class Gateway : Application() {
                 if (call === media && speaking != active) { speaking = active; voiceObserver?.invoke() }
             }
         })
-        call = media; talking = false; status = "Joining…"
+        call = media; talking = false; voiceForeground = false; joinSent = false; status = "Starting foreground voice call…"
         speaking = false; callerCaption = ""; assistantCaption = ""
         callerCaptionFinal = false; assistantCaptionFinal = false
         Invites.cancel(this, id)
         main.postDelayed(joinTimeout, 90_000)
-        s.channel.join(id); changed()
+        try { VoiceForegroundService.start(this, id) }
+        catch (_: RuntimeException) { voiceForegroundFailed(id) }
+        changed()
+    }
+
+    internal fun voiceForegroundReady(id: String) {
+        if (callId != id) return
+        voiceForeground = true; joinSent = true
+        current().channel.join(id)
+    }
+
+    internal fun voiceForegroundFailed(id: String) {
+        if (callId == id) endCall("Android could not keep microphone access in the foreground. Reopen Away to answer.")
     }
 
     internal fun hangup() = endCall("Call ended. The desktop controls the pending request.")
 
     private fun endCall(message: String?, tellDesktop: Boolean = true) {
         val media = call ?: return
-        call = null; talking = false
+        call = null; talking = false; voiceForeground = false
+        VoiceForegroundService.stop(this)
         speaking = false; callerCaption = ""; assistantCaption = ""
         callerCaptionFinal = false; assistantCaptionFinal = false
         main.removeCallbacks(joinTimeout)
+        store.state.proposals.remove(media.id)
         media.close()
-        if (tellDesktop && session != null) {
+        val notifyDesktop = tellDesktop && session != null && joinSent
+        joinSent = false
+        if (notifyDesktop) {
             endingId = media.id
             session?.channel?.hangup(media.id)
         }
@@ -225,7 +291,38 @@ class Gateway : Application() {
         val old = session; session = null
         endingId = null
         verifiedInbox = false; verifyEmoji = null; pairing = false; sentSilences.clear()
+        store.state.invalidateDetails()
         old?.channel?.close()
+    }
+
+    /** Main-thread authoritative snapshot handler; the live transport invokes it only after pinned TLS. */
+    internal fun reconcileInbox(items: List<InboxItem>) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        val channel = current().channel
+        val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
+        for (id in removed) Invites.cancel(this, id)
+        verifiedInbox = true; sentSilences.removeAll(removed)
+        val toSilence = store.state.silenced.filter { sentSilences.add(it) }
+        toSilence.forEach { channel.silence(it) }
+        if (callId?.let { it !in store.state.pending } == true) endCall("Request closed on desktop.")
+        else if (call == null) status = "Connected to desktop"
+        val answer = requestedJoin
+        if (answer != null) {
+            requestedJoin = null
+            if (answer in store.state.pending) startCall(answer)
+            else status = "That request is no longer pending. Nothing was joined."
+        }
+        for (item in store.state.pending.values) {
+            val alert = store.consumeAlert(item.id)
+            if (item.id in store.state.invited && item.id !in store.state.silenced && item.id !in store.state.acknowledged && item.id != callId)
+                Invites.show(this, item.id, item, alert, !idle)
+        }
+        store.needsSync = false
+        if (syncJob != null) {
+            // A list response following silence fences its delivery on this ordered socket.
+            if (toSilence.isNotEmpty()) channel.list() else finishSync(false)
+        }
+        changed()
     }
 
     private inner class Session : PairedChannel.Listener {
@@ -243,26 +340,21 @@ class Gateway : Application() {
             status = "Refreshing inbox…"; changed()
         }
 
-        override fun onInbox(items: List<InboxItem>) = ui {
-            val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt) })
-            for (id in removed) Invites.cancel(this@Gateway, id)
-            verifiedInbox = true; sentSilences.removeAll(removed)
-            val toSilence = store.state.silenced.filter { sentSilences.add(it) }
-            toSilence.forEach { channel.silence(it) }
-            if (callId?.let { it !in store.state.pending } == true) endCall("Request closed on desktop.")
-            else if (call == null) status = "Connected to desktop"
-            if (syncJob != null) {
-                // A list response following the silence command fences its delivery on this ordered socket.
-                if (toSilence.isNotEmpty()) channel.list() else finishSync(false)
-            }
-            changed()
+        override fun onInbox(items: List<InboxItem>) = ui { reconcileInbox(items) }
+
+        override fun onQuestion(requestId: String, display: QuestionDisplay?) = ui {
+            if (verifiedInbox && store.state.question(requestId, display)) changed()
+        }
+
+        override fun onProposal(requestId: String, text: String) = ui {
+            if (verifiedInbox && callId == requestId && store.state.proposal(requestId, text)) changed()
         }
 
         override fun onJoined(requestId: String) {
             val media = call?.takeIf { it.id == requestId && session === this }
             stream = media
             ui {
-                if (media != null && call === media && observer != null && verifiedInbox && requestId in store.state.pending) {
+                if (media != null && call === media && voiceForeground && verifiedInbox && requestId in store.state.pending) {
                     status = "Waiting for the desktop's voice…"
                     media.start(); changed()
                 } else channel.hangup(requestId)
@@ -271,7 +363,7 @@ class Gateway : Application() {
         override fun onPcm(pcm: ByteArray) { stream?.receive(pcm) }
         override fun onMark(requestId: String, mark: String) { stream?.takeIf { it.id == requestId }?.mark(mark) }
         override fun onTranscript(requestId: String, role: String, text: String, final: Boolean) = ui {
-            if (callId != requestId || observer == null) return@ui
+            if (callId != requestId) return@ui
             if (role == "user") { callerCaption = text; callerCaptionFinal = final }
             else { assistantCaption = text; assistantCaptionFinal = final }
             voiceObserver?.invoke()
@@ -281,7 +373,7 @@ class Gateway : Application() {
             ui {
                 if (endingId == requestId) endingId = null
                 if (callId == requestId) endCall("Call ended by desktop.", false)
-                channel.list()
+                if (observer == null && syncJob == null) retire() else channel.list()
             }
         }
         override fun onError(code: String) = ui {
@@ -289,14 +381,23 @@ class Gateway : Application() {
                 pushWarning = "Push registration unavailable. Reopen the inbox to retry."
                 changed(); return@ui
             }
+            requestedJoin = null
+            verifiedInbox = false; store.state.invalidateDetails()
             endCall(null); verifyEmoji = null; pairing = false; connecting = false
-            status = "Desktop connection error: " + code.takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,64}")) }.orEmpty()
+            status = when (code) {
+                "relay_origin_required" -> "Relay setup required. Pairing keys have been retained."
+                "relay_origin_rejected" -> "Enter a valid HTTPS relay origin without credentials, path, query or fragment."
+                "inbox-too-large" -> "Desktop inbox is too large to synchronize. Requests remain pending; details are unavailable."
+                "inbox-unavailable" -> "Desktop inbox is not yet available. Pending sync; cached details cannot be used."
+                else -> "Desktop connection error: " + code.takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,64}")) }.orEmpty()
+            }
             changed()
         }
         override fun onDisconnected() {
             val media = stream; stream = null; media?.invalidate()
             ui {
                 endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
+                store.state.invalidateDetails()
                 endingId = null
                 if (!status.startsWith("Desktop connection error")) status = "Disconnected. Showing cached inbox."
                 changed()

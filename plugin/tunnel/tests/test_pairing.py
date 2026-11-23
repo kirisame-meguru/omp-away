@@ -38,7 +38,7 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
                     seen.append(emoji)
                     return desktop_ok
                 pairs = Pairings(identity, confirm)
-                qr = pairs.issue('https://away.example.invalid', token_urlsafe(32))
+                qr = pairs.issue('https://relay.example.org', token_urlsafe(32))
                 pin, device = token_urlsafe(32), f'phone-{n}'
                 stream = Endpoint([{'type':'pair','nonce':qr['nonce'],'secret':token_urlsafe(32) if bad_secret else qr['secret']}, {'type':'verify','accept':phone_ok}])
                 if not phone_ok or not desktop_ok or bad_secret:

@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestExpiredTicketAndDurableBearer(t *testing.T) {
@@ -106,5 +109,110 @@ func TestAmbiguousAndAcceptedReservationsSurviveRestartButExpire(t *testing.T) {
 		if token, dup, err := s.Reserve(id, key, now.Add(10*time.Minute)); err != nil || dup || token != "fcm-one" {
 			t.Fatal("expired wake reservation not released", err)
 		}
+	}
+}
+
+func TestNamespacedWakeReservationsAreDurableAndExpire(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if s != nil {
+			s.Close()
+		}
+	})
+	now := time.Now()
+	ticket, err := s.Ticket(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := s.Enroll(ticket, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetFCM(id, "registration-one"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"request", "invalidation:request", "invalidation:interrupted"} {
+		if token, dup, err := s.Reserve(id, key, now); err != nil || dup || token != "registration-one" {
+			t.Fatal("separate wake reservation rejected", err)
+		}
+		if key != "invalidation:interrupted" {
+			if err = s.Accepted(id, key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"request", "invalidation:request"} {
+		if _, dup, err := s.Reserve(id, key, now.Add(time.Minute)); err != nil || !dup {
+			t.Fatal("successful wakeup replayed after restart", err)
+		}
+	}
+	if _, _, err := s.Reserve(id, "invalidation:interrupted", now.Add(time.Minute)); !errors.Is(err, ErrUnknown) {
+		t.Fatal("interrupted reservation unexpectedly accepted", err)
+	}
+	// Even a crash between reservation and send cannot suppress retries forever.
+	for _, key := range []string{"request", "invalidation:request", "invalidation:interrupted"} {
+		if token, dup, err := s.Reserve(id, key, now.Add(10*time.Minute)); err != nil || dup || token != "registration-one" {
+			t.Fatal("expired wake reservation still suppresses delivery", err)
+		}
+	}
+	if err = s.Accepted(id, "invalidation:request"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(devices).Delete([]byte(id)) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Reserve(id, "invalidation:request", now.Add(10*time.Minute)); !errors.Is(err, ErrMissing) {
+		t.Fatal("deduplication accepted a deleted enrollment", err)
+	}
+}
+
+func TestNamespacedWakeReservationsShareBoundedCapacityAndReleaseFailures(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	ticket, err := s.Ticket(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := s.Enroll(ticket, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetFCM(id, "registration-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.Reserve(id, "invitation", now); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 4095 {
+		if _, dup, err := s.Reserve(id, "invalidation:"+strconv.Itoa(i), now); err != nil || dup {
+			t.Fatal("reservation rejected below capacity", err)
+		}
+	}
+	if _, _, err = s.Reserve(id, "invalidation:overflow", now); !errors.Is(err, ErrFull) {
+		t.Fatal("unbounded invalidation reservations", err)
+	}
+	if err = s.Rejected(id, "invalidation:0", ""); err != nil {
+		t.Fatal(err)
+	}
+	if token, dup, err := s.Reserve(id, "invalidation:0", now); err != nil || dup || token != "registration-one" {
+		t.Fatal("failed delivery did not release its reservation and capacity", err)
+	}
+	if token, dup, err := s.Reserve(id, "invalidation:overflow", now.Add(10*time.Minute)); err != nil || dup || token != "registration-one" {
+		t.Fatal("expired reservations did not release capacity", err)
 	}
 }

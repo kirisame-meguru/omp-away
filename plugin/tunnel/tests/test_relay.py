@@ -3,6 +3,7 @@ import asyncio
 import ipaddress
 import json
 import secrets
+import socket
 import ssl
 import tempfile
 import unittest
@@ -41,6 +42,38 @@ def outer_tls(path):
     server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server.load_cert_chain(path / 'cert', path / 'key')
     return server, ssl.create_default_context(cadata=pem)
+
+
+async def close_tls_server(server):
+    """Drain this fixture's accepts and TLS transports, not just aiohttp handlers."""
+    if not server.started or server.closed:
+        return
+    listeners = [site._server for site in server.runner.sites if site._server is not None]
+    async with asyncio.timeout(5):
+        for listener in listeners:
+            loop = listener.get_loop()
+            accepts = getattr(loop, '_accept_futures', None)
+            if accepts is None:
+                continue
+            descriptors = [sock.fileno() for sock in listener.sockets]
+            # CPython Proactor Server.close() clears _sockets before a completed
+            # accept's queued callback can attach its SSL transport. Drain only
+            # our listeners' callbacks while their Server is still attachable.
+            # A completed accept may install the next one: cancel/drain that too.
+            while True:
+                pending = [future for fd in descriptors if (future := accepts.pop(fd, None)) is not None]
+                if not pending:
+                    break
+                for future in pending:
+                    future.cancel()
+                results = await asyncio.gather(*pending, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                        raise result
+        await server.close()
+        # aiohttp BaseSite.stop() closes its asyncio.Server but does not await
+        # wait_closed(); HTTP handler shutdown cannot see unfinished TLS handshakes.
+        await asyncio.gather(*(listener.wait_closed() for listener in listeners))
 
 
 class LocalHost:
@@ -83,6 +116,8 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.desktop_ready = asyncio.Queue()
         self.capture = bytearray()
         self.invites = []
+        self.invalidations = []
+        self.fail_invalidations = 0
         self.desktop_token = secrets.token_urlsafe(32)
         self.finish = asyncio.Event()
         self.handles = []
@@ -96,6 +131,12 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
                 return web.json_response({'ticket':secrets.token_urlsafe(32)})
             if req.path == '/v1/invites':
                 self.invites.append(await req.json())
+                return web.Response(status=204)
+            if req.path == '/v1/invalidations':
+                if self.fail_invalidations:
+                    self.fail_invalidations -= 1
+                    return web.Response(status=503)
+                self.invalidations.append(await req.json())
                 return web.Response(status=204)
             if req.path == '/redirect':
                 raise web.HTTPTemporaryRedirect('/wrong')
@@ -130,7 +171,8 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.worker.cancel()
         await asyncio.gather(self.worker, return_exceptions=True)
         await self.client.close()
-        await self.server.close()
+        await asyncio.gather(*(ws.close() for ws in self.handles if not ws.closed))
+        await close_tls_server(self.server)
 
     async def test_wss_redirect_is_not_followed(self):
         with self.assertRaises(ProtocolError):
@@ -212,3 +254,53 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.host.expect('lost'), {'event':'lost', **dest})
         for secret in (sentinel, qr['secret'], qr['nonce'], prompt['emoji']):
             self.assertNotIn(secret.encode(), capture)
+
+
+class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_drains_accepted_sockets_and_unfinished_tls_handshakes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tls, _ = outer_tls(Path(directory) / 'certificate')
+            loop = asyncio.get_running_loop()
+            errors = []
+            previous = loop.get_exception_handler()
+            def report(loop, context):
+                errors.append(context)
+                if previous is None:
+                    loop.default_exception_handler(context)
+                else:
+                    previous(loop, context)
+            loop.set_exception_handler(report)
+            try:
+                for phase in ('accepted', 'handshake'):
+                    with self.subTest(phase=phase):
+                        server = TestServer(web.Application(), scheme='https', host='127.0.0.1')
+                        await server.start_server(ssl=tls, access_log=None)
+                        listener = next(iter(server.runner.sites))._server
+                        peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        peer.setblocking(False)
+                        closing = None
+                        try:
+                            await loop.sock_connect(peer, ('127.0.0.1', server.port))
+                            if phase == 'handshake':
+                                async with asyncio.timeout(2):
+                                    while listener._active_count == 0:
+                                        await asyncio.sleep(0)
+                                closing = asyncio.create_task(close_tls_server(server))
+                                async with asyncio.timeout(2):
+                                    while listener.is_serving():
+                                        await asyncio.sleep(0)
+                                done, _ = await asyncio.wait({closing}, timeout=.02)
+                                self.assertFalse(done, 'Cleanup returned while its accepted TLS socket was still live')
+                            peer.close()
+                            if closing is None:
+                                closing = asyncio.create_task(close_tls_server(server))
+                            await closing
+                            self.assertEqual(listener._active_count, 0)
+                        finally:
+                            peer.close()
+                            if closing is not None and not closing.done():
+                                await closing
+                            await close_tls_server(server)
+                self.assertEqual(errors, [])
+            finally:
+                loop.set_exception_handler(previous)

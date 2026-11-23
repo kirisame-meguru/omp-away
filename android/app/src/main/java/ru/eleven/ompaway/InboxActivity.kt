@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.ToggleButton
+import android.widget.EditText
 import com.google.zxing.integration.android.IntentIntegrator
 import com.journeyapps.barcodescanner.CaptureActivity
 import java.text.DateFormat
@@ -36,6 +37,9 @@ class InboxActivity : Activity() {
     private var shownEmoji: String? = null
     private var resumed = false
     private var transcriptViews: CallTranscriptViews? = null
+    private val detailViews = mutableMapOf<String, QuestionDetailView>()
+    private var answerRequested: String? = null
+    private var permissionAnswer: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,15 +54,44 @@ class InboxActivity : Activity() {
         takeInvite(intent)
     }
 
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); takeInvite(intent); if (resumed) render() }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent); setIntent(intent); takeInvite(intent)
+        if (resumed) { render(); continueAnswer() }
+    }
     private fun takeInvite(intent: Intent) {
-        if (intent.action == Invites.OPEN) selectedId = intent.getStringExtra(Invites.ID)?.takeIf(::validId)
+        if (intent.action != Invites.OPEN && intent.action != Invites.ANSWER) return
+        val id = intent.getStringExtra(Invites.ID)?.takeIf(::validId) ?: return
+        selectedId = id
+        app.acknowledge(id)
+        // Only the private PendingIntent alias may request an automatic voice join.
+        // An arbitrary launcher/deep-link intent merely opens the read-only request.
+        if (intent.action == Invites.ANSWER && intent.component?.className == "$packageName.AnswerCall") answerRequested = id
+    }
+
+    private fun answer(id: String) {
+        selectedId = id; answerRequested = id; continueAnswer()
+    }
+
+    private fun continueAnswer() {
+        if (!resumed) return
+        val id = answerRequested ?: return
+        answerRequested = null
+        if (!app.idle) { notice = "Hang up the current call before answering another request."; render(); return }
+        app.acknowledge(id)
+        if (granted(Manifest.permission.RECORD_AUDIO)) app.join(id)
+        else {
+            permissionAnswer = id
+            notice = "Microphone permission is needed to answer. The question remains read-only."
+            if (askedAndDenied(Manifest.permission.RECORD_AUDIO)) { permissionAnswer = null; appSettings() }
+            else ask(Manifest.permission.RECORD_AUDIO, MIC)
+        }
     }
 
     override fun onResume() {
         super.onResume(); resumed = true
         app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
+        continueAnswer()
     }
     override fun onPause() {
         resumed = false
@@ -80,6 +113,28 @@ class InboxActivity : Activity() {
             isChecked = app.speakerEnabled
             setOnCheckedChangeListener { _, enabled -> if (resumed) app.setSpeakerEnabled(enabled) }
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        column.addView(ToggleButton(this).apply {
+            textOn = "Invitations: ringing call"; textOff = "Invitations: notification"; isAllCaps = false
+            isChecked = app.inviteSettings.callMode
+            setOnCheckedChangeListener { _, enabled ->
+                if (resumed) { app.inviteSettings.callMode = enabled; app.invitationSettingsChanged() }
+            }
+        })
+        column.addView(ToggleButton(this).apply {
+            textOn = "Notification previews: enabled"; textOff = "Notification previews: hidden"; isAllCaps = false
+            isChecked = app.inviteSettings.showPreview
+            setOnCheckedChangeListener { _, enabled ->
+                if (resumed) { app.inviteSettings.showPreview = enabled; app.invitationSettingsChanged() }
+            }
+        })
+        text("Previews are private by default. If enabled, Android lock-screen privacy settings apply; the public version stays redacted. Sound, vibration and Do Not Disturb follow system settings.", 14)
+        if (Build.VERSION.SDK_INT >= 34 && app.inviteSettings.callMode &&
+            !getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent()) {
+            text("Full-screen calls are unavailable. Incoming calls use notifications instead.", 14)
+            button("Full-screen call settings") {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
+            }
+        }
         if (!Invites.allowed(this)) {
             text("Notifications are off. Open this inbox to see pending requests.", 14)
             button("Enable invitations") {
@@ -102,8 +157,22 @@ class InboxActivity : Activity() {
                 }
             } else button("Cancel pairing") { app.retry() }
         } else {
+            if (app.needsRelayOrigin) {
+                text("Relay setup required. Your existing pairing keys are retained.", 16)
+                button("Restore relay address") {
+                    val input = EditText(this).apply {
+                        hint = "https://relay.example"
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+                    }
+                    AlertDialog.Builder(this).setTitle("Existing relay origin")
+                        .setMessage("Enter the same trusted HTTPS relay used by your paired desktop. This sends your existing relay credential there; never enter an unfamiliar address.")
+                        .setView(input).setPositiveButton("Restore") { _, _ -> app.migrateRelayOrigin(input.text.toString()) }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            }
             if (app.callId == null) button(if (app.verifiedInbox) "Refresh inbox" else "Reconnect") { notice = null; app.retry() }
             app.callId?.let {
+                text("Voice captions · Not a submitted answer", 18, bold = true)
                 transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 17), text("", 17))
                 renderVoice()
                 button("Hang up") { app.hangup() }
@@ -114,21 +183,28 @@ class InboxActivity : Activity() {
         if (selected != null && app.verifiedInbox && selected !in state.pending) text("That request is no longer pending.", 16)
         text(if (app.verifiedInbox) "Pending" else "Last known pending", 22, bold = true)
         if (state.pending.isEmpty()) text(if (app.verifiedInbox) "No pending requests." else "No cached requests.", 16)
-        // A notification targets the item, never an automatic join or a permission prompt.
-        val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == selected }.thenByDescending { it.createdAt })
+        detailViews.keys.retainAll(state.pending.keys)
+        val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == app.callId }
+            .thenByDescending { it.id == selected }.thenByDescending { it.createdAt })
         for (item in rows) {
-            text(item.project, 18, bold = true)
+            text(if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project.ifBlank { "Desktop request" }
+                else "Desktop request · Pending sync", 18, bold = true)
             text(DateFormat.getDateTimeInstance().format(Date(item.createdAt)) + if (item.id in state.silenced) " · Silenced" else "", 14)
-            text(item.question, 17)
-            if (app.verifiedInbox && app.idle) {
-                if (granted(Manifest.permission.RECORD_AUDIO)) button("Answer by voice") { app.join(item.id) }
-                else button("Enable microphone to answer") {
-                    if (askedAndDenied(Manifest.permission.RECORD_AUDIO)) appSettings() else ask(Manifest.permission.RECORD_AUDIO, MIC)
-                }
+            if (app.verifiedInbox) text(item.question, 17)
+            val detail = detailViews.getOrPut(item.id) { QuestionDetailView(this) }
+            detail.bind(item, state.details[item.id], app.verifiedInbox)
+            column.addView(detail, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                dp((resources.configuration.screenHeightDp / 2).coerceIn(180, 420))))
+            if (app.callId == item.id) {
+                text("Proposed answer · Not confirmed or submitted", 18, bold = true)
+                text(state.proposals[item.id] ?: "No current proposal from the desktop.", 17)
+            }
+            if (app.idle) {
+                button(if (granted(Manifest.permission.RECORD_AUDIO)) "Answer call" else "Enable microphone to answer") { answer(item.id) }
             }
             if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
         }
-        val awaiting = state.invited.filterNot { it in state.pending }
+        val awaiting = state.invited.filterNot { it in state.pending || it in state.closed }
         if (awaiting.isNotEmpty()) {
             text("Missed invitations", 22, bold = true)
             for (id in awaiting) {
@@ -183,6 +259,11 @@ class InboxActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         notice = if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) null
             else if (requestCode == MIC) "Microphone unavailable. Nothing was joined." else "Invitations remain in the inbox."
+        if (requestCode == MIC) {
+            val id = permissionAnswer; permissionAnswer = null
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) answerRequested = id
+            continueAnswer()
+        }
         if (resumed) render()
     }
 
@@ -192,6 +273,7 @@ class InboxActivity : Activity() {
             text = value; textSize = sp.toFloat(); setPadding(0, dp(if (bold) 14 else 5), 0, dp(3))
             if (bold) setTypeface(typeface, Typeface.BOLD)
             textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+            isAccessibilityHeading = bold
         }.also { column.addView(it) }
     private fun button(label: String, action: () -> Unit) {
         column.addView(Button(this).apply {
