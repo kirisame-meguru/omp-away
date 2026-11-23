@@ -26,7 +26,9 @@ def load(path, lines=False):
     return [parse(x) for x in text.splitlines()] if lines else parse(text)
 
 
-def verify(root):
+def verify(root, relay_host, avd):
+    require(bool(relay_host.strip()), "An explicit relay host is required")
+    require(bool(avd.strip()), "An explicit approved AVD is required")
     sc = load(root / 'scenario.json')
     device = load(root / 'android.json')
     log = load(root / 'host.ndjson', True)
@@ -52,9 +54,9 @@ def verify(root):
     require(set(net) == {'run','startMs','endMs','dropped','uidCoverage','ipCoverage','unclassified','flows','fcmAcceptedMs','fcmRequest','liveModel','liveObservation','pairing','relayStartMs','relayEndMs','relayDrops','relayStreams'}, 'unexpected network evidence fields')
     run = sc['run']
     require(re.fullmatch(r'[0-9a-f]{32}', run) and all(v['run'] == run for v in [device, net, wire, *log]), 'mixed runs')
-    require(device['avd'] == 'Pixel_10_Pro_XL_99' and device['package'] == 'ru.eleven.ompaway' and re.fullmatch(r'emulator-\d+', device['serial']), 'wrong handset')
+    require(device['avd'] == avd and device['package'] == 'ru.eleven.ompaway' and re.fullmatch(r'emulator-\d+', device['serial']), 'wrong handset')
     require(re.fullmatch('[0-9a-f]{64}', device['apkSha256']) and device['version'] and device['build'], 'missing installed build identity')
-    require(device['route'] == 'away.example.invalid' and device['notificationPermission'] is True, 'bad handset baseline')
+    require(device['route'] == relay_host and device['notificationPermission'] is True, 'bad handset baseline')
     require(device['audioSource'] in ('human-mic','emulator-test-mic'), 'caller microphone provenance is required')
     def one(kind):
         rows = [e for e in log if e['event'] == kind]
@@ -100,7 +102,7 @@ def verify(root):
         require(set(f) == {'uid','host','port','transport','tx','rx'}, 'unexpected flow evidence fields')
         uid, dest, port = f['uid'], f['host'], f['port']
         require(uid in ('app','gms') and f['transport'] in ('tcp','udp') and type(port) is int and all(type(f[k]) is int and f[k] >= 0 for k in ('tx','rx')) and f['tx']+f['rx'] > 0, 'invalid egress flow')
-        if uid == 'app' and dest == 'away.example.invalid' and port == 443 and f['transport'] == 'tcp':
+        if uid == 'app' and dest == relay_host and port == 443 and f['transport'] == 'tcp':
             saw_relay |= min(f['tx'], f['rx']) > 0
         else:
             require(port in allowed.get(dest, set()), 'unexpected handset destination (details withheld)')
@@ -117,9 +119,11 @@ def verify(root):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument("--relay-host", required=True)
+    parser.add_argument("--avd", required=True)
     args = parser.parse_args()
     try:
-        verify(args.directory)
+        verify(args.directory, args.relay_host, args.avd)
     except (ValueError, KeyError, OSError, TypeError, IndexError, AttributeError) as e:
         # Never echo arbitrary fields from a malformed/private document.
         print('INCOMPLETE/FAIL:', str(e) if type(e) is ValueError and not isinstance(e, json.JSONDecodeError) else 'missing or malformed evidence', file=sys.stderr)

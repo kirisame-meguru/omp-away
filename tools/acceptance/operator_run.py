@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 PKG = 'ru.eleven.ompaway'
-AVD = 'Pixel_10_Pro_XL_99'
 
 
 def save(path, obj):
@@ -29,7 +28,9 @@ def require(ok, msg):
         raise ValueError(msg)
 
 
-def live(root, adb, serial, audio_source):
+def live(root, adb, serial, audio_source, relay_host, avd):
+    require(bool(relay_host.strip()), "An explicit relay host is required")
+    require(bool(avd.strip()), "An explicit approved AVD is required")
     require(re.fullmatch(r'emulator-[0-9]+',serial), 'Expected an explicit emulator serial')
     sc = json.loads((root/'scenario.json').read_text(encoding='utf-8'))
     require(not (root/'android.json').exists(), 'Evidence already exists')
@@ -38,7 +39,7 @@ def live(root, adb, serial, audio_source):
                            stderr=subprocess.DEVNULL, timeout=15, check=False)
         require(p.returncode == 0, 'ADB read failed; no device output recorded')
         return p.stdout.decode('utf-8','replace')
-    require(run('emu','avd','name').splitlines()[0].strip() == AVD, 'Serial is not the approved AVD')
+    require(run('emu','avd','name').splitlines()[0].strip() == avd, 'Serial is not the approved AVD')
     package = run('shell','dumpsys','package',PKG)
     version = re.search(r'^\s*versionName=([0-9a-zA-Z._+-]{1,80})\s*$',package,re.M)
     code = re.search(r'^\s*versionCode=(\d+)\b',package,re.M)
@@ -49,7 +50,7 @@ def live(root, adb, serial, audio_source):
     apk = run('shell','sha256sum',paths[0][8:]).split()[0]
     build = run('shell','getprop','ro.build.id').strip()
     require(re.fullmatch('[0-9a-f]{64}',apk) and re.fullmatch(r'[A-Za-z0-9._-]{1,100}',build), 'Missing installed build identity')
-    data = {'run':sc['run'],'package':PKG,'serial':serial,'avd':AVD,'route':'away.example.invalid','build':build,'version':version[1], 'versionCode':int(code[1]),'apkSha256':apk,'notificationPermission':True,'activeInviteCounts':[], 'steps':{}}
+    data = {'run':sc['run'],'package':PKG,'serial':serial,'avd':avd,'route':relay_host,'build':build,'version':version[1], 'versionCode':int(code[1]),'apkSha256':apk,'notificationPermission':True,'activeInviteCounts':[], 'steps':{}}
     data['audioSource'] = audio_source
     if audio_source == 'emulator-test-mic':
         print('Controller test mic declared. For each spoken action provide caller PCM through the authorized emulator mic. Listen to actual speaker output; never synthesize provider audio or inject transcripts.')
@@ -107,9 +108,11 @@ if __name__ == '__main__':
         if name == 'live':
             cmd.add_argument('--serial',required=True); cmd.add_argument('--adb',default='adb')
             cmd.add_argument('--audio-source',choices=('human-mic','emulator-test-mic'),default='human-mic')
+            cmd.add_argument("--relay-host", required=True)
+            cmd.add_argument("--avd", required=True)
     args = parser.parse_args()
     try:
         if args.command == 'init': init(args.directory)
-        else: live(args.directory,args.adb,args.serial,args.audio_source)
+        else: live(args.directory,args.adb,args.serial,args.audio_source,args.relay_host,args.avd)
     except (ValueError, OSError, IndexError, KeyError, EOFError, subprocess.SubprocessError, KeyboardInterrupt) as e:
         print('STOP:',str(e) if type(e) is ValueError else 'incomplete; no live pass',file=sys.stderr); sys.exit(1)

@@ -1,0 +1,3 @@
+This is an authorized automated acoustic integration test in a disposable host, not a real user decision. Use the native ask tool once with exactly this form, without extra questions or defaults:
+<form><fieldset><legend>Which drink would you like?</legend><label><input type="radio" name="drink" value="tea">Tea</label><label><input type="radio" name="drink" value="coffee">Coffee</label></fieldset></form>
+The native choice control provides Other for a custom drink. The test driver will answer through the dev phone using actual sound. Do not answer the form yourself. Once the native tool returns, respond only with the selected drink. Do nothing else.

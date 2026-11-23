@@ -1,6 +1,4 @@
-/android/
-/relay/
-/plugin/
 /.superpowers/
 /.codegraph/
 /tools/acceptance/__pycache__/
+/tools/release/__pycache__/
