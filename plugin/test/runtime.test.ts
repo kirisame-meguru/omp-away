@@ -424,6 +424,8 @@ test("recoverable mobile conditions and command guidance warn, while protocol fa
 			expect(notices.map(n=>n.type)).toEqual(["warning","warning","warning","warning","warning"]);
 			report("phone_protocol_error"); report("secure_helper_protocol_error"); report("unexpected-failure");
 			expect(notices.slice(-3).map(n=>n.type)).toEqual(["error","error","error"]);
+			// Transport reports can arrive after native completion; they must not claim a form still exists.
+			expect(notices.every(n=>!n.text.includes("The desktop form stays available"))).toBe(true);
 			await admin!.command("pair");
 			expect(notices.at(-1)?.type).toBe("warning");
 			idle=true;
