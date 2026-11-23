@@ -8,10 +8,11 @@ import { VoiceSession, NoVoiceAudioError } from '../src/media/session';
 import { LiveTransport } from '../src/media/live-sdk.generated.mjs';
 import { logger } from '@oh-my-pi/pi-utils';
 import { parseLiveServerEvent } from '../src/media/protocol';
+import { openCallLog, type CallLog } from '../src/media/call-log';
 
 const speech = new Uint8Array(960).fill(8), silence = new Uint8Array(960);
 const final = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
-function harness(write?: () => void | Promise<void>, caption?: () => void) {
+function harness(write?: () => void | Promise<void>, caption?: () => void, log?:CallLog) {
 	const sent: LiveClientMessage[] = [], starts: string[] = [], transcripts: unknown[][] = [];
 	const audio: Uint8Array[] = [], events: string[] = [], failures: Error[] = [], captions: unknown[][] = [];
 	const session = new VoiceSession({
@@ -20,9 +21,42 @@ function harness(write?: () => void | Promise<void>, caption?: () => void) {
 		onAudio: frame => { audio.push(frame); return write?.() },
 		onInterrupt: () => { events.push('interrupt') },
 		onCaption: (...args) => { captions.push(args); caption?.() },
-	}, async message => { sent.push(message) }, error => { failures.push(error) });
+	}, async message => { sent.push(message) }, error => { failures.push(error) },undefined,log);
 	return {session,sent,starts,transcripts,audio,events,failures,captions};
 }
+test('local transcript retains both speakers and unfinished turns without sending speech to logger sinks',async()=>{
+	const root=await mkdtemp(join(tmpdir(),'away-speech-log-'));
+	const info=vi.spyOn(logger,'info').mockImplementation(()=>{});
+	const log=await openCallLog(root,'request','session');
+	if(!log) throw Error('Transcript setup failed');
+	const h=harness(undefined,undefined,log);
+	try {
+		h.session.input(speech);
+		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'Bl'}})!);
+		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'ue'}})!);
+		await h.session.event(final('user','Blue.'));
+		await h.session.event(final('assistant','Shall I use Blue?'));
+		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'Yes, but'}})!);
+		await h.session.event(parseLiveServerEvent({type:'output_transcript.added',item:{text:'Let me'}})!);
+		h.session.stop();
+		await Promise.all([log.close(),log.close()]);
+		const [file]=await readdir(root);
+		const rows=Bun.JSONL.parse(await Bun.file(join(root,file)).text()) as {kind:string;role?:string;phase?:string;text?:string;bound?:boolean}[];
+		expect(rows.filter(row=>row.kind==='speech').map(({role,phase,text})=>({role,phase,text}))).toEqual([
+			{role:'user',phase:'delta',text:'Bl'},
+			{role:'user',phase:'delta',text:'ue'},
+			{role:'user',phase:'provider-final',text:'Blue.'},
+			{role:'user',phase:'resolved-provider',text:'Blue.'},
+			{role:'assistant',phase:'provider-final',text:'Shall I use Blue?'},
+			{role:'user',phase:'delta',text:'Yes, but'},
+			{role:'assistant',phase:'delta',text:'Let me'},
+		]);
+		expect(rows.find(row=>row.phase==='resolved-provider')?.bound).toBe(true);
+		expect(rows.filter(row=>row.kind==='closed')).toHaveLength(1);
+		for(const text of ['Blue.','Shall I use Blue?','Yes, but','Let me']) expect(JSON.stringify(info.mock.calls)).not.toContain(text);
+		expect(h.failures).toEqual([]);
+	} finally {h.session.stop();await log.close();info.mockRestore();await rm(root,{recursive:true,force:true})}
+});
 function frames(session:VoiceSession, frame:Uint8Array, count:number) {
 	for(let i=0;i<count;i++) session.rtp(frame);
 }

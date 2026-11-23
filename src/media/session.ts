@@ -2,6 +2,7 @@ import narrate from '../../prompts/narrate.md' with { type: 'text' };
 import type { LiveClientMessage, LiveServerEvent } from './protocol';
 import { buildDelegationContextAppend, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import type { VoiceTrace } from './trace';
+import type { CallLog } from './call-log';
 
 export interface VoiceCallbacks {
 	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void;
@@ -59,7 +60,7 @@ export class VoiceSession {
 	#captionText = {user:'',assistant:''};
 	#captionPending = new Set<'user' | 'assistant'>();
 	#captionTimer?: NodeJS.Timeout;
-	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace) {}
+	constructor(private readonly cb: VoiceCallbacks, private readonly send: (m: LiveClientMessage) => Promise<void>, private readonly fail: (e: Error) => void, private readonly trace?: VoiceTrace, private readonly log?: CallLog) {}
 	#deliverCaption(role: 'user' | 'assistant', text: string, final: boolean) {
 		try { this.cb.onCaption?.(role,text,final) }
 		catch { this.trace?.step('caption.delivery_failed') }
@@ -96,7 +97,7 @@ export class VoiceSession {
 			try {
 				this.#resolvedThrough=pending.endMs;
 				this.trace?.step('endpoint.user');
-				this.#finishCaller(pending.text);
+				this.#finishCaller(pending.text,'silence');
 			} catch { this.stop(); this.fail(new Error('Voice endpoint failed')) }
 		},Math.max(0,Math.ceil(ENDPOINT_MS-(performance.now()-Math.max(pending.changedAt,this.#lastVoicedAt)))));
 		this.#endpointTimer.unref();
@@ -114,11 +115,12 @@ export class VoiceSession {
 		this.#pendingInput={text:(previous?.text??'')+text,startMs:previous?.startMs??startMs,endMs,changedAt:performance.now()};
 		this.#armEndpoint();
 	}
-	#finishCaller(text:string) {
+	#finishCaller(text:string,source:'provider'|'silence'='provider') {
 		const onset=this.#ambiguous ? undefined : this.#onset;
 		this.#onset=undefined; this.#ambiguous=false; this.#endpointBlocked=false; this.#clearEndpoint();
 		this.#caption('user',text,true);
 		if (!bounded(text)) {this.cb.onInterrupt();return}
+		this.log?.speech('user',source==='silence'?'resolved-silence':'resolved-provider',text,{bound:!!onset});
 		this.cb.onTranscript('user',text,onset?.id);
 		this.trace?.step(onset ? 'final.user.bound' : 'final.user.unbound');
 	}
@@ -240,12 +242,16 @@ export class VoiceSession {
 				await this.send(buildSessionContextAppend(chunk, 'speakable'));
 			}
 			this.trace?.step(instruction ? 'readback.sent' : 'speakable.sent');
+			this.log?.event(instruction?'readback-appended':'narration-appended');
 		} finally { this.#sending = false }
 	}
 	async event(event: LiveServerEvent) {
 		if (!this.#live) return;
 		try {
 			this.trace?.sideband(event);
+			if(event.type==='input_transcript.added' || event.type==='output_transcript.added')
+				this.log?.speech(event.type==='input_transcript.added'?'user':'assistant','delta',event.item.text,event);
+			else if(event.type==='turn.done') this.log?.speech(event.turn.role,'provider-final',event.turn.transcript,event);
 			switch (event.type) {
 				case 'unknown':
 					if (event.wireType === 'input_audio_buffer.speech_started') this.#speech(true);

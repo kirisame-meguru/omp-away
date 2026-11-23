@@ -1,9 +1,10 @@
-import { basename } from "node:path";
+import * as path from "node:path";
 import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type DecisionCall, type Preferences, type SideContext } from "../decisions";
 import { openVoice, type VoiceCall, type VoiceOptions } from "../media";
 import { NoVoiceAudioError } from "../media/session";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
+import { openCallLog, type CallLog } from "../media/call-log";
 
 export type AskContext = SideContext & VoiceOptions["ctx"] & { cwd:string };
 export interface MobileRuntime {
@@ -17,6 +18,7 @@ type Settings = Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"pytho
 interface Transports { gateway:typeof startSecureDesktop; voice:typeof openVoice }
 interface Joined {
 	device:string; id:string; decision:DecisionCall; voice?:VoiceCall; streaming:boolean;
+	log?:CallLog; operations:number;
 }
 
 // A routing grammar for a single English informational question, not an authorization
@@ -35,6 +37,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 	let gateway:SecureDesktop|undefined, active:Joined|undefined, closed=false;
 	const devices=new Set<string>();
 	const online=new Set<string>();
+	const logs=new Set<CallLog>();
 	const requests=new Map<string,{ctx:AskContext; audience:Set<string>}>();
 	const core=new DecisionCoordinator({
 		preferences:initial, error:report,
@@ -54,8 +57,15 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 	function current(call:Joined) {
 		return !closed && active===call && online.has(call.device) && !call.decision.signal.aborted;
 	}
+	function closeLog(call:Joined) {
+		// Native submission aborts the call before its result promise settles.
+		if (!call.decision.signal.aborted || call.operations || !call.log) return;
+		const log=call.log; call.log=undefined;
+		void log.close().finally(()=>logs.delete(log));
+	}
 	function fail(call:Joined) {
 		if (!current(call)) return;
+		call.log?.event("voice-failed");
 		call.decision.close(); // 'ended' must precede an error, including during the join handshake.
 		control(call.device,{type:"error",code:"voice-unavailable"});
 	}
@@ -63,18 +73,24 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 		const entry=requests.get(id), ctx=entry?.ctx;
 		const decision=!active && entry?.audience.has(device) ? core.join(id) : undefined;
 		if (!ctx || !decision || !gateway) {control(device,{type:"error",code:"request-unavailable"});return}
-		const call:Joined={device,id,decision,streaming:false}; active=call;
+		const call:Joined={device,id,decision,streaming:false,operations:0}; active=call;
 		let onset:string|undefined, revision=0;
 		decision.signal.addEventListener("abort",()=>{
 			if (active!==call) return;
 			active=undefined; call.streaming=false;
+			call.log?.event("ended"); closeLog(call);
 			control(device,{type:"ended",requestId:id});
 			void call.voice?.close().catch(()=>{});
 		},{once:true});
 		try {
 			const brief=await decision.brief();
 			if (!current(call)) return;
-			const voice=await transports.voice({ctx,brief,signal:decision.signal,
+			if(settings.stateDir) {
+				call.log=await openCallLog(path.join(settings.stateDir,"calls"),id,ctx.sessionManager.getSessionId()??"");
+				if(call.log) logs.add(call.log);
+				if(!current(call)) {call.log?.event("ended");closeLog(call);return}
+			}
+			const voice=await transports.voice({ctx,brief,signal:decision.signal,log:call.log,
 				onCaption:captions ? (role,text,final)=>{
 					if (current(call) && call.streaming) control(device,{type:"transcript",requestId:id,role,text,final});
 				} : undefined,
@@ -86,22 +102,33 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				},
 				onTranscript(role,text,utterance) {
 					if (!current(call) || !call.streaming || role!=="user") return;
-					if (!utterance) {++revision; onset=undefined;decision.interrupt();return}
-					if (onset!==utterance) return; // A duplicate final cannot cancel a live consultation.
+					if (!utterance) {call.log?.event("caller-unbound");++revision; onset=undefined;decision.interrupt();return}
+					// A duplicate final cannot cancel a live consultation.
+					if (onset!==utterance) {call.log?.event("caller-stale");return}
 					onset=undefined;
 					if (informationalQuestion(text)) {
 						const turn=revision;
+						++call.operations; call.log?.event("consult-started");
 						// Consultation invalidates confirmation and cannot submit.
 						void decision.consult(text.trim()).then(async answer=>{
+							call.log?.event(current(call) && revision===turn ? "consult-finished" : "consult-interrupted");
 							if (current(call) && revision===turn) await call.voice!.sendSpeakable(answer);
-						}).catch(()=>{if (current(call) && revision===turn) fail(call)});
+						}).catch(()=>{
+							call.log?.event(current(call) && revision===turn ? "consult-failed" : "consult-interrupted");
+							if (current(call) && revision===turn) fail(call);
+						}).finally(()=>{--call.operations;closeLog(call)});
 						return;
 					}
 					const turn=revision;
+					++call.operations; call.log?.event("decision-started");
 					void decision.speechFinished(utterance,text).then(async reply=>{
+						call.log?.event("decision-reply",reply.kind,reply.kind==="say" && !!reply.draft);
 						if (!current(call) || revision!==turn || reply.kind!=="say") return;
 						await call.voice!.sendSpeakable(reply.text,!!reply.draft);
-					}).catch(()=>{if (current(call) && revision===turn) fail(call)});
+					}).catch(()=>{
+						call.log?.event("decision-failed");
+						if (current(call) && revision===turn) fail(call);
+					}).finally(()=>{--call.operations;closeLog(call)});
 				},
 				onInterrupt() {
 					if (!current(call)) return;
@@ -120,6 +147,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			await gateway.sendControl(device,{type:"joined",requestId:id});
 			if (!current(call)) return;
 			call.streaming=true;
+			call.log?.event("joined");
 			await voice.sendSpeakable(decision.opening());
 		} catch {fail(call)}
 	}
@@ -151,7 +179,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 		offer(ask:PendingAsk,ctx:AskContext) {
 			if (closed || !devices.size || requests.has(ask.requestId)) return;
 			requests.set(ask.requestId,{ctx,audience:new Set(devices)});
-			if (!core.offer(ask,ctx,basename(ctx.cwd))) requests.delete(ask.requestId);
+			if (!core.offer(ask,ctx,path.basename(ctx.cwd))) requests.delete(ask.requestId);
 		},
 		end(id:string) {
 			if (!requests.delete(id)) return;
@@ -163,6 +191,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			closed=true; online.clear(); requests.clear();
 			core.close();
 			devices.clear(); await gateway!.close();
+			await Promise.all([...logs].map(log=>log.close())); logs.clear();
 		},
 	};
 }

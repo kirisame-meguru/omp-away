@@ -84,7 +84,7 @@ Speaker output uses the service's ordered `session.output_audio.delta` stream (2
 
 The opening is the native question; no “hello” or model-generated summary is required. PCM streams as it arrives, before the assistant's final transcript, on its 20 ms sample clock with a 100 ms handset lead. Only 100 ms of initial quiet pre-roll is retained. The queue bounds transport backpressure, not whole-response generation. Android initializes its microphone route before playback and changes to **In call** on the first AudioTrack write. Raw microphone energy does not mute the opening; recognized speech can discard queued old audio.
 
-The Android 1.0.4 call screen shows **Speaking** while voiced output is playing and **Listening** after it drains. This is display status, not a microphone mute or submission gate. Caller and assistant captions update from the existing voice stream; provisional text is replaced by the final transcript without rebuilding call controls. Captions remain in memory and are cleared when the call ends. Update the desktop plugin/tunnel before installing this phone version: its `captions: true` join opt-in is rejected by older strict desktop validators. Updated desktops continue to accept older phones without sending captions.
+The Android 1.0.4 call screen shows **Speaking** while voiced output is playing and **Listening** after it drains. This is display status, not a microphone mute or submission gate. Caller and assistant captions update from the existing voice stream; provisional text is replaced by the final transcript without rebuilding call controls. Phone captions remain in memory and are cleared when the call ends; desktop transcript retention is separate and does not require caption opt-in. Update the desktop plugin/tunnel before installing this phone version: its `captions: true` join opt-in is rejected by older strict desktop validators. Updated desktops continue to accept older phones without sending captions.
 
 New desktop narration is appended immediately, even if a previous provider response has not finished. There are no semantic speech/readback checks, assistant-final barriers, quiet-tail waits before appending, or handset-acknowledgment authorization gates. Provider speech is unchecked; only a caller's separate explicit confirmation can submit canonical native values.
 
@@ -94,7 +94,7 @@ The **Away decision timing** debug event records only the operation category, el
 
 Closing a voice session logs an **Away voice summary** containing only elapsed time and stage counts. `voice.ready` means transport readiness, not phone playback. The legacy `rtp.replay.started` label now marks the first paced streaming write; no transcript or approval is required. A hardware presentation acknowledgment is useful test evidence but no longer authorizes submission.
 
-The summary distinguishes recognized partial speech (`partial.user`), provider-completed caller turns (`final.user`), and local silence completions (`endpoint.user`) without retaining speech. **Away native bridge** logs readiness, submission start, and whether the actual native result matched the confirmed values. Neither captions nor spoken claims of submission establish native acceptance.
+The summary distinguishes recognized partial speech (`partial.user`), provider-completed caller turns (`final.user`), and local silence completions (`endpoint.user`) using counts only. Separate local transcript files retain speech as described below. **Away native bridge** logs readiness, submission start, and whether the actual native result matched the confirmed values. Neither captions nor spoken claims of submission establish native acceptance.
 
 Ask a clarification or propose values for every editable field. A proposal is **not** a submission. Check the spoken answers and explicitly confirm in a separate utterance, for example “Yes”. Corrections replace the proposal and require a new affirmative. The desktop keeps authentication, native field validation and exactly-once submission; assistant speech and handset messages cannot submit. Answering on the desktop removes the request and closes its audio. If voice fails, complete the existing native form.
 
@@ -104,9 +104,39 @@ If the provider does not finish a caller turn, Away uses a 1.5-second silence fa
 
 This is an intentional voice-confirmation tradeoff: “Yeah”, followed by a long pause and then “but actually no”, can submit before the qualifier. Speak a correction without that pause. The fallback does not remove the separate proposal/confirmation step, native validation, onset snapshot, or exactly-once submission.
 
+## Retained call transcripts
+
+Paired calls automatically record local JSONL files in `$env:OMP_AWAY_STATE_DIR\calls` (Unix: `$OMP_AWAY_STATE_DIR/calls`). Reload the desktop plugin after updating it; already-loaded code and earlier conversations cannot acquire transcripts retroactively.
+
+The **Away call transcript** log entry points to the current `call-<UTC timestamp>-<UUID>.active.jsonl`. On successful flush it becomes `.jsonl`, with an **Away call transcript closed** pointer. An `.active.jsonl` can also be an interrupted or failed recording; inspect it rather than assuming there was no speech.
+
+Records include local call/request/session IDs, sequence numbers, timestamps, speaker, and:
+
+- `delta`: recognized caller or assistant fragments, retained even without a final event or after hangup.
+- `provider-final`: the provider's completed transcript, including late finals that decision handling may reject.
+- `resolved-provider` / `resolved-silence`: caller text actually passed to decision handling, with onset binding.
+- `event`: consultation and decision outcomes, including whether a validated draft exists, plus narration/readback appends and call ending. An `accepted` decision reply records native acceptance; speech saying “submitted” does not.
+
+Do not concatenate every speech row: finals replace their turn's deltas, and resolved rows distinguish consumed caller text from provider observations. An `ended` event can precede `decision-reply: accepted` because native completion aborts the call before the submission promise settles. Normal call teardown keeps the file open for that outcome. Missing outcomes after process shutdown or a recording failure remain unknown.
+
+Retention runs when calls finish: keep the newest 20 completed calls, remove owned files older than seven days (including abandoned active files), and leave unrelated files alone. Each call is capped at 2 MiB and each speech event at 8192 text code units. `truncated`, `limit`, and `closed.limited` mark incomplete evidence. Disk failures warn without preventing voice or native submission.
+
+Speech goes directly to local files, **not** centralized logger/telemetry sinks. No raw audio, authentication or pairing payloads, complete provider messages, or full coding-session prompts are recorded. Conversations themselves may contain sensitive information: keep files private, review/redact before sharing, and never attach the whole state directory. Set `OMP_AWAY_TRANSCRIPTS=0` before launching the desktop to disable new recordings; this does not delete existing files.
+
+To inspect the newest completed call locally in PowerShell:
+
+```powershell
+$call = Get-ChildItem (Join-Path $env:OMP_AWAY_STATE_DIR 'calls') -Filter 'call-*.jsonl' |
+  Where-Object Name -NotLike '*.active.jsonl' | Sort-Object Name | Select-Object -Last 1
+Get-Content -LiteralPath $call.FullName | ConvertFrom-Json |
+  Format-Table seq, kind, role, phase, text, stage, reply, draft -Wrap
+```
+
 ## Recording evidence
 
 After running the gate, record host version, date, case, observed sanitized values and event counts here; note whether the operator actually saw the dialog dismiss. On a failure report the first mismatch, not an inferred winner. Do not attach full session logs, registry contents, links, tokens, raw frames or unsanitized screenshots. The test root can be discarded after the host exits and safe evidence is captured.
+
+2026-11-23, transcript retention acceptance: an isolated stock 19.1.0 host and OnePlus 5T acoustic call retained 30 speech records, including both speakers, provider-completed Coffee, and a silence-completed Yes with no provider final. The JSONL file recorded `ended`, then `decision-reply: accepted`, then `closed` without truncation. There were two synthetic replies, one native Coffee submission, successful native Ask completion, and no side-model calls or runtime errors. This used the USB bridge, not the paired relay. The separate handset caption assertion failed because it requires literal “yeah” while recognition emitted “Yes”; final handset-caption verification did not pass in this run.
 
 2026-11-23, with the silence fallback: three real acoustic/native Ask calls on the OnePlus 5T with Android 1.0.4 passed. Dock speakers supplied Coffee and Yeah; the Maono microphone measured gaps after handset speech. Each used exactly two replies, no repetition, no extraction-model calls, one accepted canonical Coffee submission, successful native Ask completion, and call closure. Phone instrumentation also checked live captions and Speaking-to-Listening transitions.
 

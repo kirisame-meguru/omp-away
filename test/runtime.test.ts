@@ -1,6 +1,7 @@
 import { expect, test, vi } from "bun:test";
 import { setImmediate as tick } from "node:timers/promises";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -17,13 +18,13 @@ import { parseLiveServerEvent } from "../src/media/protocol";
 
 const pcm = new Uint8Array(960);
 const blueFields='{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}';
-async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice) {
+async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice, stateDir="") {
 	let wire!: SecureDesktopOptions;
 	const voices: VoiceOptions[] = [], spoken: {text:string;instruction:boolean}[] = [], sideCalls:string[]=[];
 	const audioIn: Uint8Array[] = [], audioOut: string[] = [], rings: string[][] = [], submitted: unknown[] = [];
 	const controls: {device:string; message:DesktopControl}[] = [];
 	const consultations: {tools:boolean;promptText:string;signal:AbortSignal}[]=[];
-	const runtime = await connectRuntime({ url:"https://example.invalid", desktopToken:"", stateDir:"", confirmPair:async()=>false }, {away:false,delayMs:null}, () => {}, {
+	const runtime = await connectRuntime({ url:"https://example.invalid", desktopToken:"", stateDir, confirmPair:async()=>false }, {away:false,delayMs:null}, () => {}, {
 		async gateway(options) { wire = options; return {
 			async devices(){return ["phone"]}, async pair(){throw Error("unexpected enrollment")}, async close(){},
 			async ring(dev,id){rings.push([dev,id])},
@@ -144,13 +145,13 @@ test("bound informational speech consults the coding session without a model del
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-async function realVoiceFixture(){
+async function realVoiceFixture(stateDir=""){
 	const sent:LiveClientMessage[]=[], failures:Error[]=[];
 	let session!:VoiceSession;
 	const f=await fixture(undefined,async options=>{
-		session=new VoiceSession(options,async m=>{sent.push(m)},err=>{failures.push(err);options.onEnd(err)});
+		session=new VoiceSession(options,async m=>{sent.push(m)},err=>{failures.push(err);options.onEnd(err)},undefined,options.log);
 		return {sendPcm:pcm=>session.input(pcm),sendSpeakable:(text,instruction)=>session.sendSpeakable(text,instruction),async close(){session.stop()}};
-	});
+	},stateDir);
 	f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
 	return {...f,session,sent,failures};
 }
@@ -164,8 +165,11 @@ test("asking for the options lists the enabled native labels without favoring on
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-test("real voice accepts Yeah and closes the submitted call instead of repeating the question",async()=>{
-	const f=await realVoiceFixture(), speech=new Uint8Array(960).fill(8);
+test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah after abort with a %s transcript destination",async mode=>{
+	const root=await mkdtemp(join(tmpdir(),"away-call-outcome-")), blocked=join(root,"blocked");
+	if(mode==="unwritable") await Bun.write(blocked,"not a directory");
+	const f=await realVoiceFixture(mode==="unwritable"?blocked:root), speech=new Uint8Array(960).fill(8);
+	const failure=mode==="write-failed" ? vi.spyOn(fs.WriteStream.prototype,"write").mockImplementationOnce(function(this:fs.WriteStream){this.destroy(Error("disk write failed"));return false}) : undefined;
 	try {
 		f.session.rtp(speech); await tick(); expect(f.audioOut).toEqual(["phone"]);
 		f.wire.onPcm("phone",speech);
@@ -184,7 +188,19 @@ test("real voice accepts Yeah and closes the submitted call instead of repeating
 		expect(f.controls.filter(c=>c.message.type==="ended")).toEqual([{device:"phone",message:{type:"ended",requestId:"A"}}]);
 		expect(f.controls.at(-1)?.message).toEqual({type:"inbox",items:[]});
 		expect(()=>f.session.input(speech)).toThrow("Invalid voice input");
-	} finally {await f.runtime.close()}
+		await f.runtime.close();
+		const files:string[]=[];
+		for await(const file of new Bun.Glob("calls/*.jsonl").scan(root)) files.push(file);
+		if(mode==="recorded") {
+			expect(files).toHaveLength(1); expect(files[0]).not.toContain(".active.");
+			const rows=Bun.JSONL.parse(await Bun.file(join(root,files[0])).text()) as {kind:string;stage?:string;reply?:string;phase?:string;text?:string}[];
+			const ended=rows.findIndex(row=>row.stage==="ended"), accepted=rows.findIndex(row=>row.reply==="accepted");
+			expect(ended).toBeGreaterThan(-1); expect(accepted).toBeGreaterThan(ended);
+			expect(rows.findIndex(row=>row.kind==="closed")).toBeGreaterThan(accepted);
+			expect(rows.filter(row=>row.phase==="resolved-provider").map(row=>row.text)).toEqual(["Blue.","Yeah..."]);
+		} else if(mode==="unwritable") expect(files).toEqual([]);
+		else {expect(failure).toHaveBeenCalled();expect(files).toHaveLength(1);expect(files[0]).toEndWith(".active.jsonl")}
+	} finally {failure?.mockRestore();await f.runtime.close();await rm(root,{recursive:true,force:true})}
 });
 test("missing provider finals still require a new affirmative and submit the native draft exactly once",async()=>{
 	vi.useFakeTimers(); let now=0;
