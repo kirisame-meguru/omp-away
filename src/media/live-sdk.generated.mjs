@@ -320,8 +320,17 @@ function parseLiveServerEvent2(payload) {
       return null;
     }
   }
-  if (!isRecord2(value) || value.type !== "session.output_audio.delta")
+  if (!isRecord2(value))
     return parseLiveServerEvent(value);
+  if (value.type !== "session.output_audio.delta") {
+    const event = parseLiveServerEvent(value);
+    if (event?.type === "input_transcript.added" || event?.type === "turn.done" && event.turn.role === "user") {
+      const range = event.type === "turn.done" ? value.turn : value;
+      if (isRecord2(range) && typeof range.start_ms === "number" && typeof range.end_ms === "number" && Number.isFinite(range.start_ms) && Number.isFinite(range.end_ms) && range.start_ms >= 0 && range.end_ms >= range.start_ms)
+        return { ...event, startMs: range.start_ms, endMs: range.end_ms };
+    }
+    return event;
+  }
   const { delta, start_ms: start, end_ms: end } = value;
   if (typeof delta !== "string" || typeof start !== "number" || typeof end !== "number" || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0) {
     return { type: "error", message: "Invalid ordered voice audio" };

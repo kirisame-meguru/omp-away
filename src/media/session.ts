@@ -1,5 +1,5 @@
 import narrate from '../../prompts/narrate.md' with { type: 'text' };
-import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-agent/live/protocol';
+import type { LiveClientMessage, LiveServerEvent } from './protocol';
 import { buildDelegationContextAppend, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import type { VoiceTrace } from './trace';
 
@@ -18,9 +18,12 @@ interface Output {
 	quietFrames: number;
 }
 interface Onset { id: string; providerSeen: boolean }
+interface PendingInput {text:string; startMs:number; endMs:number; changedAt:number}
 const FRAME_MS = 20, QUIET_FRAMES = 30, PLAYOUT_LEAD_MS = 100;
 // Bound transport backpressure, not the length of a spoken response.
 const QUEUED_FRAMES = 250, FIRST_VOICE_MS = 10_000;
+// Endpoint only stable recognition plus live caller silence, never output quiet or a stalled microphone.
+const ENDPOINT_MS = 1500, ENDPOINT_FRAMES = ENDPOINT_MS / FRAME_MS, INPUT_FRESH_MS = 250;
 export class NoVoiceAudioError extends Error {
 	constructor() { super('No voice audio received from the voice service') }
 }
@@ -43,6 +46,12 @@ export class VoiceSession {
 	#ambiguous = false;
 	#inputHot = false;
 	#quietInput = 0;
+	#lastInputAt = -Infinity;
+	#lastVoicedAt = -Infinity;
+	#pendingInput?: PendingInput;
+	#endpointTimer?: NodeJS.Timeout;
+	#endpointBlocked = false;
+	#resolvedThrough = -1;
 	#revision = 0;
 	#writing = false;
 	#sending = false;
@@ -73,6 +82,46 @@ export class VoiceSession {
 			this.#captionPending.clear();
 		},100);
 	}
+	#clearEndpoint() {
+		clearTimeout(this.#endpointTimer); this.#endpointTimer = undefined; this.#pendingInput = undefined;
+	}
+	#armEndpoint() {
+		const pending=this.#pendingInput;
+		if (!pending || this.#endpointTimer || !this.#live) return;
+		this.#endpointTimer=setTimeout(()=>{
+			this.#endpointTimer=undefined;
+			if (!this.#live || this.#ambiguous || this.#pendingInput!==pending ||
+				this.#quietInput<ENDPOINT_FRAMES || performance.now()-this.#lastInputAt>INPUT_FRESH_MS) return;
+			if (performance.now()-Math.max(pending.changedAt,this.#lastVoicedAt)<ENDPOINT_MS) {this.#armEndpoint();return}
+			try {
+				this.#resolvedThrough=pending.endMs;
+				this.trace?.step('endpoint.user');
+				this.#finishCaller(pending.text);
+			} catch { this.stop(); this.fail(new Error('Voice endpoint failed')) }
+		},Math.max(0,Math.ceil(ENDPOINT_MS-(performance.now()-Math.max(pending.changedAt,this.#lastVoicedAt)))));
+		this.#endpointTimer.unref();
+	}
+	#recognition(text:string,startMs:number|undefined,endMs:number|undefined) {
+		if (this.#endpointBlocked || this.#ambiguous) return;
+		const previous=this.#pendingInput;
+		if (startMs===undefined || endMs===undefined || startMs<this.#resolvedThrough ||
+			!text || text.includes('\0') || text.length+(previous?.text.length??0)>8192 ||
+			(previous && endMs<previous.endMs)) {
+			// Never authorize a retained affirmative prefix when its continuation is unusable.
+			this.#endpointBlocked=true; this.#clearEndpoint(); return;
+		}
+		clearTimeout(this.#endpointTimer); this.#endpointTimer=undefined;
+		this.#pendingInput={text:(previous?.text??'')+text,startMs:previous?.startMs??startMs,endMs,changedAt:performance.now()};
+		this.#armEndpoint();
+	}
+	#finishCaller(text:string) {
+		const onset=this.#ambiguous ? undefined : this.#onset;
+		this.#onset=undefined; this.#ambiguous=false; this.#endpointBlocked=false; this.#clearEndpoint();
+		this.#caption('user',text,true);
+		if (!bounded(text)) {this.cb.onInterrupt();return}
+		this.cb.onTranscript('user',text,onset?.id);
+		this.trace?.step(onset ? 'final.user.bound' : 'final.user.unbound');
+	}
 
 	#clearAudio() {
 		clearTimeout(this.#wake); this.#wake = undefined;
@@ -83,6 +132,7 @@ export class VoiceSession {
 	}
 	stop() {
 		this.#live = false; ++this.#revision;
+		this.#clearEndpoint();
 		clearTimeout(this.#captionTimer); this.#captionTimer = undefined;
 		this.#captionPending.clear(); this.#captionText.user = this.#captionText.assistant = '';
 		this.#onset = undefined; this.#seen.clear(); this.#clearAudio(); this.#clearAudioDeadline();
@@ -96,7 +146,7 @@ export class VoiceSession {
 			// Pauses in a caller's sentence are not separate decisions.
 			if (!provider) return;
 			if (!this.#onset.providerSeen) { this.#onset.providerSeen = true; return }
-			this.#ambiguous = true; this.#onset = undefined; ++this.#revision;
+			this.#ambiguous = true; this.#onset = undefined; ++this.#revision; this.#clearEndpoint();
 			this.cb.onInterrupt(); return;
 		}
 		++this.#revision;
@@ -107,10 +157,16 @@ export class VoiceSession {
 	}
 	input(pcm: Uint8Array) {
 		if (!this.#live || pcm.length !== 960) throw new Error('Invalid voice input');
+		this.#lastInputAt=performance.now();
 		if (energy(pcm) >= 800 ** 2) {
+			this.#lastVoicedAt=this.#lastInputAt;
 			this.#quietInput = 0;
 			if (!this.#inputHot) { this.#inputHot = true; this.#speech(false) }
-		} else if (this.#inputHot && ++this.#quietInput >= 20) this.#inputHot = false;
+		} else {
+			++this.#quietInput;
+			if (this.#inputHot && this.#quietInput>=20) this.#inputHot=false;
+			if (this.#quietInput>=ENDPOINT_FRAMES) this.#armEndpoint();
+		}
 	}
 	#pump(output: Output) {
 		if (!this.#live || this.#output !== output || this.#writing || !output.voiced) return;
@@ -208,8 +264,10 @@ export class VoiceSession {
 				}
 				case 'error': throw new Error('Codex voice connection failed');
 				case 'input_transcript.added':
+					if (event.endMs!==undefined && event.endMs<=this.#resolvedThrough) return;
 					this.#caption('user',event.item.text,false);
 					if (!this.#onset?.providerSeen && !this.#ambiguous) this.#speech(true);
+					this.#recognition(event.item.text,event.startMs,event.endMs);
 					return;
 				case 'output_transcript.added':
 					this.#caption('assistant',event.item.text,false);
@@ -225,16 +283,21 @@ export class VoiceSession {
 				default: return;
 			}
 			const { role, transcript } = event.turn;
-			this.#caption(role,transcript,true);
 			if (role === 'assistant') {
+				this.#caption(role,transcript,true);
 				if (bounded(transcript)) this.cb.onTranscript(role, transcript);
 				return;
 			}
-			const onset = this.#ambiguous ? undefined : this.#onset;
-			this.#onset = undefined; this.#ambiguous = false;
-			if (!bounded(transcript)) { this.cb.onInterrupt(); return }
-			this.cb.onTranscript(role, transcript, onset?.id);
-			this.trace?.step(onset ? 'final.user.bound' : 'final.user.unbound');
+			const {startMs,endMs}=event, pending=this.#pendingInput;
+			if (startMs!==undefined && endMs!==undefined) {
+				// A late provider turn may include Coffee and a newer Yeah. It cannot
+				// reinterpret consumed speech or steal the newer onset/draft snapshot.
+				if (startMs<this.#resolvedThrough || endMs<=this.#resolvedThrough ||
+					(pending && endMs<pending.endMs)) return;
+				if (pending && startMs>pending.startMs) this.#ambiguous=true;
+				this.#resolvedThrough=endMs;
+			} else if (this.#resolvedThrough>=0) throw new Error('Unscoped caller completion after resolved speech');
+			this.#finishCaller(transcript);
 		} catch { if (this.#live) { this.stop(); this.fail(new Error('Voice event failed')) } }
 	}
 }

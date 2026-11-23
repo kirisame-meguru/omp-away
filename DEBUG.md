@@ -94,21 +94,37 @@ The **Away decision timing** debug event records only the operation category, el
 
 Closing a voice session logs an **Away voice summary** containing only elapsed time and stage counts. `voice.ready` means transport readiness, not phone playback. The legacy `rtp.replay.started` label now marks the first paced streaming write; no transcript or approval is required. A hardware presentation acknowledgment is useful test evidence but no longer authorizes submission.
 
-The summary distinguishes recognized partial speech (`partial.user`) from completed caller turns (`final.user`) without retaining speech. **Away native bridge** logs readiness, submission start, and whether the actual native result matched the confirmed values. Neither captions nor spoken claims of submission establish native acceptance.
+The summary distinguishes recognized partial speech (`partial.user`), provider-completed caller turns (`final.user`), and local silence completions (`endpoint.user`) without retaining speech. **Away native bridge** logs readiness, submission start, and whether the actual native result matched the confirmed values. Neither captions nor spoken claims of submission establish native acceptance.
 
 Ask a clarification or propose values for every editable field. A proposal is **not** a submission. Check the spoken answers and explicitly confirm in a separate utterance, for example “Yes”. Corrections replace the proposal and require a new affirmative. The desktop keeps authentication, native field validation and exactly-once submission; assistant speech and handset messages cannot submit. Answering on the desktop removes the request and closes its audio. If voice fails, complete the existing native form.
 
 A yes that started before any proposal existed cannot approve a draft arriving later. Once the proposal exists, there is no verification or playback-acknowledgment wait. Legacy handset `played` messages are ignored.
 
+If the provider does not finish a caller turn, Away uses a 1.5-second silence fallback: recognized text must remain unchanged, the microphone must deliver at least 75 quiet 20 ms frames, and both the last voiced frame and last text update must be at least 1.5 seconds old. A stalled microphone is not silence. A provider final arriving first still wins. Provider audio timestamps prevent late finals from consuming already handled speech or applying an old affirmative to a newer proposal. Malformed or unscoped continuation data disables the fallback rather than retaining an affirmative prefix.
+
+This is an intentional voice-confirmation tradeoff: “Yeah”, followed by a long pause and then “but actually no”, can submit before the qualifier. Speak a correction without that pause. The fallback does not remove the separate proposal/confirmation step, native validation, onset snapshot, or exactly-once submission.
+
 ## Recording evidence
 
 After running the gate, record host version, date, case, observed sanitized values and event counts here; note whether the operator actually saw the dialog dismiss. On a failure report the first mismatch, not an inferred winner. Do not attach full session logs, registry contents, links, tokens, raw frames or unsanitized screenshots. The test root can be discarded after the host exits and safe evidence is captured.
+
+2026-11-23, with the silence fallback: three real acoustic/native Ask calls on the OnePlus 5T with Android 1.0.4 passed. Dock speakers supplied Coffee and Yeah; the Maono microphone measured gaps after handset speech. Each used exactly two replies, no repetition, no extraction-model calls, one accepted canonical Coffee submission, successful native Ask completion, and call closure. Phone instrumentation also checked live captions and Speaking-to-Listening transitions.
+
+| Scenario | Coffee reply gap | Yeah reply gap | Local silence completions |
+| --- | ---: | ---: | ---: |
+| Normal half-second replies | 519 ms | 521 ms | 1 |
+| Final-event loss injected at the desktop boundary | 503 ms | 519 ms | 2 |
+| Normal one-second replies | 1019 ms | 1010 ms | 0 |
+
+The first run observed a late provider final after local completion without losing the pending decision. In the loss-injection run, every caller-final event reaching the probe was deliberately withheld; recognition and microphone input remained real. These tests used a disposable stock host and USB media bridge, not the public paired relay. The active production desktop was not restarted.
+
+### Earlier measurements
 
 2026-11-23 streaming probe: the physical phone completed both opening and readback, with audio delivered before either assistant-final event. Opening to first PCM write was 4.567 s (3.190 s of voice setup); injected final answer to first readback PCM was 1.354 s. There were zero decision-model calls, zero authorization marks and zero submissions. Both hardware drains completed. This isolated stock-host test injects a final transcript and excludes recognition, production context and the paired relay path.
 
 2026-11-23 acoustic/native acceptance on the OnePlus 5T dev phone: PC dock speakers spoke Coffee and Yeah, and the Maono microphone measured the end of handset speech. One run with 517/511 ms reply gaps and one with 1029/1007 ms gaps submitted Coffee through the real stock native Ask exactly once, observed its successful tool completion, and ended the call without repetition or extraction-model calls. The second run used Android 1.0.4 and verified live captions on the shared production call-screen renderer plus Speaking-to-Listening transitions. These used the isolated USB media bridge, not the public paired relay.
 
-A separate 510 ms reply run failed: Coffee appeared in live recognition/captions, but the provider never emitted a final caller turn. No submission occurred. A brief neutral acknowledgement in the voice prompt does not reliably resolve this provider completion stall; the passing runs must not be presented as reliable fast-reply acceptance.
+A separate 510 ms reply run before the silence fallback failed: Coffee appeared in live recognition/captions, but the provider never emitted a final caller turn. No submission occurred. A brief neutral acknowledgement alone did not reliably resolve this provider completion stall.
 
 The measurements below predate streaming and record the removed verification-gated implementation, not current performance.
 

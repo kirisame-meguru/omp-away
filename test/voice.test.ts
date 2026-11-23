@@ -7,6 +7,7 @@ import type { LiveClientMessage, LiveServerEvent } from '@oh-my-pi/pi-coding-age
 import { VoiceSession, NoVoiceAudioError } from '../src/media/session';
 import { LiveTransport } from '../src/media/live-sdk.generated.mjs';
 import { logger } from '@oh-my-pi/pi-utils';
+import { parseLiveServerEvent } from '../src/media/protocol';
 
 const speech = new Uint8Array(960).fill(8), silence = new Uint8Array(960);
 const final = (role: 'user' | 'assistant', transcript: string): LiveServerEvent => ({ type: 'turn.done', turn: { role, transcript } });
@@ -25,6 +26,94 @@ function harness(write?: () => void | Promise<void>, caption?: () => void) {
 function frames(session:VoiceSession, frame:Uint8Array, count:number) {
 	for(let i=0;i<count;i++) session.rtp(frame);
 }
+function endpointHarness() {
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	return {...h,
+		async partial(text:string,start:number,end:number) {
+			await h.session.event(parseLiveServerEvent({type:'input_transcript.added',start_ms:start,end_ms:end,item:{text}})!);
+		},
+		async complete(text:string,start:number,end:number) {
+			await h.session.event(parseLiveServerEvent({type:'turn.done',turn:{role:'user',transcript:text,start_ms:start,end_ms:end}})!);
+		},
+		advance(count:number,pcm=silence) {
+			for(let i=0;i<count;i++){now+=20;h.session.input(pcm);vi.advanceTimersByTime(20)}
+		},
+		elapse(ms:number) {now+=ms;vi.advanceTimersByTime(ms)},
+		close() {h.session.stop();clock.mockRestore();vi.useRealTimers()},
+	};
+}
+test('silence endpoint completes missing finals and late overlapping finals cannot consume the next answer',async()=>{
+	const h=endpointHarness();
+	try {
+		h.session.input(speech); await h.partial('Coffee',100,200);
+		h.advance(74); expect(h.transcripts).toEqual([]);
+		h.advance(1); expect(h.transcripts).toEqual([['user','Coffee',h.starts[0]]]);
+		expect(h.captions.at(-1)).toEqual(['user','Coffee',true]);
+		h.session.input(speech); await h.partial('Yeah',300,400);
+		await h.complete('Coffee',90,210);
+		// One provider turn can span two locally ended utterances.
+		await h.complete('Coffee Yeah',90,410);
+		expect(h.transcripts).toHaveLength(1);
+		h.advance(75);
+		await h.partial('Yeah',300,400); expect(h.transcripts).toHaveLength(2);
+		expect(h.transcripts).toEqual([['user','Coffee',h.starts[0]],['user','Yeah',h.starts[1]]]);
+		await h.complete('Yeah',300,400); expect(h.transcripts).toHaveLength(2);
+		expect(h.failures).toEqual([]);
+	} finally {h.close()}
+});
+test('silence endpoint waits for continuing speech and includes a later negative qualifier',async()=>{
+	const h=endpointHarness();
+	try {
+		h.session.input(speech); await h.partial('Yeah',100,200);
+		h.advance(100,speech); expect(h.transcripts).toEqual([]);
+		h.advance(50); h.session.input(speech); await h.partial(', but not yet.',300,500);
+		h.advance(74); expect(h.transcripts).toEqual([]);
+		h.advance(1); expect(h.transcripts).toEqual([['user','Yeah, but not yet.',h.starts[0]]]);
+	} finally {h.close()}
+});
+test('silence endpoint needs live quiet microphone frames and is cancelled by hangup',async()=>{
+	const h=endpointHarness();
+	try {
+		h.session.input(speech); await h.partial('Yeah',100,200);
+		h.elapse(5000); expect(h.transcripts).toEqual([]);
+		h.advance(74); expect(h.transcripts).toEqual([]);
+		h.session.stop(); h.elapse(5000); expect(h.transcripts).toEqual([]);
+	} finally {h.close()}
+});
+test('provider final correction wins immediately and cancels the pending silence endpoint',async()=>{
+	const h=endpointHarness();
+	try {
+		h.session.input(speech); await h.partial('Yeah',120,190);
+		await h.complete('No',100,200); h.advance(75);
+		expect(h.transcripts).toEqual([['user','No',h.starts[0]]]);
+	} finally {h.close()}
+});
+test('an unscoped final after locally resolved speech fails closed instead of confirming a newer draft',async()=>{
+	const h=endpointHarness();
+	try {
+		h.session.input(speech); await h.partial('Coffee',100,200); h.advance(75);
+		h.session.input(speech); await h.partial('Yeah',300,400);
+		await h.session.event(final('user','No'));
+		h.elapse(5000);
+		expect(h.failures).toHaveLength(1);
+		expect(h.transcripts).toEqual([['user','Coffee',h.starts[0]]]);
+	} finally {h.close()}
+});
+test('unscoped, malformed or oversize recognition cannot leave an affirmative prefix armed',async()=>{
+	for(const next of [
+		{type:'input_transcript.added',item:{text:', but wait'}},
+		{type:'input_transcript.added',start_ms:300,end_ms:200,item:{text:', but wait'}},
+		{type:'input_transcript.added',start_ms:200,end_ms:300,item:{text:'x'.repeat(8193)}},
+	]) {
+		const h=endpointHarness();
+		try {
+			h.session.input(speech); await h.partial('Yeah',100,200);
+			await h.session.event(parseLiveServerEvent(next)!); h.advance(100);
+			expect(h.transcripts).toEqual([]);
+		} finally {h.close()}
+	}
+});
 test('live captions coalesce deltas, replace provisional text with the final turn, and stop at hangup',async()=>{
 	vi.useFakeTimers(); const h=harness();
 	try {

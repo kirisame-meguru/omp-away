@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, vi } from "bun:test";
 import { setImmediate as tick } from "node:timers/promises";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import type { openVoice, VoiceOptions } from "../src/media";
 import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
 import { awaySuggestions } from "../src/runtime/commands";
+import { parseLiveServerEvent } from "../src/media/protocol";
 
 const pcm = new Uint8Array(960);
 const blueFields='{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}';
@@ -184,6 +185,32 @@ test("real voice accepts Yeah and closes the submitted call instead of repeating
 		expect(f.controls.at(-1)?.message).toEqual({type:"inbox",items:[]});
 		expect(()=>f.session.input(speech)).toThrow("Invalid voice input");
 	} finally {await f.runtime.close()}
+});
+test("missing provider finals still require a new affirmative and submit the native draft exactly once",async()=>{
+	vi.useFakeTimers(); let now=0;
+	const clock=vi.spyOn(performance,"now").mockImplementation(()=>now), f=await realVoiceFixture();
+	const speech=new Uint8Array(960).fill(8);
+	const quiet=(count:number)=>{for(let i=0;i<count;i++){now+=20;f.wire.onPcm("phone",pcm);vi.advanceTimersByTime(20)}};
+	const say=async(text:string,start:number)=>{
+		f.wire.onPcm("phone",speech);
+		await f.session.event(parseLiveServerEvent({type:"input_transcript.added",item:{text},start_ms:start,end_ms:start+100})!);
+	};
+	try {
+		await say("Yeah",100); quiet(75); await tick();
+		expect(f.submitted).toEqual([]);
+		await say("Blue",300); quiet(75); await tick();
+		expect(f.submitted).toEqual([]);
+		await say("Yeah",500);
+		await f.session.event(parseLiveServerEvent({type:"turn.done",turn:{role:"user",transcript:"Yeah",start_ms:100,end_ms:200}})!);
+		await tick(); expect(f.submitted).toEqual([]);
+		quiet(74); expect(f.submitted).toEqual([]);
+		quiet(1); await tick();
+		expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
+		expect(f.failures).toEqual([]); expect(f.sideCalls).toEqual([]);
+		expect(f.controls.filter(c=>c.message.type==="ended")).toEqual([{device:"phone",message:{type:"ended",requestId:"A"}}]);
+		await f.session.event(parseLiveServerEvent({type:"turn.done",turn:{role:"user",transcript:"Yeah",start_ms:500,end_ms:600}})!);
+		expect(f.submitted).toHaveLength(1);
+	} finally {await f.runtime.close();clock.mockRestore();vi.useRealTimers()}
 });
 test("real VoiceSession preserves the local mic onset across an invalid delegation and consults only for the caller",async()=>{
 	const f=await realVoiceFixture(), {session,sent,failures}=f;
