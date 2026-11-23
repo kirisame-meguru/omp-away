@@ -2,7 +2,7 @@ import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-tui/htm
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { type FormValues, planAnswers, tagForm, type PreparedForm } from "../collab/form";
 
-export interface DecisionForm { native: PreparedForm; questions:Map<string,string>; description: string; question: string }
+export interface DecisionForm { native: PreparedForm; questions:Map<string,string>; description: string; question: string; opening: string }
 export type SpokenDraft=ReadonlyArray<{readonly field:string; readonly answer:string | readonly string[] | null}>;
 export interface Draft { values: FormValues; fields: SpokenDraft; voiceData: string }
 const budget = (text: string, bytes: number) => Buffer.byteLength(text) <= bytes;
@@ -23,7 +23,13 @@ export function prepare(html: string): DecisionForm | undefined {
 	const names=new Map<string,number>();
 	for(const f of fields) {const k=audible(f.question || f.name); names.set(k,(names.get(k)??0)+1);}
 	for(const f of fields) if((names.get(audible(f.question || f.name)) ?? 0)>1) questions.set(f.name,`${f.question || f.name} (${f.name})`);
-	return {native,questions,description,question:fields.map(f=>f.question || f.name).join("; ").slice(0,256)};
+	const opening=native.fields.map(item=>{
+		const question=questions.get(item.field.name) ?? item.field.name;
+		return item.kind==="choice" ? `${question}\n${item.rows.join("; ")}` : question;
+	}).join("\n");
+	// Do not offer a voice call that would have to silently omit some choices.
+	if (!budget(opening,8192)) return;
+	return {native,questions,description,opening,question:fields.map(f=>f.question || f.name).join("; ").slice(0,256)};
 }
 const record = (x:unknown): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const key = (s:string) => s.toLowerCase().normalize("NFC").replace(/\s+/g," ").trim();

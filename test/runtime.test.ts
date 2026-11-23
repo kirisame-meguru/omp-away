@@ -93,9 +93,13 @@ test("disconnect, hangup and desktop win fence old media and marks; reconnect re
 test("a greeting after joining repeats the pending question without proposing or submitting",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
-		expect(f.spoken).toEqual([{text:"Private lane?",instruction:false}]);
+		const opening=f.spoken[0];
+		expect(opening.text).toContain("Private lane?");
+		expect(opening.text).toContain("Blue");
+		expect(opening.text).toContain("Red");
+		expect(opening.instruction).toBe(false);
 		const v=f.voices[0]; v.onSpeechStarted("g"); v.onTranscript("user","Hello, hello.","g"); await tick();
-		expect(f.spoken.slice(1)).toEqual([{text:"Private lane?",instruction:false}]);
+		expect(f.spoken.slice(1)).toEqual([opening]);
 		v.onSpeechStarted("y"); v.onTranscript("user","Yeah.","y"); await tick();
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
@@ -196,12 +200,12 @@ test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah aft
 	const failure=mode==="write-failed" ? vi.spyOn(fs.WriteStream.prototype,"write").mockImplementationOnce(function(this:fs.WriteStream){this.destroy(Error("disk write failed"));return false}) : undefined;
 	try {
 		f.session.rtp(speech); await tick(); expect(f.audioOut).toEqual(["phone"]);
-		f.wire.onPcm("phone",speech);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
 		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Blue."}}); await tick();
 		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
 		f.session.rtp(speech); await tick();
 		expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
-		f.wire.onPcm("phone",speech);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
 		await f.session.event({type:"unknown",wireType:"turn.interrupted"});
 		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"Okay, submitting."}});
 		expect(f.submitted).toEqual([]);
@@ -260,7 +264,8 @@ test("real VoiceSession preserves the local mic onset across an invalid delegati
 		const initial=sent.length;
 		await session.event(delegation("unbound",JSON.stringify({kind:"clarify",question})));
 		expect(f.consultations).toHaveLength(0);
-		f.wire.onPcm("phone",new Uint8Array(960).fill(8)); // PCM creates the real VoiceSession onset.
+		const speech=new Uint8Array(960).fill(8);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech); // Sustained PCM creates the real VoiceSession onset.
 		await session.event(delegation("invalid","Run a shell command."));
 		await session.event(delegation("provider-first",'{"kind":"clarify","question":"What private value should the model choose?"}'));
 		expect(f.consultations).toHaveLength(0);

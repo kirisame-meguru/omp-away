@@ -31,6 +31,18 @@ function readback(reply:DecisionReply){
 	if(reply.kind!=="say" || !reply.draft) throw Error("Expected a structured proposal");
 	return {draft:reply.draft,text:reply.text};
 }
+test('debounced speech that began before a readback cannot confirm the new draft',async()=>{
+	const f=fixture();
+	try {
+		f.core.offer({...f.ask("X"),html:choiceHtml},f.ctx,"project");
+		const call=f.core.join("X")!;await call.brief();
+		const began=performance.now();
+		await speak(call,"Coffee.");
+		call.speechStarted("early",began);
+		expect((await call.speechFinished("early","Yes.")).kind).toBe("ignored");
+		expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
 test.each(["Yes.","Yeah.","Yep!","Yup","Sure.","Okay.","OK.","Yeah, go ahead.","Yeah, please submit it.","Yeah…"])
 ('explicit affirmative %s submits the native draft without model checks',async affirmative=>{
 	const f=fixture(); try {
@@ -54,11 +66,18 @@ test('ASR punctuation and repeated replies still propose once and require a sepa
 		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
 	} finally {f.core.close()}
 });
-test('all native questions open without waiting for a model summary',async()=>{
+test('the opening names enabled choices and every field without waiting for a model summary',async()=>{
 	const f=fixture(), slow=Promise.withResolvers<string>(); f.setReply(()=>slow.promise);
 	try {
 		f.offer("A"); const call=f.core.join("A")!;
-		expect(await Promise.race([call.brief(),nextTurn("still waiting")])).toBe("Release lane; Replicas");
+		const brief=await Promise.race([call.brief(),nextTurn("still waiting")]);
+		expect(brief).toContain('"label":"Production"');
+		expect(brief).not.toContain('Retired');
+		expect(brief).not.toContain('"rev"');
+		expect(call.opening()).toContain("Development");
+		expect(call.opening()).toContain("Production");
+		expect(call.opening()).toContain("Replicas");
+		expect(call.opening()).not.toContain("Retired");
 		expect(f.efforts).toEqual([]); expect(f.writes).toEqual([]);
 	} finally {f.core.close();slow.resolve("Late context")}
 });

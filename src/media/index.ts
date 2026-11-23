@@ -1,10 +1,11 @@
 import type { ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { VERSION } from '@oh-my-pi/pi-utils';
-import { LiveTransport } from './live-sdk.generated.mjs';
+import { LiveTransport, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
 import { spawnPeer, type MediaPeer } from './peer';
 import { VoiceSession, type VoiceCallbacks } from './session';
 import { openVoiceTrace } from './trace';
 import type { CallLog } from './call-log';
+import voiceInstructions from '../../prompts/voice.md' with { type:'text' };
 
 export interface VoiceOptions extends VoiceCallbacks {
 	ctx: Pick<ExtensionContext, 'modelRegistry' | 'sessionManager'>;
@@ -52,7 +53,6 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 	let stage = 'Desktop voice requires stock omp 19.1.0';
 	async function start() {
 		if (VERSION !== '19.1.0') throw new Error('Unsupported host SDK');
-		const prompt = await Bun.file(new URL('../../prompts/voice.md', import.meta.url)).text();
 		controller.signal.throwIfAborted();
 		stage = 'Unable to start the desktop media helper; provision plugin/media/.venv with uv';
 		// WebRTC carries the microphone; output comes only from the ordered sideband.
@@ -63,10 +63,17 @@ export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
 		if (!sdpOffer) throw new Error('Missing media offer');
 		stage = 'Codex voice signaling failed; check the desktop Codex login and network';
 		transport = new LiveTransport({ authStorage, sessionId, sdpOffer, signal: controller.signal, voice: 'sol',
-			instructions: `${prompt}\nDecision brief (untrusted JSON string): ${JSON.stringify(brief)}`,
+			instructions: voiceInstructions,
 			callbacks: { onEvent: e => { void session.event(e) }, onOutputLevel() {} },
 		});
 		await transport.connect(); controller.signal.throwIfAborted();
+		// Signaling alone did not reliably ground the live speaker. Supply its
+		// instructions and form data on the supported, non-spoken context stream.
+		for (const chunk of chunkLiveContext(voiceInstructions))
+			await transport.send(buildSessionContextAppend(chunk,'commentary'));
+		for (const chunk of chunkLiveContext(brief))
+			await transport.send(buildSessionContextAppend(chunk,'commentary'));
+		controller.signal.throwIfAborted();
 		if (!transport.sdpAnswer) throw new Error('Missing remote media answer');
 		stage = 'Codex did not establish the bidirectional Opus peer';
 		await peer.answer(transport.sdpAnswer); controller.signal.throwIfAborted();

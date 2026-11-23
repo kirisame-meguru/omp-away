@@ -9,7 +9,7 @@ export interface DecisionCall {
 	brief():Promise<string>;
 	opening():string;
 	consult(question:string):Promise<string>;
-	speechStarted(utteranceId:string):void;
+	speechStarted(utteranceId:string, startedAt?:number):void;
 	speechFinished(utteranceId:string, transcript:string):Promise<DecisionReply>;
 	interrupt():void;
 	close():void;
@@ -29,6 +29,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 	const life=new AbortController();
 	const used=new Set<string>();
 	let currentBrief="", submitting=false, proposal:Draft|undefined, confirmable:Draft|undefined;
+	let confirmableAt=0;
 	let speaking:{id:string;draft?:Draft}|undefined;
 	let work:AbortController|undefined;
 	function invalidate() {
@@ -45,7 +46,7 @@ export function createCall(opt:CallOptions):DecisionCall {
 		used.add(id); return true;
 	}
 	function read(draft:Draft):DecisionReply {
-		confirmable=draft;
+		confirmable=draft;confirmableAt=performance.now();
 		return {kind:"say",text:`${readbackInstruction.trim()}\n${draft.voiceData}`,draft:draft.fields};
 	}
 	async function submit(draft:Draft):Promise<DecisionReply> {
@@ -78,19 +79,15 @@ export function createCall(opt:CallOptions):DecisionCall {
 		async brief() {
 			if(life.signal.aborted) throw Error("call-ended");
 			const brief=opt.form.question;
-			const [first]=opt.form.native.fields;
-			const title=first && opt.form.questions.get(first.field.name);
-			// The session rationale belongs in voice context. Lead with the native
-			// question instead of making the caller wait through a monologue.
-			currentBrief=opt.form.native.fields.length===1 && title ? title : brief;
-			return brief;
+			currentBrief=opt.form.opening;
+			return opt.form.description.length<=8192 ? opt.form.description : brief;
 		},
 		opening:()=>currentBrief,
 		consult,
 		interrupt:invalidate,
-		speechStarted(id) {
+		speechStarted(id,startedAt=performance.now()) {
 			if(life.signal.aborted || submitting) return;
-			const previous=speaking, draft=confirmable;
+			const previous=speaking, draft=confirmableAt<=startedAt ? confirmable : undefined;
 			invalidate();
 			if(!takeId(id) || previous || !currentBrief) return;
 			speaking={id,draft};

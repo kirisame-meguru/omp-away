@@ -94,11 +94,11 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 				onCaption:captions ? (role,text,final)=>{
 					if (current(call) && call.streaming) control(device,{type:"transcript",requestId:id,role,text,final});
 				} : undefined,
-				onSpeechStarted(utterance) {
+				onSpeechStarted(utterance,startedAt) {
 					if (!current(call) || !call.streaming) return;
 					++revision; onset=utterance;
 					// Snapshot the draft at the caller's onset, not at a later ASR final.
-					decision.speechStarted(utterance);
+					decision.speechStarted(utterance,startedAt);
 				},
 				onTranscript(role,text,utterance) {
 					if (!current(call) || !call.streaming || role!=="user") return;

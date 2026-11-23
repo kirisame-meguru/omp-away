@@ -1,0 +1,8 @@
+[
+  {"name":"direct","expected":{"drink":"coffee"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Yes.","after":"readback"}]},
+  {"name":"options","expected":{"drink":"tea"},"steps":[{"say":"What are my options?","after":"opening"},{"say":"Tea.","after":"answer"},{"say":"Yes.","after":"readback"}]},
+  {"name":"alternatives","expected":{"drink":"lemonade"},"steps":[{"say":"Ask the main model to come up with two other drinks.","after":"opening"},{"say":"Let's try lemonade.","after":"answer"},{"say":"Yes.","after":"readback"}]},
+  {"name":"revision","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Actually, tea instead.","after":"readback"},{"say":"Yes.","after":"readback"}]},
+  {"name":"qualified-yes","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Yes, but change it to tea.","after":"readback"},{"say":"Yes.","after":"readback"}]},
+  {"name":"stale-confirmation","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"What are my options?","after":"readback"},{"say":"Yes.","after":"answer"},{"say":"Tea.","after":"pause","seconds":5},{"say":"Yes.","after":"readback"}]}
+]
