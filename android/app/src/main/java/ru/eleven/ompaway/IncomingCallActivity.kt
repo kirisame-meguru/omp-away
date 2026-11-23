@@ -7,7 +7,6 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -21,7 +20,7 @@ class IncomingCallActivity : Activity() {
     private val expire = Runnable { id?.let { Invites.cancel(this, it) }; finish() }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        ScreenPreferences(this).apply(window)
         setShowWhenLocked(true); setTurnScreenOn(true)
         val request = intent.getStringExtra(Invites.ID)?.takeIf(::validId)
         if (request == null || request in app.store.state.closed || request in app.store.state.silenced || request in app.store.state.acknowledged) {
@@ -61,6 +60,7 @@ class IncomingCallActivity : Activity() {
     }
     override fun onResume() {
         super.onResume()
+        ScreenPreferences(this).apply(window)
         app.observeInvitation {
             val request = id
             if (request == null || request in app.store.state.closed || request in app.store.state.silenced || app.callId != null) finish()

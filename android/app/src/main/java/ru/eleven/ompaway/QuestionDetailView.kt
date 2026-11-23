@@ -13,7 +13,10 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
     private var request: Pending? = null
     private var shown: QuestionDisplay? = null
     private var fresh = false
-    init { isFillViewport = true; addView(body); contentDescription = "Read-only question and options" }
+    init {
+        isFillViewport = true; addView(body); contentDescription = "Read-only question and options"
+        setBackgroundColor(0xff181824.toInt())
+    }
 
     fun bind(item: Pending, display: QuestionDisplay?, verified: Boolean) {
         val safeDisplay = if (verified) display else null
@@ -48,6 +51,7 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
 
     private fun label(value: String, heading: Boolean = false) = TextView(context).apply {
         text = value; textSize = if (heading) 18f else 17f
+        setTextColor(if (heading) 0xfff4eee4.toInt() else 0xffc5bfcc.toInt())
         textDirection = View.TEXT_DIRECTION_FIRST_STRONG
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         isAccessibilityHeading = heading

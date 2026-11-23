@@ -32,6 +32,10 @@ class QuestionDetailViewTest {
             view.layout(0, 0, 360, 220)
             assertTrue(view.getChildAt(0).measuredHeight > view.height)
             val texts = labels(view)
+            val background = android.graphics.Color.luminance(0xff181824.toInt())
+            assertTrue("Question text must contrast with the Radiance inbox", texts.all {
+                (android.graphics.Color.luminance(it.currentTextColor) + .05f) / (background + .05f) >= 4.5f
+            })
             assertTrue(texts.any { it.text.contains("Unavailable") })
             assertTrue(texts.any { it.text.contains("Other") })
             assertTrue(texts.any { it.text.contains("Select multiple") })

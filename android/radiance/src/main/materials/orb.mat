@@ -1,0 +1,183 @@
+material {
+    name : RefractiveSpectralLens,
+    shadingModel : unlit,
+    requires : [ uv0 ],
+    parameters : [
+        { type : float2, name : viewport, precision : high },
+        { type : float, name : time, precision : high },
+        { type : float, name : energy, precision : high },
+        { type : float, name : backdrop, precision : high },
+        { type : float4, name : shellPose, precision : high },
+        { type : float, name : shellShape, precision : high }
+    ]
+}
+fragment {
+    // Mobile mediump quantizes the lens coordinates before coverage is evaluated.
+    precision highp float;
+    #define SHAPE materialParams.shellShape
+    const float HEIGHT = 0.744;
+    const float DEPTH = 0.42;
+    const float IOR = 1.43;
+
+    float roundBox(vec2 p, vec2 halfSize, float radius) {
+        vec2 q = abs(p) - halfSize + radius;
+        return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+    }
+    vec3 background(vec2 p, float pixel) {
+        // Synthetic geometry behind the lens makes actual displacement visible.
+        // No screenshot, Apple asset, or baked animation is used by the application.
+        float sweep = p.x * 0.75 - p.y * 0.38 + 0.15 * sin(p.y * 1.3);
+        vec3 c = mix(vec3(0.24,0.18,0.13), vec3(0.67,0.63,0.56), smoothstep(-1.6,1.7,sweep));
+        c *= 0.65 + 0.35 * smoothstep(-0.15,0.12,sin(sweep*3.0));
+        c += vec3(0.20,0.19,0.17) * exp(-pow((sweep-0.40)/0.032,2.0));
+        float leftDistance = roundBox(p-vec2(-0.76,-1.04),vec2(0.64,0.68),0.17);
+        float rightDistance = roundBox(p-vec2(0.67,-1.04),vec2(0.64,0.68),0.17);
+        float leftWidth = max(pixel,fwidth(leftDistance));
+        float rightWidth = max(pixel,fwidth(rightDistance));
+        float left = 1.0-smoothstep(-leftWidth,leftWidth,leftDistance);
+        float right = 1.0-smoothstep(-rightWidth,rightWidth,rightDistance);
+        c = mix(c,mix(vec3(0.08,0.25,0.39),vec3(0.13,0.42,0.64),clamp(-p.y-0.15,0.0,1.0)),left);
+        c = mix(c,vec3(0.83,0.82,0.79),right);
+        return c * mix(0.10,1.0,materialParams.backdrop);
+    }
+    vec2 lensToWorld(vec2 p) {
+        return p * materialParams.shellPose.xy + vec2(0.0,materialParams.shellPose.z);
+    }
+    float radialPower(vec2 p) {
+        return pow(abs(p.x),SHAPE) + pow(abs(p.y/HEIGHT),SHAPE);
+    }
+    vec3 surfaceNormal(vec2 p, float z) {
+        return normalize(vec3(
+            SHAPE * sign(p.x) * pow(abs(p.x),SHAPE-1.0),
+            SHAPE / HEIGHT * sign(p.y) * pow(abs(p.y/HEIGHT),SHAPE-1.0),
+            2.0*z/(DEPTH*DEPTH)));
+    }
+    vec3 spectralColor(float layer, float phase) {
+        float drift = 0.5+0.5*sin(phase*0.37);
+        if (layer<0.5) return mix(vec3(0.012,0.10,1.0),vec3(0.015,0.30,1.0),drift);
+        if (layer<1.5) return mix(vec3(1.0,0.035,0.004),vec3(1.0,0.16,0.008),drift);
+        return vec3(0.06,0.34,0.09);
+    }
+    vec3 waves(vec2 p, float pixel) {
+        float x = p.x;
+        if (abs(x)>1.12) return vec3(0.0);
+        float x2 = x*x;
+        float envelope = pow(max(0.0,1.0-x2),2.0);
+        float derivative = -4.0*x*max(0.0,1.0-x2);
+        float level = materialParams.energy;
+        float amplitude = 0.018 + 0.235*level;
+        float phase = materialParams.time*3.5 + 0.30;
+        float baseline = -0.065;
+        vec3 radiance = vec3(0.0);
+        for (int i=0; i<3; i++) {
+            float layer = float(i);
+            float angle = phase + layer*2.094395;
+            float a = sin(angle+x*1.65);
+            float b = sin(angle+x*1.65+1.95);
+            float nearY = baseline + amplitude*envelope*a;
+            float farY = baseline + amplitude*envelope*b;
+            float lowY = min(nearY,farY);
+            float highY = max(nearY,farY);
+            float span = max(highY-lowY,pixel);
+            float signedDistance = max(lowY-p.y,p.y-highY);
+            float coverage = 1.0-smoothstep(-pixel,pixel,signedDistance);
+            float v = clamp((p.y-nearY)/(abs(farY-nearY)<pixel ? pixel : farY-nearY),0.0,1.0);
+            float nearSlope = amplitude*(derivative*a+envelope*1.65*cos(angle+x*1.65));
+            float farSlope = amplitude*(derivative*b+envelope*1.65*cos(angle+x*1.65+1.95));
+            // Exact tangents of P(x,v)=(x,mix(nearY,farY,v),(v-.5)*.55*envelope).
+            vec3 tangentX = vec3(1.0,mix(nearSlope,farSlope,v),(v-0.5)*0.55*derivative);
+            vec3 tangentV = vec3(0.0,farY-nearY,0.55*envelope+0.001);
+            vec3 normal = normalize(cross(tangentX,tangentV));
+            float facing = abs(normal.z);
+            float fresnel = 0.08+0.92*pow(1.0-facing,3.0);
+            float interior = 0.18+0.46*sin(3.14159265*v)+0.34*v;
+            float edgeWidth = max(pixel,0.006+0.008*envelope);
+            float nearRidge = exp(-pow((p.y-nearY)/edgeWidth,2.0));
+            float farRidge = exp(-pow((p.y-farY)/(edgeWidth*1.6),2.0));
+            vec3 tint = spectralColor(layer,phase);
+            tint = mix(vec3(0.54,0.68,0.84),tint,smoothstep(0.0,0.22,level));
+            float opticalDepth = min(span/(0.035+0.20*level),1.0);
+            float body = coverage*interior*(0.45+0.70*fresnel)*opticalDepth;
+            float ridge = (nearRidge*0.72+farRidge*0.22)*envelope;
+            radiance += tint*(body*1.55+ridge*0.65)*(0.55+0.75*level);
+            // Integrated, broad scattering lobe; no full-screen blur or marching loop.
+            float glow = exp(-pow(max(signedDistance,0.0)/(0.035+0.035*level),2.0));
+            radiance += tint*glow*envelope*(0.035+0.08*level);
+            // Grazing folds catch neutral light rather than becoming flat saturated paint.
+            radiance += vec3(0.62,0.72,0.80)*ridge*fresnel*0.20;
+        }
+        float fold = baseline+amplitude*envelope*0.45*sin(phase+x*1.65+0.9);
+        float foldGlow = exp(-pow((p.y-fold)/(0.012+0.026*level),2.0));
+        radiance += vec3(0.90,0.97,1.0)*foldGlow*envelope*level*1.25;
+        float quiet = exp(-pow((p.y-baseline+envelope*0.02)/0.016,2.0));
+        radiance += vec3(0.65,0.75,0.80)*quiet*envelope*(1.0-level)*0.65;
+        return radiance;
+    }
+    vec3 shade(vec2 p, float worldPixel) {
+        float pixel = worldPixel/min(materialParams.shellPose.x,materialParams.shellPose.y);
+        float power = radialPower(p);
+        float shell = pow(power,1.0/SHAPE);
+        float coverage = 1.0-smoothstep(1.0-pixel,1.0+pixel,shell);
+        vec3 outside = background(lensToWorld(p),worldPixel);
+        if (coverage<=0.0 || materialParams.shellPose.w<=0.0) return outside;
+        float z = DEPTH*sqrt(max(0.0001,1.0-min(power,0.9999)));
+        vec3 front = vec3(p,z);
+        vec3 normal = surfaceNormal(p,z);
+        vec3 incident = vec3(0.0,0.0,-1.0);
+        vec3 transmitted = refract(incident,normal,1.0/IOR);
+        // Solve the exit of this single convex lens, with a fixed five-step Newton solve.
+        // Starting outside the convex body avoids converging to the entry root at t=0.
+        float travel = 1.3;
+        for (int iteration=0; iteration<5; iteration++) {
+            vec3 q = front+transmitted*travel;
+            float value = radialPower(q.xy)+q.z*q.z/(DEPTH*DEPTH)-1.0;
+            vec3 gradient = vec3(SHAPE*sign(q.x)*pow(abs(q.x),SHAPE-1.0),
+                SHAPE/HEIGHT*sign(q.y)*pow(abs(q.y/HEIGHT),SHAPE-1.0),2.0*q.z/(DEPTH*DEPTH));
+            travel -= value/max(dot(gradient,transmitted),0.001);
+        }
+        vec3 exitPoint = front+transmitted*travel;
+        vec3 exitNormal = surfaceNormal(exitPoint.xy,exitPoint.z);
+        vec3 outgoing = refract(transmitted,-exitNormal,IOR);
+        float totalReflection = step(dot(outgoing,outgoing),0.001);
+        vec2 backdropPoint = exitPoint.xy+outgoing.xy*((exitPoint.z+0.70)/max(-outgoing.z,0.12));
+        vec2 dispersion = (backdropPoint-p)*0.007;
+        vec2 worldBackdrop = lensToWorld(backdropPoint);
+        vec2 worldDispersion = dispersion * materialParams.shellPose.xy;
+        vec3 transmittedColor = vec3(background(worldBackdrop+worldDispersion,worldPixel).r,
+                                     background(worldBackdrop,worldPixel).g,
+                                     background(worldBackdrop-worldDispersion,worldPixel).b);
+        float fresnel = 0.031+0.969*pow(1.0-clamp(normal.z,0.0,1.0),5.0);
+        float cap = smoothstep(-0.01,0.34,p.y);
+        vec3 glass = transmittedColor*exp(-vec3(0.22,0.20,0.17)*travel)*(1.0-fresnel)*(1.0-cap);
+        vec3 reflected = reflect(incident,normal);
+        float studio = 0.10+0.80*pow(max(0.0,dot(reflected,normalize(vec3(-0.4,-0.7,0.8)))),10.0);
+        glass += vec3(0.81,0.86,0.90)*studio*(fresnel+totalReflection*0.18)*(1.0-cap*0.85);
+        vec2 wavePoint = p+transmitted.xy*(z/max(-transmitted.z,0.1));
+        vec3 illumination = waves(wavePoint,pixel*0.85);
+        // A gentle shoulder preserves bright overlaps without clipping the coloured folds.
+        vec3 light = illumination/(vec3(1.0)+illumination*0.28);
+        float extinction = exp(-2.0*max(illumination.r,max(illumination.g,illumination.b)));
+        glass = glass*extinction+light;
+        float rim = exp(-pow((shell-0.994)/max(pixel,0.004),2.0));
+        float lower = 1.0-smoothstep(-0.05,0.30,p.y);
+        glass += vec3(0.55,0.60,0.62)*rim*lower*(0.35+0.65*fresnel);
+        // RGB subpixel energy is filtered analytically; edge width follows physical pixels.
+        return mix(outside,clamp(glass,0.0,1.0),coverage*materialParams.shellPose.w);
+    }
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec2 uv = getUV0();
+        vec2 size = materialParams.viewport;
+        float radius = min(size.x,size.y)*0.40;
+        vec2 p = (uv-vec2(0.5,0.33))*size/radius;
+        p.y = -p.y;
+        p = (p-vec2(0.0,materialParams.shellPose.z))/materialParams.shellPose.xy;
+        float pixel = 1.0/radius;
+        vec3 color = shade(p,pixel);
+        color *= 1.0-0.92*smoothstep(0.53,0.72,uv.y);
+        float dither = fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(0.06711056,0.00583715))))-0.5;
+        color = clamp(color+dither/255.0,0.0,1.0);
+        // Native post-processing is off; the material outputs display-referred colour.
+        material.baseColor = vec4(color,1.0);
+    }
+}

@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "omp-away"
-include(":app")
+include(":app", ":radiance")

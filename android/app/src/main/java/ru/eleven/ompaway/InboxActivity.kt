@@ -14,7 +14,12 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
-import android.view.WindowManager
+import android.view.WindowInsetsController
+import android.window.OnBackInvokedDispatcher
+import android.widget.FrameLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.Switch
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -40,16 +45,58 @@ class InboxActivity : Activity() {
     private val detailViews = mutableMapOf<String, QuestionDetailView>()
     private var answerRequested: String? = null
     private var permissionAnswer: String? = null
+    private lateinit var callScreen: CallScreen
+    private var callSource: CallVisualSource? = null
+    private lateinit var panel: LinearLayout
+    private lateinit var panelHangup: Button
+    private lateinit var screenPreferences: ScreenPreferences
+    private var settingsDialog: AlertDialog? = null
+    private var relayDialog: AlertDialog? = null
+    private var panelOpen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        screenPreferences = ScreenPreferences(this)
+        screenPreferences.apply(window)
+        panelOpen = savedInstanceState?.getBoolean("panelOpen") ?: false
         scroll = ScrollView(this).apply { isFillViewport = true }
-        column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(24)) }
-        scroll.addView(column); setContentView(scroll)
-        if (Build.VERSION.SDK_INT >= 30) scroll.setOnApplyWindowInsetsListener { view, insets ->
-            val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
+        column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(8), dp(24), dp(24)) }
+        scroll.addView(column)
+        callScreen = CallScreen(this, null, app::setSpeakerEnabled, app::hangup, ::openInbox, ::showSettings)
+        val panelHeader = LinearLayout(this).apply { setPadding(dp(24), dp(8), dp(24), 0) }
+        panelHeader.addView(Button(this).apply {
+            text = "Back to Radiance"; styleButton(this)
+            setOnClickListener { showInboxPanel(false) }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        panelHangup = Button(this).apply {
+            text = "Hang up"; styleButton(this); setTextColor(0xffe9898f.toInt())
+            setOnClickListener { if (resumed) app.hangup() }
+        }
+        panelHeader.addView(panelHangup, LinearLayout.LayoutParams(0, -2, 1f))
+        panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xff181824.toInt())
+            visibility = View.GONE
+            addView(panelHeader, LinearLayout.LayoutParams(-1, -2))
+            addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        setContentView(FrameLayout(this).apply {
+            addView(callScreen, FrameLayout.LayoutParams(-1, -1))
+            addView(panel, FrameLayout.LayoutParams(-1, -1))
+        })
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.insetsController?.setSystemBarsAppearance(0,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
+            panel.setOnApplyWindowInsetsListener { view, insets ->
+                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
+            }
+        } else panel.fitsSystemWindows = true
+        if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT
+        ) {
+            if (panelOpen) showInboxPanel(false)
+            else if (isTaskRoot) moveTaskToBack(true) else finish()
         }
         takeInvite(intent)
     }
@@ -62,6 +109,7 @@ class InboxActivity : Activity() {
         if (intent.action != Invites.OPEN && intent.action != Invites.ANSWER) return
         val id = intent.getStringExtra(Invites.ID)?.takeIf(::validId) ?: return
         selectedId = id
+        panelOpen = true
         app.acknowledge(id)
         // Only the private PendingIntent alias may request an automatic voice join.
         // An arbitrary launcher/deep-link intent merely opens the read-only request.
@@ -89,18 +137,131 @@ class InboxActivity : Activity() {
 
     override fun onResume() {
         super.onResume(); resumed = true
+        applyScreenPrivacy()
+        if (app.callId == null) { callScreen.bind(null); callSource = null }
+        callScreen.resume()
         app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
         continueAnswer()
     }
     override fun onPause() {
         resumed = false
+        callScreen.pause()
+        settingsDialog?.dismiss(); relayDialog?.dismiss()
         app.background(); dismissEmoji()
         super.onPause()
     }
 
+    override fun onDestroy() {
+        callScreen.dispose()
+        settingsDialog?.dismiss(); relayDialog?.dismiss()
+        super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("panelOpen", panelOpen)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun openInbox() { panelOpen = true; render() }
+
+    private fun showInboxPanel(open: Boolean) {
+        panelOpen = open
+        panel.visibility = if (open) View.VISIBLE else View.GONE
+        panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
+        callScreen.importantForAccessibility = if (open) View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        if (resumed) { if (open) callScreen.pause() else callScreen.resume() }
+    }
+
+    // API 29–32 only; API 33+ uses OnBackInvokedDispatcher above.
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Deprecated("Platform back callback")
+    override fun onBackPressed() {
+        if (panelOpen) showInboxPanel(false) else super.onBackPressed()
+    }
+
+    private fun applyScreenPrivacy() {
+        screenPreferences.apply(window)
+        screenPreferences.apply(emojiDialog?.window)
+        screenPreferences.apply(settingsDialog?.window)
+        screenPreferences.apply(relayDialog?.window)
+    }
+
+    private fun showSettings() {
+        if (settingsDialog != null) return
+        val settings = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        fun toggle(label: String, checked: Boolean, changed: (Boolean) -> Unit) {
+            settings.addView(Switch(this).apply {
+                text = label; textSize = 16f; setTextColor(0xfff4eee4.toInt())
+                setPadding(0, dp(12), 0, dp(12))
+                isChecked = checked
+                setOnCheckedChangeListener { _, enabled -> changed(enabled) }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+        toggle("Block screenshots", screenPreferences.blockScreenshots) {
+            screenPreferences.blockScreenshots = it; applyScreenPrivacy()
+        }
+        settings.addView(TextView(this).apply {
+            text = "Turn off to allow screenshots and screen recording, including captions and pairing details."
+            textSize = 13f; setTextColor(0xffc5bfcc.toInt())
+        })
+        toggle("Reduced motion", screenPreferences.reducedMotion) {
+            screenPreferences.reducedMotion = it; callScreen.refreshAppearance()
+        }
+        toggle("Reference backdrop", screenPreferences.lightBackdrop) {
+            screenPreferences.lightBackdrop = it; callScreen.refreshAppearance()
+        }
+        val quality = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+        val choices = arrayOf("Auto", "GPU", "2D")
+        val ids = IntArray(choices.size)
+        for (index in choices.indices) {
+            val choice = RadioButton(this).apply {
+                id = View.generateViewId(); text = choices[index]; setTextColor(0xfff4eee4.toInt())
+            }
+            ids[index] = choice.id
+            quality.addView(choice, RadioGroup.LayoutParams(0, -2, 1f))
+        }
+        quality.check(ids[screenPreferences.quality])
+        quality.setOnCheckedChangeListener { _, id ->
+            val selected = ids.indexOf(id)
+            if (selected >= 0) { screenPreferences.quality = selected; callScreen.refreshAppearance() }
+        }
+        settings.addView(quality)
+        settingsDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Radiance settings")
+            .setView(ScrollView(this).apply { addView(settings) })
+            .setPositiveButton("Done", null)
+            .create().also { dialog ->
+                dialog.setOnDismissListener { settingsDialog = null }
+                screenPreferences.apply(dialog.window); dialog.show()
+            }
+        applyScreenPrivacy()
+    }
+
     private fun render() {
         if (!resumed || isFinishing) return
+        val visual = app.callVisual
+        if (visual != null) {
+            if (callSource !== visual) {
+                callScreen.bind(visual); callSource = visual; showInboxPanel(false)
+            }
+            callScreen.setSpeaker(app.speakerEnabled)
+            renderVoice()
+            if (!panelOpen) return
+        } else {
+            if (callSource != null) {
+                callSource = null
+                showInboxPanel(false)
+                callScreen.dismiss { callScreen.bind(null); render() }
+                return
+            }
+            callScreen.home(app.paired, app.store.state.pending.size, app.status)
+        }
+        showInboxPanel(panelOpen)
         val y = scroll.scrollY
         column.removeAllViews()
         transcriptViews = null
@@ -111,11 +272,13 @@ class InboxActivity : Activity() {
         column.addView(ToggleButton(this).apply {
             textOn = "Speaker: on"; textOff = "Speaker: off"; isAllCaps = false
             isChecked = app.speakerEnabled
+            styleButton(this)
             setOnCheckedChangeListener { _, enabled -> if (resumed) app.setSpeakerEnabled(enabled) }
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         column.addView(ToggleButton(this).apply {
             textOn = "Invitations: ringing call"; textOff = "Invitations: notification"; isAllCaps = false
             isChecked = app.inviteSettings.callMode
+            styleButton(this)
             setOnCheckedChangeListener { _, enabled ->
                 if (resumed) { app.inviteSettings.callMode = enabled; app.invitationSettingsChanged() }
             }
@@ -123,6 +286,7 @@ class InboxActivity : Activity() {
         column.addView(ToggleButton(this).apply {
             textOn = "Notification previews: enabled"; textOff = "Notification previews: hidden"; isAllCaps = false
             isChecked = app.inviteSettings.showPreview
+            styleButton(this)
             setOnCheckedChangeListener { _, enabled ->
                 if (resumed) { app.inviteSettings.showPreview = enabled; app.invitationSettingsChanged() }
             }
@@ -164,10 +328,11 @@ class InboxActivity : Activity() {
                         hint = "https://relay.example"
                         inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
                     }
-                    AlertDialog.Builder(this).setTitle("Existing relay origin")
+                    relayDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert).setTitle("Existing relay origin")
                         .setMessage("Enter the same trusted HTTPS relay used by your paired desktop. This sends your existing relay credential there; never enter an unfamiliar address.")
                         .setView(input).setPositiveButton("Restore") { _, _ -> app.migrateRelayOrigin(input.text.toString()) }
-                        .setNegativeButton("Cancel", null).show()
+                        .setNegativeButton("Cancel", null).setOnDismissListener { relayDialog = null }.show()
+                    screenPreferences.apply(relayDialog?.window)
                 }
             }
             if (app.callId == null) button(if (app.verifiedInbox) "Refresh inbox" else "Reconnect") { notice = null; app.retry() }
@@ -217,16 +382,18 @@ class InboxActivity : Activity() {
         if (code == null) dismissEmoji()
         else if (shownEmoji != code) {
             dismissEmoji(); shownEmoji = code
-            emojiDialog = AlertDialog.Builder(this).setTitle("Verify your desktop")
+            emojiDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert).setTitle("Verify your desktop")
                 .setMessage("Compare all 12 emoji, in order, with the code on the desktop:\n\n$code\n\nOnly approve if they match exactly.")
                 .setPositiveButton("Codes match") { _, _ -> app.confirm(code, true) }
                 .setNegativeButton("Do not match") { _, _ -> app.confirm(code, false) }
                 .setOnCancelListener { app.confirm(code, false) }.show()
+            screenPreferences.apply(emojiDialog?.window)
         }
     }
 
     private fun renderVoice() {
         if (!resumed || app.callId == null) return
+        callScreen.captions(app.callerCaption, app.callerCaptionFinal, app.assistantCaption, app.assistantCaptionFinal)
         transcriptViews?.update(app.talking, app.speaking, app.callerCaption, app.callerCaptionFinal,
             app.assistantCaption, app.assistantCaptionFinal)
     }
@@ -271,6 +438,7 @@ class InboxActivity : Activity() {
     private fun text(value: String, sp: Int, bold: Boolean = false): TextView =
         TextView(this).apply {
             text = value; textSize = sp.toFloat(); setPadding(0, dp(if (bold) 14 else 5), 0, dp(3))
+            setTextColor(if (bold) 0xfff4eee4.toInt() else 0xffc5bfcc.toInt())
             if (bold) setTypeface(typeface, Typeface.BOLD)
             textDirection = View.TEXT_DIRECTION_FIRST_STRONG
             isAccessibilityHeading = bold
@@ -278,14 +446,24 @@ class InboxActivity : Activity() {
     private fun button(label: String, action: () -> Unit) {
         column.addView(Button(this).apply {
             text = label; isAllCaps = false; gravity = Gravity.CENTER; setOnClickListener { if (resumed) action() }
+            styleButton(this)
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+    private fun styleButton(button: Button) {
+        button.isAllCaps = false
+        button.setTextColor(0xfff4eee4.toInt())
+        button.backgroundTintList = android.content.res.ColorStateList.valueOf(0xff29293b.toInt())
     }
     private companion object { const val MIC = 1; const val NOTIFICATIONS = 2 }
 }
 
 class PairScanActivity : CaptureActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        ScreenPreferences(this).apply(window)
         super.onCreate(savedInstanceState)
+    }
+    override fun onResume() {
+        super.onResume()
+        ScreenPreferences(this).apply(window)
     }
 }

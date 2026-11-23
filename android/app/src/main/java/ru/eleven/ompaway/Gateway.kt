@@ -46,6 +46,7 @@ class Gateway : Application() {
     private val joinTimeout = Runnable { if (call != null && !talking) endCall("Voice did not become ready. Request remains pending.") }
     @Volatile private var call: CallService? = null
     internal val callId: String? get() = call?.id
+    internal val callVisual: CallVisualSource? get() = call
     private var endingId: String? = null
     internal val idle get() = call == null && endingId == null
     internal var talking = false
@@ -129,6 +130,7 @@ class Gateway : Application() {
     }
 
     private fun refreshToken() {
+        if (BuildConfig.ISOLATED_INTEGRATION) return
         val lookup = tokenState.beginLookup()
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             if (tokenState.isCurrent(lookup)) {
