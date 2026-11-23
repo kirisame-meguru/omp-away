@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from release import sha256, verify, version_code
+from release import safe_name, sha256, verify, version_code
 
 
 def https_url(value, origin_only=False):
@@ -166,8 +166,11 @@ class HostAPI:
         assets = self.json('GET', path)
         if not isinstance(assets, list):
             raise ValueError('unexpected Forgejo attachment list')
+        tag = release['tag_name']
+        version_code(tag)
         seen = set()
-        fields = ('id', 'uuid', 'name', 'size', 'type', 'browser_download_url')
+        verified = []
+        fields = ('id', 'uuid', 'name', 'size', 'type')
         for asset in assets:
             aid = self.identifier(asset['id'])
             if aid in seen:
@@ -176,8 +179,17 @@ class HostAPI:
             detail = self.json('GET', path + '/' + aid)
             if any(field not in asset or detail.get(field) != asset[field] for field in fields):
                 raise ValueError('Forgejo attachment ID/UUID metadata mismatch')
-            self.forgejo_download_url(detail)
-        return assets
+            canonical = self.forgejo_download_url(detail)
+            # List responses decorate the same attachment with a release URL;
+            # singular responses retain /attachments/<uuid>. Validate both
+            # identities without requiring these different URL strings to match.
+            named = (self.config.server + '/' + self.config.repository + '/releases/download/'
+                     + urllib.parse.quote(tag, safe='') + '/'
+                     + urllib.parse.quote(safe_name(asset['name']), safe=''))
+            if asset.get('browser_download_url') not in (canonical, named):
+                raise ValueError('unsafe Forgejo listed asset download URL')
+            verified.append(detail)
+        return verified
 
     def forgejo_download_url(self, asset):
         self.identifier(asset['id'])

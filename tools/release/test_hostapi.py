@@ -35,15 +35,18 @@ class HostAPITests(unittest.TestCase):
                 'browser_download_url': 'https://forge.example.org/attachments/12345678-1234-4234-8234-123456789abc'}
 
     def test_forgejo_unpaginated_assets_bind_numeric_id_and_uuid_before_download(self):
-        asset = self.forgejo_asset()
+        detail = self.forgejo_asset()
+        # Live Forgejo v15 decorates only the list response with the release URL.
+        listed = {**detail, 'browser_download_url':
+                  'https://forge.example.org/team/away/releases/download/v1.0.5/INSTALL.md'}
         api = FixtureAPI(responses={
-            ('GET', '/releases/7/assets'): [asset],
-            ('GET', '/releases/7/assets/42'): dict(asset),
+            ('GET', '/releases/7/assets'): [listed],
+            ('GET', '/releases/7/assets/42'): detail,
         })
-        assets = api.assets({'id': 7})
-        self.assertEqual(assets, [asset])
+        assets = api.assets({'id': 7, 'tag_name': 'v1.0.5'})
+        self.assertEqual(assets, [detail])
         self.assertEqual(api.digest(assets[0]), '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a')
-        self.assertEqual(api.calls[0][:2], ('GET', asset['browser_download_url']))
+        self.assertEqual(api.calls[0][:2], ('GET', detail['browser_download_url']))
 
     def test_forgejo_numeric_id_lookup_must_match_listed_uuid_and_metadata(self):
         listed = self.forgejo_asset()
@@ -55,7 +58,23 @@ class HostAPITests(unittest.TestCase):
                 ('GET', '/releases/7/assets/42'): {**listed, field: value},
             })
             with self.subTest(field=field), self.assertRaises(ValueError):
-                api.assets({'id': 7})
+                api.assets({'id': 7, 'tag_name': 'v1.0.5'})
+            self.assertEqual(api.calls, [])
+
+    def test_forgejo_list_url_must_match_exact_repository_tag_and_asset_name(self):
+        detail = self.forgejo_asset()
+        valid = 'https://forge.example.org/team/away/releases/download/v1.0.5/INSTALL.md'
+        for url in (valid.replace('/team/away/', '/other/away/'),
+                    valid.replace('/v1.0.5/', '/v1.0.6/'), valid.replace('INSTALL.md', 'OTHER.md'),
+                    valid + '?token=x', valid + '#fragment',
+                    valid.replace('https://', 'https://user:pass@'),
+                    valid.replace('forge.example.org', 'evil.example.org')):
+            api = FixtureAPI(responses={
+                ('GET', '/releases/7/assets'): [{**detail, 'browser_download_url': url}],
+                ('GET', '/releases/7/assets/42'): detail,
+            })
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                api.assets({'id': 7, 'tag_name': 'v1.0.5'})
             self.assertEqual(api.calls, [])
 
     def test_forgejo_download_rejects_uuid_substitution_and_unsafe_urls_before_request(self):
