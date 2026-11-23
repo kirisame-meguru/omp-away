@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { DecisionCoordinator, loadPreferences, savePreferences, type DecisionCall, type DecisionReply, type SideContext } from "../src/decisions";
+import { DecisionCoordinator, type DecisionCall, type DecisionReply, type SideContext } from "../src/decisions";
 import type { PendingAsk } from "../src";
 
 const html = `<form><input type="hidden" name="rev" value="r4"><label for="target">Release lane</label><select name="lane" id="target" required><option value="d" selected>Development</option><option value="p">Production</option><option value="x" disabled>Retired</option></select><label for="n">Replicas</label><input id="n" name="count" type="number" value="1" min="1" max="4" required></form>`;
@@ -252,10 +249,4 @@ test('a natural clarification delegates only the caller question to the tool-fre
 		expect(await speak(call,question)).toEqual({kind:"say",text:"A implantação fica reversível."});
 		expect(f.prompts.at(-1)).toContain(question); expect(f.writes).toEqual([]);
 	} finally {f.core.close()}
-});
-test('preferences persist without carrying private request state',async()=>{
-	const dir=await mkdtemp(join(tmpdir(),"away-prefs-")); try {
-		const path=join(dir,"routing.json"); expect(await loadPreferences(path)).toEqual({away:false,delayMs:null});
-		await savePreferences(path,{away:true,delayMs:1200}); expect(await loadPreferences(path)).toEqual({away:true,delayMs:1200});
-	} finally {await rm(dir,{recursive:true,force:true})}
 });

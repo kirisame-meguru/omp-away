@@ -2,9 +2,9 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { copyToClipboard } from "@oh-my-pi/pi-natives/clipboard";
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPreferences, savePreferences, type Preferences } from "../decisions";
+import type { Preferences } from "../decisions";
 import { Enrollment } from "./enrollment";
 import { connectRuntime, type MobileRuntime } from "./routing";
 
@@ -53,22 +53,27 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 }):Promise<Admin|undefined> {
 	const {OMP_AWAY_URL:url,OMP_AWAY_TOKEN_FILE:tokenFile,OMP_AWAY_STATE_DIR:stateDir,OMP_AWAY_TUNNEL_PYTHON:python}=resources.env;
 	if (!url || !tokenFile || !isAbsolute(tokenFile) || !stateDir || !isAbsolute(stateDir) || (python!==undefined && !isAbsolute(python))) throw Error("incomplete-gateway-settings");
-	const path=join(stateDir,"routing.json");
-	const [token,initial]=await Promise.all([tokenFromFile(tokenFile),loadPreferences(path)]);
+	const token=await tokenFromFile(tokenFile);
 	if (!isCurrent()) return;
-	let live=true, prefs=initial, writes=Promise.resolve(), nextPair=0, expires=0, pairing=false;
+	let live=true, commands=Promise.resolve(), nextPair=0, expires=0, pairing=false, routingReady=false;
 	const current=()=>live && isCurrent();
 	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(text,type)};
+	const status=(prefs:Preferences)=>`Away (all sessions) immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`;
 	const enrollment=new Enrollment(text=>ctx.ui.setWidget("omp-away-pairing",text?.split("\n")));
 	function cancelEnrollment() {++nextPair; expires=0; enrollment.cancel()}
 	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,
+		onRouting(next) {
+			if (!current()) return;
+			if (routingReady) notify(status(next));
+			routingReady=true;
+		},
 		confirmPair:async (_device,emoji)=>{
 			if (!current() || !idle() || Date.now()>=expires) return false;
 			expires=0;
 			const accepted=await enrollment.compare(emoji);
 			return accepted && current() && idle();
 		},
-	},prefs,code=>{
+	},code=>{
 		const warning=Object.hasOwn(runtimeWarnings,code) ? runtimeWarnings[code] : undefined;
 		notify(`Away: ${warning ?? code}. The desktop form stays available.`,warning===undefined?"error":"warning");
 	});
@@ -98,21 +103,19 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				finally {pairing=false}
 				return;
 			}
-			if (args==="status") {notify(`Away immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`);return}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
-			if (args!=="" && args!=="on" && args!=="off" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
+			if (args!=="" && args!=="on" && args!=="off" && args!=="status" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
 				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair]", "warning");return;
 			}
-			// Serialize read-modify-write, including concurrent toggles and session shutdown.
-			writes=writes.then(async()=>{
+			// Preserve this session's command order; the broker serializes patches
+			// across all sessions and broadcasts the committed state back to us.
+			commands=commands.then(async()=>{
 				if (!current()) return;
-				const next:Preferences=fallback ? {...prefs,delayMs:fallback[1]==="off"?null:Number(fallback[1])*1000} : {...prefs,away:args===""?!prefs.away:args==="on"};
-				await savePreferences(path,next); if (!current()) return;
-				runtime.configure(next);prefs=next;
-				notify(`Away immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`);
-			}).catch(()=>notify("Away routing preferences could not be saved.","error"));
-			await writes;
+				const patch:Partial<Preferences>=args==="status" ? {} : fallback ? {delayMs:fallback[1]==="off"?null:Number(fallback[1])*1000} : {away:args!=="off"};
+				await runtime.configure(patch);
+			}).catch(()=>notify("Away shared routing could not be updated; no local-only change was applied.","error"));
+			await commands;
 		},
-		async close() {live=false;cancelEnrollment();await Promise.all([runtime.close(),writes])},
+		async close() {live=false;cancelEnrollment();await Promise.all([runtime.close(),commands])},
 	};
 }

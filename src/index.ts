@@ -139,8 +139,11 @@ export default function away(pi: ExtensionAPI): void {
 		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle()).then(async mobile => {
 			if (epoch === generation) admin = mobile;
 			else await mobile?.close();
-		}).catch(() => {
-			if (epoch === generation) ctx.ui.notify("Away mobile unavailable: check the HTTPS gateway, private token/state paths, routing preferences and tunnel Python. Desktop Ask remains available.", "error");
+		}).catch(error => {
+			if (epoch !== generation) return;
+			if (error instanceof Error && error.message==="shared-routing-upgrade-required") {
+				ctx.ui.notify("Away shared routing needs a gateway upgrade: close all Away-enabled desktops, wait 10 seconds, then reopen them with the updated plugin. Pairing is preserved; Desktop Ask remains available.", "warning");
+			} else ctx.ui.notify("Away mobile unavailable: check the HTTPS gateway, private token/state paths, routing preferences and tunnel Python. Desktop Ask remains available.", "error");
 		});
 		try {
 			const next = await startAdapter(port, sessionId, {
@@ -190,7 +193,7 @@ export default function away(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("away", {
-		description: "Pair a phone (/away pair) and control mobile Ask invitations",
+		description: "Enable Away for all connected sessions; /away off disables immediate ringing",
 		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode),
 		handler: async (args, ctx) => {
 			if (ctx.agent.kind !== "main" || ctx.mode !== "tui") return;

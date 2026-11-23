@@ -1,11 +1,11 @@
 const action = (value:string, description:string) => ({value,label:value,description});
 const actions = [
 	action("pair", "Pair a phone with this desktop"),
-	action("status", "Show immediate and fallback settings"),
-	action("on", "Ring the phone immediately for new Asks"),
-	action("off", "Stop immediate ringing; keep the fallback setting"),
-	action("fallback off", "Disable delayed ringing"),
-	action("fallback 90", "Ring after 90 seconds (or enter your own delay)"),
+	action("status", "Show shared immediate and fallback settings"),
+	action("on", "Enable immediate ringing for all connected sessions"),
+	action("off", "Stop immediate ringing in all sessions; keep fallback"),
+	action("fallback off", "Disable delayed ringing in all sessions"),
+	action("fallback 90", "Set the shared delay to 90 seconds (or enter your own delay)"),
 	action("help", "List Away commands"),
 ];
 

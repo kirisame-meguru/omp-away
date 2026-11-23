@@ -10,11 +10,11 @@ export type AskContext = SideContext & VoiceOptions["ctx"] & { cwd:string };
 export interface MobileRuntime {
 	offer(ask:PendingAsk,ctx:AskContext):void;
 	end(requestId:string):void;
-	configure(next:Preferences):void;
+	configure(patch:Partial<Preferences>):Promise<void>;
 	pair():Promise<string>;
 	close():Promise<void>;
 }
-type Settings = Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"python"|"confirmPair">;
+type Settings = Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"python"|"confirmPair"|"onRouting">;
 interface Transports { gateway:typeof startSecureDesktop; voice:typeof openVoice }
 interface Joined {
 	device:string; id:string; decision:DecisionCall; voice?:VoiceCall; streaming:boolean;
@@ -31,7 +31,7 @@ function informationalRequest(text:string):boolean {
 
 /** One host generation. Only the inner TLS endpoint can introduce a paired device.
  * An enrollment made during an Ask is not allowed to acquire that Ask. */
-export async function connectRuntime(settings:Settings, initial:Preferences, report:(code:string)=>void, transports:Transports = {
+export async function connectRuntime(settings:Settings, report:(code:string)=>void, transports:Transports = {
 	gateway:startSecureDesktop, voice:openVoice,
 }):Promise<MobileRuntime> {
 	let gateway:SecureDesktop|undefined, active:Joined|undefined, closed=false;
@@ -40,7 +40,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 	const logs=new Set<CallLog>();
 	const requests=new Map<string,{ctx:AskContext; audience:Set<string>}>();
 	const core=new DecisionCoordinator({
-		preferences:initial, error:report,
+		error:report,
 		async invite(id) {
 			const audience=requests.get(id)?.audience;
 			if (audience && !closed) await Promise.all([...audience].map(device=>gateway!.ring(device,id)));
@@ -152,6 +152,11 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 		} catch {fail(call)}
 	}
 	gateway=await transports.gateway({...settings,onError:report,
+		onRouting(next) {
+			if (closed) return;
+			core.configure(next);
+			settings.onRouting?.(next);
+		},
 		onConnect(device) {if (!closed) {devices.add(device); online.add(device); inbox(device)}},
 		onLoss(device) {online.delete(device); if (active?.device===device) active.decision.close()},
 		onPcm(device,pcm) {
@@ -185,7 +190,10 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 			if (!requests.delete(id)) return;
 			core.end(id);
 		},
-		configure(next:Preferences) {core.configure(next)},
+		async configure(patch) {
+			if (closed) throw Error("runtime-closed");
+			await gateway!.routing(patch);
+		},
 		pair:()=>gateway!.pair(),
 		async close() {
 			closed=true; online.clear(); requests.clear();

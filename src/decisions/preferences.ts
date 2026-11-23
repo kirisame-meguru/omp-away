@@ -1,26 +1,21 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-
 export interface Preferences { away: boolean; delayMs: number | null }
-export function preferences(data: unknown): Preferences {
-	if (!data || typeof data !== "object" || !("away" in data) || typeof data.away !== "boolean" || !("delayMs" in data)) throw Error("invalid-routing-preferences");
-	const delayMs = data.delayMs;
-	if (delayMs !== null && (typeof delayMs !== "number" || !Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 2_147_483_647)) throw Error("invalid-routing-preferences");
-	return { away: data.away, delayMs };
-}
-export async function loadPreferences(path: string): Promise<Preferences> {
-	try { return preferences(JSON.parse(await readFile(path,"utf8"))); }
-	catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return {away:false,delayMs:null};
-		throw Error("routing-preferences-unavailable");
+export function preferencePatch(data: unknown): Partial<Preferences> {
+	if (!data || typeof data!=="object" || Array.isArray(data) ||
+		Object.keys(data).some(key=>key!=="away" && key!=="delayMs")) throw Error("invalid-routing-preferences");
+	const patch:Partial<Preferences>={};
+	if ("away" in data) {
+		if (typeof data.away!=="boolean") throw Error("invalid-routing-preferences");
+		patch.away=data.away;
 	}
+	if ("delayMs" in data) {
+		const delay=data.delayMs;
+		if (delay!==null && (typeof delay!=="number" || !Number.isSafeInteger(delay) || delay<0 || delay>2_147_483_647)) throw Error("invalid-routing-preferences");
+		patch.delayMs=delay;
+	}
+	return patch;
 }
-/** Replace atomically; callers serialize concurrent preference changes per profile. */
-export async function savePreferences(path: string, data: Preferences): Promise<void> {
-	const json = JSON.stringify(preferences(data));
-	const temp = `${path}.${randomUUID()}.tmp`;
-	await mkdir(dirname(path), {recursive:true,mode:0o700});
-	try { await writeFile(temp, json, {flag:"wx",mode:0o600}); await rename(temp,path); }
-	finally { await rm(temp, {force:true}); }
+export function preferences(data: unknown): Preferences {
+	const patch=preferencePatch(data);
+	if (patch.away===undefined || patch.delayMs===undefined) throw Error("invalid-routing-preferences");
+	return {away:patch.away,delayMs:patch.delayMs};
 }

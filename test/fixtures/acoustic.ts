@@ -4,6 +4,7 @@ import { connectRuntime, type AskContext, type MobileRuntime } from '../../src/r
 import { openVoice } from '../../src/media';
 import type { SecureDesktopOptions } from '../../src/secure-channel';
 import type { PendingAsk } from '../../src/index';
+import type { Preferences } from '../../src/decisions';
 import nativePrompt from './acoustic-ask.md' with { type:'text' };
 
 export default function acoustic(pi:ExtensionAPI) {
@@ -48,7 +49,7 @@ export default function acoustic(pi:ExtensionAPI) {
     const ctx:AskContext={cwd:host.cwd,sessionManager:host.sessionManager,modelRegistry:host.modelRegistry,
       async runEphemeralTurn(options){if(!host.runEphemeralTurn)throw Error('Host side turns unavailable');return host.runEphemeralTurn(options)}};
     const runtimePromise=connected.promise.then(()=>connectRuntime({url:'https://example.invalid',desktopToken:'',stateDir:trace+'.state',confirmPair:async()=>false},
-      {away:false,delayMs:null},code=>state.errors.push(code),{
+      code=>state.errors.push(code),{
         async voice(options){
           const voice=await openVoice({...options,onCaption(role,text,final){
             if(role==='assistant'){
@@ -64,7 +65,8 @@ export default function acoustic(pi:ExtensionAPI) {
             await voice.sendSpeakable(text,instruction);
           }};
         },
-        async gateway(options){wire=options;return {
+        async gateway(options){wire=options;let prefs:Preferences={away:false,delayMs:null};options.onRouting?.(prefs);return {
+          async routing(patch={}){prefs={...prefs,...patch};options.onRouting?.(prefs);return prefs},
           async devices(){return ['fixture']},async pair(){throw Error('No enrollment')},async close(){},async ring(){throw Error('No production notifications')},
           async sendControl(_device,message){
             if(message.type==='joined'||message.type==='transcript'){

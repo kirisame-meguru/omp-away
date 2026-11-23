@@ -7,7 +7,6 @@ import type { Exchange, SideContext } from "./side";
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
 export type { Preferences } from "./preferences";
-export { loadPreferences, savePreferences } from "./preferences";
 export type { SideContext } from "./side";
 
 export interface InboxItem { requestId:string; project:string; question:string; createdAt:number }
