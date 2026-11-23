@@ -74,6 +74,16 @@ Use stock interactive omp 19.1.0 main sessions, the normal desktop Codex login, 
 4. From an **idle local composer**, enter `/away pair`. This copies a one-time JSON payload to the system clipboard; it is never printed, entered into the composer, or emitted to the model. Disable third-party clipboard managers, syncing and capture; do not paste into a chat or online QR service. Paste into the trusted phone enrollment screen, or display a QR using a trusted **offline** renderer. Clear both clipboards and close the renderer immediately. The Windows writer opts out of clipboard history and roaming; the payload is valid for at most ten minutes. A new invitation invalidates the previous one.
 5. Compare **all twelve** emoji in order on **both** devices. For an exact match, approve on the phone and enter the local widget's `/away approve CODE` on the desktop. Otherwise `/away deny CODE`. `CODE` identifies this comparison only; it is not the enrollment secret. There is no approval dialog over a native Ask. Starting work cancels a pending comparison; pair again from idle. Failure or timeout is not success. A changed phone key must not regain requests addressed to its predecessor.
 
+### Optional Async Ask inbox
+
+Load updated `omp-async-ask` and Away plugins in the same interactive desktop. With the gateway configured and the phone already paired, pending and restored questions appear in the existing phone inbox without opening `/questions`. Async forwarding needs no Collab configuration; the native Ask requirements above remain unchanged.
+
+The same spoken selection, readback and separate onset-bound confirmation apply. Async Ask validates and saves the answer, then uses its ordinary user-attributed aside. Desktop answers, withdrawal and owner/session changes retire the phone offer. Agent-turn completion does not.
+
+Shared `/away` and fallback settings apply unchanged. Restored questions keep their original creation time; a fresh owner can ring a still-pending question again. Newly paired devices do not inherit existing offers. Unsupported forms remain in `/questions`.
+
+Saved is not delivered. After a failed or uncertain attempt, review `/questions`; there is no automatic mobile retry or resend. A closed call alone is not delivery confirmation. Each plugin remains usable without the other. Restart updated desktop plugins when work can safely pause; this integration requires no broker, relay or phone update.
+
 ### Routing and call behavior
 
 `/away` and `/away on` enable immediate ringing for every connected session sharing this paired state directory; repeating either command leaves it enabled. `/away off` disables immediate ringing globally. `/away fallback 90` enables shared normal-mode escalation after 90 seconds from request creation; `/away fallback off` disables it. The allowed interval is 1–2,147,483 whole seconds. `/away status` fetches both shared settings from the broker. Defaults: immediate off, fallback off. Turning off immediate mode does **not** turn off a configured fallback. Ringing sends only the opaque request ID to the enrolled device route.
@@ -125,7 +135,7 @@ Records include local call/request/session IDs, sequence numbers, timestamps, sp
 - `delta`: recognized caller or assistant fragments, retained even without a final event or after hangup.
 - `provider-final`: the provider's completed transcript, including late finals that decision handling may reject.
 - `resolved-provider` / `resolved-silence`: caller text actually passed to decision handling, with onset binding.
-- `event`: consultation and decision outcomes, including whether a validated draft exists, plus narration/readback appends and call ending. An `accepted` decision reply records native acceptance; speech saying “submitted” does not.
+- `event`: consultation and decision outcomes, including whether a validated draft exists, plus narration/readback appends and call ending. An `accepted` reply records native acceptance for Ask, or canonical save plus queued/recorded dispatch for Async Ask—not proof that the model read it. Speech saying “submitted” establishes neither.
 
 Do not concatenate every speech row: finals replace their turn's deltas, and resolved rows distinguish consumed caller text from provider observations. An `ended` event can precede `decision-reply: accepted` because native completion aborts the call before the submission promise settles. Normal call teardown keeps the file open for that outcome. Missing outcomes after process shutdown or a recording failure remain unknown.
 
@@ -155,6 +165,8 @@ Each run prints its local `result.json` path. Retained call JSONL files are unde
 ## Recording evidence
 
 After running the gate, record host version, date, case, observed sanitized values and event counts here; note whether the operator actually saw the dialog dismiss. On a failure report the first mismatch, not an inferred winner. Do not attach full session logs, registry contents, links, tokens, raw frames or unsanitized screenshots. The test root can be discarded after the host exits and safe evidence is captured.
+
+2026-11-23, Async Ask integration: an isolated stock 19.1.0 TUI with a scripted provider and controlled phone/voice transports completed independent work while a question remained pending. The actual `/questions` dialog opened and its handler closed after the confirmed answer. The provider observed the user-attributed answer both after agent end and during a later active work tool. No runtime errors; the owned host exited normally. This tested native inbox lifecycle and model receipt, not visual layout, acoustic recognition or a physical phone. The disposable desktop controller was removed afterward. The repeatable cross-plugin fixture separately passed ten load-order/race/restoration/failure scenarios.
 
 2026-11-23, consultation routing fix: a live model in an isolated stock host answered the recorded “Ask the main model to come up with some other two drinks” with hot chocolate and lemonade through one consultation. “Give me two more drink ideas” reached consultation through interpretation and returned sparkling water and apple juice. Both were non-draft narration; tools stayed disabled, subsequent Yes utterances submitted nothing, and a fresh Coffee/Yes sequence completed the synthetic submission once. This probe injected bound caller transcripts and used a synthetic submission capability; it did not test recognition, handset playback, or the paired relay.
 

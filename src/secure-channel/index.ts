@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { delimiter, isAbsolute } from 'node:path';
-import { Framer, frame, mediaPacket, readMedia } from './framing';
+import { Framer, frame, isRoute as route, mediaPacket, readMedia } from './framing';
 import { preferences, preferencePatch, type Preferences } from '../decisions/preferences';
 
 export type PhoneControl =
@@ -42,7 +42,6 @@ export interface SecureDesktop {
   close(): Promise<void>;
 }
 
-const route = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(x);
 const digest = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{43}$/.test(x) && Buffer.from(x, 'base64url').toString('base64url') === x;
 const emoji = /^[🐶🐱🦊🐻🐼🐸🐵🐯🦁🐷🐨🐰🐙🐧🐳🐢]{12}$/u;
 const decoder = new TextDecoder('utf-8', { fatal: true });

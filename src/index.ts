@@ -5,8 +5,10 @@ import { type Adapter, startAdapter } from "./collab/adapter";
 import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
 import { awayHelp, awaySuggestions } from "./runtime/commands";
+import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
 
-type Values = Record<string, string | number | boolean | string[]>;
+export type Values = Record<string, string | number | boolean | string[]>;
+export interface QuestionContext { title: string; blockedWork: string }
 type Delivery = "accepted" | "stale";
 
 /** In-process, request-scoped capability for a trusted confirmation UI. Not an agent tool. */
@@ -14,6 +16,9 @@ export interface PendingAsk {
 	requestId: string;
 	html: string;
 	toolCallId: string;
+	deduplicationKey?: string;
+	createdAt?: number;
+	context?: QuestionContext;
 	submitConfirmed(requestId: string, values: Values): Promise<Delivery>;
 }
 
@@ -62,6 +67,7 @@ export default function away(pi: ExtensionAPI): void {
 	let adapter: Adapter | undefined;
 	let admin: Admin | undefined;
 	let opening: Promise<void> | undefined;
+	let asyncQuestions: AsyncAskConnection | undefined;
 	let mobileConfigured = false;
 	let ready = false;
 	let activeId: string | undefined;
@@ -85,6 +91,7 @@ export default function away(pi: ExtensionAPI): void {
 		generation++;
 		session = undefined;
 		ready = false;
+		asyncQuestions?.close(); asyncQuestions = undefined;
 		approvals.clear();
 		discard();
 		const old = adapter, mobile = admin, starting = opening;
@@ -127,24 +134,36 @@ export default function away(pi: ExtensionAPI): void {
 		const epoch = generation;
 		await closing;
 		if (epoch !== generation) return;
-		const port = configuredPort(pi);
-		if (!port) {
-			logger.info("Away native bridge", { stage:"configuration-unavailable" });
-			ctx.ui.notify("Away unavailable: set collab.relayUrl=ws://127.0.0.1:<port>, collab.autoStart=control and ask.timeout=0 in this profile.", "error");
-			return;
-		}
 		const sessionId = ctx.sessionManager.getSessionId();
 		session = sessionId;
 		mobileConfigured = gatewayConfigured();
 		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle()).then(async mobile => {
-			if (epoch === generation) admin = mobile;
-			else await mobile?.close();
+			if (epoch === generation && mobile) {
+				admin = mobile;
+				asyncQuestions = connectAsyncQuestions(pi.events, sessionId, mobile, ctx, code => {
+					if (epoch !== generation) return;
+					const message = code === "async-answer-saved"
+						? "Async answer saved, but delivery was not confirmed. Review /questions; nothing was resent."
+						: code === "async-answer-uncertain"
+							? "Async answer persistence or delivery is uncertain. Review /questions before retrying."
+							: code === "async-answer-invalid"
+								? "Async answer was rejected. Complete this question in /questions."
+								: "Async inbox integration unavailable. Continue in /questions.";
+					ctx.ui.notify(`Away: ${message}`, "warning");
+				});
+			} else await mobile?.close();
 		}).catch(error => {
 			if (epoch !== generation) return;
 			if (error instanceof Error && error.message==="shared-routing-upgrade-required") {
 				ctx.ui.notify("Away shared routing needs a gateway upgrade: close all Away-enabled desktops, wait 10 seconds, then reopen them with the updated plugin. Pairing is preserved; Desktop Ask remains available.", "warning");
 			} else ctx.ui.notify("Away mobile unavailable: check the HTTPS gateway, private token/state paths, routing preferences and tunnel Python. Desktop Ask remains available.", "error");
 		});
+		const port = configuredPort(pi);
+		if (!port) {
+			logger.info("Away native bridge", { stage:"configuration-unavailable" });
+			ctx.ui.notify("Away native Ask forwarding unavailable: set collab.relayUrl=ws://127.0.0.1:<port>, collab.autoStart=control and ask.timeout=0. Async inbox forwarding does not require Collab.", "warning");
+			return;
+		}
 		try {
 			const next = await startAdapter(port, sessionId, {
 				ready() {
@@ -207,10 +226,11 @@ export default function away(pi: ExtensionAPI): void {
 	pi.on("session_start", (_, ctx) => start(ctx));
 	pi.on("session_switch", (_, ctx) => start(ctx));
 	pi.on("session_branch", (_, ctx) => start(ctx));
+	pi.on("session_tree", (_, ctx) => start(ctx));
+	pi.on("session_clear", (_, ctx) => start(ctx));
 	pi.on("session_before_switch", (_, ctx) => { if (owns(ctx)) discard(); });
 	pi.on("session_before_branch", (_, ctx) => { if (owns(ctx)) discard(); });
 	pi.on("session_before_tree", (_, ctx) => { if (owns(ctx)) discard(); });
-	pi.on("session_clear", (_, ctx) => { if (owns(ctx)) discard(); });
 	pi.on("agent_end", (_, ctx) => { if (owns(ctx)) discard(); });
 	pi.on("session_shutdown", (_, ctx) => { if (ctx.agent.kind === "main") return stop(); });
 

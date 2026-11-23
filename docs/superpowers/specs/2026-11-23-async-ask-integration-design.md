@@ -2,7 +2,7 @@
 
 Issue: https://git.example.invalid/neko/omp-away/issues/2
 
-Status: behavioral scope approved; detailed design awaiting review. No implementation changes yet.
+Status: design and implementation plan approved; implemented and verified. See the implementation plan for observed checks and rollout boundaries.
 
 ## Goal and scope
 
@@ -16,7 +16,7 @@ Changes belong in `omp-async-ask` and `omp-away/plugin`. No OMP-core, Android, p
 
 - Async Ask's `src/index.ts` creates a session-generation `QuestionStore` and `AnswerDelivery`. The store restores the active branch journal, validates submissions, and publishes synchronous change notifications. `AnswerDelivery` sends a user-attributed aside through the host's public API.
 - Async Ask's questions survive an agent turn ending. Answered and withdrawn questions are terminal. A submitted answer can remain saved with failed or uncertain delivery; explicit resend is a separate desktop action.
-- Away's `src/index.ts` currently intercepts only the built-in `ask` tool and obtains a native Collab submission capability. It does not observe Async Ask's store.
+- Away's native path intercepts only the built-in `ask` tool and obtains a native Collab submission capability. The separate optional adapter observes Async Ask's source, never its mutable store.
 - Away's coordinator, voice confirmation, authenticated transport and shared routing already accept a request-scoped submission function. Reuse these layers rather than turning async questions into blocking native Ask calls.
 - Installed OMP exposes `pi.events.on/emit` for trusted in-process extensions. Event emission is not a request/reply acknowledgement: the bridge must use an explicit callback to attach a source, with no polling or assumption that an async listener has finished when `emit` returns.
 
@@ -43,7 +43,7 @@ A source is stable for one Async Ask owner generation and provides:
 
 - `version: 1`, `sessionId`, and an abort signal;
 - `subscribe(listener) -> unsubscribe`, delivering an initial complete pending snapshot and subsequent complete snapshots;
-- immutable question offers containing canonical question ID, originating tool-call ID, title, original HTML, blocked-work description, creation timestamp, and a request-bound `submitConfirmed(values)` function.
+- immutable question offers containing canonical question ID, fresh opaque transport request ID, originating tool-call ID, title, original HTML, blocked-work description, creation timestamp, and a request-bound `submitConfirmed(values)` function.
 
 The source does not expose its mutable store, general `sendMessage`, resend, create, withdraw, or arbitrary submission functions. Every submission closure rechecks both the captured owner identity and current session identity. Session ID alone is insufficient when navigating history within the same session.
 
@@ -51,7 +51,7 @@ Listener registration precedes the initial snapshot. Notifications and removal a
 
 ### Away source adapter
 
-Maintain a separate async-offer map, not entries in the native Collab `calls` map. For each canonical pending question, create one opaque phone request ID and a generation-specific deduplication key. Preserve the original tool-call ID as metadata. Extend Away's internal offer contract with an optional deduplication key; native callers retain their existing tool-call deduplication behavior.
+Maintain a separate async-offer map, not entries in the native Collab `calls` map. Async Ask creates each opaque phone request ID and owns one-shot offer retirement. Away uses that ID with a generation-specific deduplication key, preserving the original tool-call ID as metadata. Extend Away's internal offer contract with an optional deduplication key; native callers retain their existing tool-call deduplication behavior.
 
 The adapter reconciles snapshots: add newly eligible questions, retain existing offers without reoffering, and synchronously call `admin.end` for removals. Duplicate announcements and unrelated store/delivery changes must not create duplicate phone entries or rings. Closing a source unsubscribes it and retires all of its offers before another source is attached. A new owner generation creates fresh phone capabilities even when canonical question IDs are restored.
 
@@ -93,7 +93,7 @@ The source maps that canonical result into these bridge outcomes:
 | `stale` | Owner changed, question ceased to be pending, or another submission won | No write or dispatch; retire the obsolete offer |
 | `invalid` | Canonical validation rejected values before saving | No write or dispatch; retire this phone offer and leave the canonical question pending for local completion |
 
-Only the captured invocation's receipt may produce `accepted` or `saved`. If an exception leaves persistence uncertain, do not manufacture an answer ID or success. Retire the phone offer, report the uncertainty locally and require journal reconciliation/local review rather than retrying from the phone. Retain the adapter's deduplication record for rejected or uncertain attempts until that source generation ends, so an unrelated pending snapshot cannot automatically recreate a phone retry.
+Only the captured invocation's receipt may produce `accepted` or `saved`. If an exception leaves persistence uncertain, do not manufacture an answer ID or success. Async Ask removes attempted offers from its source snapshot, including rejected/uncertain attempts that leave the canonical question pending. Away retires its transport offer, reports uncertainty locally and requires journal reconciliation/local review rather than retrying from the phone. An unrelated snapshot cannot automatically recreate an attempted offer.
 
 The transition from pending to answered occurs before store observers run. A desktop/phone race therefore permits only the winner to create an answer in the live store; the loser sees a terminal question. Retire the phone offer synchronously on that transition, including during the phone's own submission. Retiring the call must not abort the already-started canonical dispatch or erase its captured result. Conversely, an observer that switches sessions must prevent dispatch into the successor session.
 
@@ -144,4 +144,4 @@ Any phone acceptance uses only the previously authorized development phone and r
 
 Commit changes separately in their owning repositories after verification; do not push without authorization. Users reload/restart the two updated desktop plugins when their work can pause. The already-upgraded shared-routing broker and phone do not need replacement for this design.
 
-Next step is review of this design, followed by an implementation plan. Source inspection established the boundaries above; no runtime tests or integration acceptance have been claimed for this unimplemented feature.
+Implementation and verification are recorded in the approved plan. Production desktops were not restarted; activation remains a user-controlled reload when work can pause.

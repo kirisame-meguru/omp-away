@@ -86,6 +86,26 @@ test('disabled, delayed and immediate routes ring at most once without expiring 
 		f.advance(86_400_000); expect(f.core.list().map(x=>x.requestId)).toEqual(["quiet","late","now"]);
 	} finally {f.core.close()}
 });
+test("restored async fallback uses question creation time rather than attachment time",()=>{
+	const f=fixture(); try {
+		f.advance(25_000);
+		f.core.configure({away:false,delayMs:30_000});
+		f.core.offer({...f.ask("restored"),createdAt:100,deduplicationKey:"async:restored"},f.ctx,"project");
+		f.advance(4_999); expect(f.invites).toEqual([]);
+		f.advance(1); expect(f.invites).toEqual(["restored"]);
+	} finally {f.core.close()}
+});
+test("fresh async source keys permit restoration without weakening native tool-call deduplication",()=>{
+	const f=fixture(); try {
+		const original=f.ask("old");
+		expect(f.core.offer({...original,deduplicationKey:"async:old"},f.ctx,"project")).toBe(true);
+		f.core.end("old");
+		expect(f.core.offer({...original,requestId:"restored",deduplicationKey:"async:new"},f.ctx,"project")).toBe(true);
+		expect(f.core.join("old")).toBeUndefined();
+		expect(f.core.offer(f.ask("native"),f.ctx,"project")).toBe(true);
+		expect(f.core.offer({...f.ask("native"),requestId:"native-duplicate"},f.ctx,"project")).toBe(false);
+	} finally {f.core.close()}
+});
 test('local completion cancels invitations and permanently revokes a stale offer',()=>{
 	const f=fixture(); f.core.configure({away:false,delayMs:10}); f.offer("A"); const call=f.core.join("A")!;
 	f.core.end("A"); expect(call.signal.aborted).toBe(true); expect(f.offer("A")).toBe(false); expect(f.core.join("A")).toBeUndefined();
