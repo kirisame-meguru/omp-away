@@ -67,7 +67,7 @@ export class DecisionCoordinator {
 			e.cancelTimer=undefined;
 			if(e.life.signal.aborted || e.rang || e.silenced || e.submitted) return;
 			e.rang=true;
-			const failed=()=>{if(!e.life.signal.aborted) this.#opt.error?.("invite-unavailable");};
+			const failed=()=>{if(!e.life.signal.aborted && !e.silenced && !e.submitted) this.#opt.error?.("invite-unavailable");};
 			try { Promise.resolve(this.#opt.invite(e.item.requestId)).catch(failed); } catch { failed(); }
 		};
 		if(wait===0) ring(); else e.cancelTimer=this.#clock.after(wait,ring);

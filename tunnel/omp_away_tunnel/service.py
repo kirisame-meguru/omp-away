@@ -99,30 +99,49 @@ class Phone:
         self.stream = stream
         self.ref = secrets.token_hex(16)  # Local connection epoch, never selected by relay.
         self.joining = self.joined = None
+        self.ended = None
+        self.draining = False
         self.captions = False
         self.marks = set()
 
     def incoming(self, msg):
+        """Return false only for validated controls from the most recently ended call."""
         kind, rid = msg.get('type'), msg.get('requestId')
         if kind == 'list' and fields(msg, 'type'):
-            return
+            return True
         if not route(rid):
             raise ProtocolError('invalid request')
         if kind == 'join' and (fields(msg, 'type', 'requestId') or
                                (fields(msg, 'type', 'requestId', 'captions') and type(msg['captions']) is bool)):
             if self.joined or self.joining:
                 raise ProtocolError('call already open')
+            # Inbound frames are ordered: a new join fences the previous call's tail.
+            self.ended = None
+            self.draining = False
+            self.marks.clear()
             self.joining = rid
             self.captions = msg.get('captions', False)
-            return
+            return True
         if kind in ('silence', 'hangup') and fields(msg, 'type', 'requestId'):
-            if kind == 'hangup' and rid not in (self.joining, self.joined):
-                raise ProtocolError('wrong call')
-            return
-        if kind == 'played' and fields(msg, 'type', 'requestId', 'mark') and rid == self.joined and marker(msg['mark']) and msg['mark'] in self.marks:
+            if kind == 'hangup':
+                if rid == self.ended:
+                    return False
+                if rid not in (self.joining, self.joined):
+                    raise ProtocolError('wrong call')
+            return True
+        if kind == 'played' and fields(msg, 'type', 'requestId', 'mark') and rid in (self.joined, self.ended) and marker(msg['mark']) and msg['mark'] in self.marks:
             self.marks.remove(msg['mark'])
-            return
+            return rid == self.joined
         raise ProtocolError('invalid phone control')
+
+    def incoming_pcm(self):
+        if self.joined is not None:
+            return True
+        # The desktop can end before the handset receives that message. Discard
+        # already-sent audio without forwarding it to the old or any future owner.
+        if self.draining:
+            return False
+        raise ProtocolError('audio outside call')
 
     def outgoing(self, msg):
         kind, rid = msg.get('type'), msg.get('requestId')
@@ -139,8 +158,9 @@ class Phone:
                 self.joined, self.joining = rid, None
                 return
             if kind == 'ended' and rid in (self.joining, self.joined):
+                self.ended = rid
+                self.draining = self.joined is not None
                 self.joined = self.joining = None
-                self.marks.clear()
                 self.captions = False
                 return
         elif kind == 'transcript' and fields(msg, 'type', 'requestId', 'role', 'text', 'final'):
@@ -221,13 +241,12 @@ class Service:
                 while True:
                     kind, data = await stream.read_frame()
                     if kind == 2:
-                        if phone.joined is None:
-                            raise ProtocolError('audio outside call')
-                        await self.ipc.media(device, phone.ref, data)
+                        if phone.incoming_pcm():
+                            await self.ipc.media(device, phone.ref, data)
                     else:
                         message = object_json(data)
-                        phone.incoming(message)
-                        await self.ipc.event(event='message', deviceId=device, ref=phone.ref, message=message)
+                        if phone.incoming(message):
+                            await self.ipc.event(event='message', deviceId=device, ref=phone.ref, message=message)
         except EOFError:
             pass  # A normal phone/background close still emits 'lost' below.
         except (ValueError, SSL.Error):

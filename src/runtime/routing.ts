@@ -43,7 +43,8 @@ export async function connectRuntime(settings:Settings, report:(code:string)=>vo
 		error:report,
 		async invite(id) {
 			const audience=requests.get(id)?.audience;
-			if (audience && !closed) await Promise.all([...audience].map(device=>gateway!.ring(device,id)));
+			// A stale secondary phone must not turn an accepted invitation into total failure.
+			if (audience?.size && !closed) await Promise.any(Array.from(audience,async device=>gateway!.ring(device,id)));
 		},
 		changed() {for (const device of online) inbox(device)},
 	});
