@@ -39,7 +39,12 @@ class MicrophoneTrack(AudioStreamTrack):
         if self.next_time is not None:
             await asyncio.sleep(max(0, self.next_time - now))
         now = loop.time()
-        self.next_time = now + .020
+        # Preserve the sample clock across timer oversleep (notably Windows'
+        # coarse wakeups). Rebase only after a missed frame to avoid catchup bursts.
+        if self.next_time is None or now - self.next_time >= .020:
+            self.next_time = now + .020
+        else:
+            self.next_time += .020
         while self.frames and now - self.frames[0][0] > .200:
             self.frames.popleft()
         frame = AudioFrame(format='s16', layout='mono', samples=SAMPLES)

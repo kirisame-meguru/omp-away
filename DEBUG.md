@@ -186,6 +186,21 @@ Two preceding synthetic-audio probes did not complete readback: one was interrup
 
 Three independent stock `omp.exe` desktops were observed with their proxy connections attached to the same existing broker. No production desktop or broker was restarted for this check. The isolated two-desktop native Ask checks and the 23 tunnel tests also passed.
 
-Plugin verification passed 166 tests / 758 assertions and `bun check`. The final six-scenario acoustic run (`away-dialogues-_d9jjp8q` under the local temp directory) announced Tea, Coffee and Other/custom input in every opening. Five dialogues completed exactly one accepted native submission with the expected values and passed hardware/caption instrumentation. The revision scenario stopped before its correction: the initial “Coffee” produced no caller transcript on either observed transport channel, so no answer was submitted. Earlier runs also exposed intermittent short-reply transcription loss; this remains unresolved, not a successful correction test. Qualified affirmative and stale-confirmation scenarios passed in the final run.
+Plugin verification passed 166 tests / 758 assertions and `bun check`. The six-scenario acoustic run (`away-dialogues-_d9jjp8q` under the local temp directory) announced Tea, Coffee and Other/custom input in every opening. Five dialogues completed exactly one accepted native submission with the expected values and passed hardware/caption instrumentation. The revision scenario stopped before its correction: the initial “Coffee” produced no caller transcript on either observed transport channel, so no answer was submitted. Earlier runs also exposed intermittent short-reply transcription loss; its cause was unresolved at this stage, and this was not a successful correction test. Qualified affirmative and stale-confirmation scenarios passed in that run.
 
 Commentary-channel context removed the invented extra alternative suggestions in the observed follow-up calls. Readbacks were short, but occasional unscripted opening acknowledgements remained. These results do not establish perfect recognition or exact model narration. Dev-phone display settings remained `15` / `3600000`, and voice-call volume remained `4`.
+
+### Microphone sample-clock follow-up
+
+The media helper scheduled each microphone frame 20 ms after its actual wakeup. On this Windows host, coarse timer wakeups accumulated into a slower consumer clock, overflowing the bounded microphone queue and dropping pieces of speech before Opus encoding. The fix advances the scheduled sample deadline instead; a scheduler stall of a full frame still rebases the deadline to prevent catchup bursts. It adds no model, playback gate or confirmation exception.
+
+A five-second synthetic sequence probe used the real media helper and 250 uniquely identifiable 20 ms input packets, without recording speech:
+
+| Measurement | Previous pacing | Deadline-based pacing |
+|---|---:|---:|
+| Mean frame interval (ms) | 31.15 | 20.24 |
+| Skipped packets before the last received packet | 81 | 0 |
+
+Packets still queued at the probe deadline are not counted as skipped. All 17 media tests passed, including deterministic coarse-timer packet continuity, no catchup burst after a long stall, and actual bidirectional Opus peers. The 166 plugin tests and `bun check` also passed.
+
+The post-fix real-phone run (`away-dialogues-gd3j5edo` under the local temp directory) passed all six scenarios without retries: direct choice, options, alternatives, revision, qualified affirmative and stale confirmation. Each opening included the choices; all caller turns reached decision handling, and each dialogue completed exactly one accepted native submission with the expected values and passing hardware/caption instrumentation. The stale affirmative remained ignored, and the qualified affirmative required the corrected readback and a fresh Yes. This helper-only fix is loaded when the next voice call spawns its media process; it requires no phone reinstall or desktop restart.
