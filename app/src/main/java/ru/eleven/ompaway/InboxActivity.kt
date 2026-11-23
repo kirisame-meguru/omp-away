@@ -14,13 +14,17 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
-import android.view.WindowManager
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.ToggleButton
+import android.window.OnBackInvokedDispatcher
 import com.google.zxing.integration.android.IntentIntegrator
 import com.journeyapps.barcodescanner.CaptureActivity
 import java.text.DateFormat
@@ -31,7 +35,7 @@ class InboxActivity : Activity() {
     private lateinit var scroll: ScrollView
     private lateinit var column: LinearLayout
     private lateinit var root: FrameLayout
-    private var callScreen: CallScreen? = null
+    private lateinit var callScreen: CallScreen
     private var callSource: CallVisualSource? = null
     private var selectedId: String? = null
     private var incomingPair: String? = null
@@ -39,74 +43,186 @@ class InboxActivity : Activity() {
     private var emojiDialog: AlertDialog? = null
     private var shownEmoji: String? = null
     private var resumed = false
+    private lateinit var screenPreferences: ScreenPreferences
+    private var settingsDialog: AlertDialog? = null
+    private var panelOpen = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        scroll = ScrollView(this).apply { isFillViewport = true }
-        column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(24)) }
+        screenPreferences = ScreenPreferences(this)
+        screenPreferences.apply(window)
+        panelOpen = savedInstanceState?.getBoolean("panelOpen") ?: false
+        scroll = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(0xff181824.toInt())
+            visibility = View.GONE
+        }
+        column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(8), dp(24), dp(24)) }
         scroll.addView(column)
-        root = FrameLayout(this).apply { addView(scroll, FrameLayout.LayoutParams(-1, -1)) }
+        callScreen = CallScreen(this, null, app::setSpeakerEnabled, app::hangup, ::openInbox, ::showSettings)
+        root = FrameLayout(this).apply {
+            addView(callScreen, FrameLayout.LayoutParams(-1, -1))
+            addView(scroll, FrameLayout.LayoutParams(-1, -1))
+        }
         setContentView(root)
+        if (Build.VERSION.SDK_INT >= 30) window.insetsController?.setSystemBarsAppearance(0,
+            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
+        else @Suppress("DEPRECATION") window.decorView.systemUiVisibility = 0
         if (Build.VERSION.SDK_INT >= 30) scroll.setOnApplyWindowInsetsListener { view, insets ->
             val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
+        } else scroll.fitsSystemWindows = true
+        if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT
+        ) {
+            if (panelOpen) showInboxPanel(false)
+            else if (isTaskRoot) moveTaskToBack(true) else finish()
         }
         takeInvite(intent)
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); takeInvite(intent); if (resumed) render() }
     private fun takeInvite(intent: Intent) {
-        if (intent.action == Invites.OPEN) selectedId = intent.getStringExtra(Invites.ID)?.takeIf(::validId)
+        if (intent.action == Invites.OPEN) {
+            selectedId = intent.getStringExtra(Invites.ID)?.takeIf(::validId)
+            panelOpen = true
+        }
     }
 
     override fun onResume() {
         super.onResume(); resumed = true
-        if (app.callId == null) clearCallScreen()
+        applyScreenPrivacy()
+        if (app.callId == null) { callScreen.bind(null); callSource = null }
+        callScreen.resume()
         app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
     }
     override fun onPause() {
         resumed = false
-        callScreen?.pause()
+        callScreen.pause()
+        settingsDialog?.dismiss()
         app.background(); dismissEmoji()
         super.onPause()
     }
 
     override fun onDestroy() {
-        clearCallScreen()
+        callScreen.dispose()
+        settingsDialog?.dismiss()
         super.onDestroy()
     }
 
-    private fun clearCallScreen() {
-        callScreen?.let { it.dispose(); root.removeView(it) }
-        callScreen = null; callSource = null
-        scroll.visibility = View.VISIBLE
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("panelOpen", panelOpen)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun openInbox() {
+        panelOpen = true
+        render()
+    }
+    private fun showInboxPanel(open: Boolean) {
+        panelOpen = open
+        scroll.visibility = if (open) View.VISIBLE else View.GONE
+        // Retain the engine, but do not render beneath an opaque inbox.
+        if (resumed) { if (open) callScreen.pause() else callScreen.resume() }
+    }
+
+    // API 29–32 only; API 33+ uses the OnBackInvokedDispatcher registered in onCreate.
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Deprecated("Platform back callback")
+    override fun onBackPressed() {
+        if (panelOpen) showInboxPanel(false)
+        else super.onBackPressed()
+    }
+
+    private fun applyScreenPrivacy() {
+        screenPreferences.apply(window)
+        screenPreferences.apply(emojiDialog?.window)
+        screenPreferences.apply(settingsDialog?.window)
+    }
+
+    private fun showSettings() {
+        if (settingsDialog != null) return
+        val settings = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+        fun toggle(label: String, checked: Boolean, changed: (Boolean) -> Unit) {
+            settings.addView(Switch(this).apply {
+                text = label; textSize = 16f; setTextColor(0xfff4eee4.toInt())
+                setPadding(0, dp(12), 0, dp(12))
+                isChecked = checked
+                setOnCheckedChangeListener { _, enabled -> changed(enabled) }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+        toggle("Block screenshots", screenPreferences.blockScreenshots) {
+            screenPreferences.blockScreenshots = it
+            applyScreenPrivacy()
+        }
+        settings.addView(TextView(this).apply {
+            text = "Turn off to allow screenshots and screen recording, including captions and pairing details."
+            textSize = 13f; setTextColor(0xffc5bfcc.toInt())
+        })
+        toggle("Reduced motion", screenPreferences.reducedMotion) {
+            screenPreferences.reducedMotion = it; callScreen.refreshAppearance()
+        }
+        toggle("Reference backdrop", screenPreferences.lightBackdrop) {
+            screenPreferences.lightBackdrop = it; callScreen.refreshAppearance()
+        }
+        val quality = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+        val choices = arrayOf("Auto", "GPU", "2D")
+        val ids = IntArray(choices.size)
+        for (index in choices.indices) {
+            val choice = RadioButton(this).apply {
+                id = View.generateViewId(); text = choices[index]
+                setTextColor(0xfff4eee4.toInt())
+            }
+            ids[index] = choice.id
+            quality.addView(choice, RadioGroup.LayoutParams(0, -2, 1f))
+        }
+        quality.check(ids[screenPreferences.quality])
+        quality.setOnCheckedChangeListener { _, id ->
+            val selected = ids.indexOf(id)
+            if (selected >= 0) { screenPreferences.quality = selected; callScreen.refreshAppearance() }
+        }
+        settings.addView(quality)
+        settingsDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Radiance settings")
+            .setView(ScrollView(this).apply { addView(settings) })
+            .setPositiveButton("Done", null)
+            .create().also { dialog ->
+                dialog.setOnDismissListener { settingsDialog = null }
+                screenPreferences.apply(dialog.window)
+                dialog.show()
+            }
+        applyScreenPrivacy()
     }
     private fun render() {
         if (!resumed || isFinishing) return
         val visual = app.callVisual
         if (visual != null) {
             if (callSource !== visual) {
-                clearCallScreen()
-                val screen = CallScreen(this, visual, app::setSpeakerEnabled, app::hangup)
-                callScreen = screen; callSource = visual
-                root.addView(screen, FrameLayout.LayoutParams(-1, -1))
-                scroll.visibility = View.GONE
-                screen.resume()
+                callScreen.bind(visual)
+                callSource = visual
+                showInboxPanel(false)
             }
-            callScreen?.setSpeaker(app.speakerEnabled)
+            callScreen.setSpeaker(app.speakerEnabled)
             renderVoice()
             return
         }
-        callScreen?.let { screen ->
-            screen.dismiss {
-                if (callScreen === screen) { clearCallScreen(); render() }
+        if (callSource != null) {
+            callSource = null
+            callScreen.dismiss {
+                callScreen.bind(null)
+                render()
             }
             return
         }
+        callScreen.home(app.paired, app.store.state.pending.size, app.status)
+        showInboxPanel(panelOpen)
         val y = scroll.scrollY
         column.removeAllViews()
+        button("Back to Radiance") { showInboxPanel(false) }
         text("Away inbox", 28, bold = true)
         text(app.status, 16)
         notice?.let { text(it, 14) }
@@ -114,6 +230,8 @@ class InboxActivity : Activity() {
         column.addView(ToggleButton(this).apply {
             textOn = "Speaker: on"; textOff = "Speaker: off"; isAllCaps = false
             isChecked = app.speakerEnabled
+            setTextColor(0xfff4eee4.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xff29293b.toInt())
             setOnCheckedChangeListener { _, enabled -> if (resumed) app.setSpeakerEnabled(enabled) }
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         if (!Invites.allowed(this)) {
@@ -172,17 +290,18 @@ class InboxActivity : Activity() {
         if (code == null) dismissEmoji()
         else if (shownEmoji != code) {
             dismissEmoji(); shownEmoji = code
-            emojiDialog = AlertDialog.Builder(this).setTitle("Verify your desktop")
+            emojiDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert).setTitle("Verify your desktop")
                 .setMessage("Compare all 12 emoji, in order, with the code on the desktop:\n\n$code\n\nOnly approve if they match exactly.")
                 .setPositiveButton("Codes match") { _, _ -> app.confirm(code, true) }
                 .setNegativeButton("Do not match") { _, _ -> app.confirm(code, false) }
                 .setOnCancelListener { app.confirm(code, false) }.show()
+            screenPreferences.apply(emojiDialog?.window)
         }
     }
 
     private fun renderVoice() {
         if (!resumed || app.callId == null) return
-        callScreen?.captions(app.callerCaption, app.callerCaptionFinal,
+        callScreen.captions(app.callerCaption, app.callerCaptionFinal,
             app.assistantCaption, app.assistantCaptionFinal)
     }
 
@@ -221,12 +340,15 @@ class InboxActivity : Activity() {
     private fun text(value: String, sp: Int, bold: Boolean = false): TextView =
         TextView(this).apply {
             text = value; textSize = sp.toFloat(); setPadding(0, dp(if (bold) 14 else 5), 0, dp(3))
+            setTextColor(if (bold) 0xfff4eee4.toInt() else 0xffc5bfcc.toInt())
             if (bold) setTypeface(typeface, Typeface.BOLD)
             textDirection = View.TEXT_DIRECTION_FIRST_STRONG
         }.also { column.addView(it) }
     private fun button(label: String, action: () -> Unit) {
         column.addView(Button(this).apply {
             text = label; isAllCaps = false; gravity = Gravity.CENTER; setOnClickListener { if (resumed) action() }
+            setTextColor(0xfff4eee4.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xff29293b.toInt())
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
     }
     private companion object { const val MIC = 1; const val NOTIFICATIONS = 2 }
@@ -234,7 +356,11 @@ class InboxActivity : Activity() {
 
 class PairScanActivity : CaptureActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        ScreenPreferences(this).apply(window)
         super.onCreate(savedInstanceState)
+    }
+    override fun onResume() {
+        super.onResume()
+        ScreenPreferences(this).apply(window)
     }
 }

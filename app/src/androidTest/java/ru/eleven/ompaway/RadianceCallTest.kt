@@ -100,7 +100,7 @@ class RadianceCallTest {
         }
     }
 
-    @Test fun productionActivityRetainsTheCallScreenAndHangupReturnsToInbox() {
+    @Test fun productionActivityRetainsRadianceFromHomeThroughCallAndHangup() {
         check(BuildConfig.ISOLATED_INTEGRATION)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -108,28 +108,33 @@ class RadianceCallTest {
         val call = CallService(context, "ui-session-fixture", {}, {}, {})
         val callField = Gateway::class.java.getDeclaredField("call").apply { isAccessible = true }
         // Test-only session injection: no pairing credentials, transport or production inbox.
-        instrumentation.runOnMainSync {
-            check(app.callId == null)
-            callField.set(app, call)
-        }
         val activity = instrumentation.startActivitySync(Intent(context, InboxActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as InboxActivity
         val previousSpeaker = app.speakerEnabled
+        lateinit var screen: CallScreen
+        lateinit var renderer: View
         try {
             await(3000) { descendants(activity.window.decorView).any { it is CallScreen } }
             instrumentation.runOnMainSync {
-                val screen = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
-                val renderer = screen.getChildAt(0)
+                screen = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
+                renderer = screen.getChildAt(0)
+                check(app.callId == null)
+                callField.set(app, call)
                 app.setSpeakerEnabled(!previousSpeaker)
                 assertSame(screen, descendants(activity.window.decorView).filterIsInstance<CallScreen>().single())
                 assertSame(renderer, screen.getChildAt(0))
-                assertTrue(activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
+                assertEquals(ScreenPreferences(context).blockScreenshots,
+                    activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
                 descendants(screen).filterIsInstance<Button>().single { it.text.toString() == "Hang up" }.performClick()
                 assertNull(app.callVisual)
                 assertFalse(call.active)
             }
-            await(3000) { texts(activity.window.decorView).contains("Away inbox") &&
-                descendants(activity.window.decorView).none { it is CallScreen } }
+            await(3000) { texts(screen).contains("Your desktop, in reach.") }
+            instrumentation.runOnMainSync {
+                assertSame(screen, descendants(activity.window.decorView).filterIsInstance<CallScreen>().single())
+                assertSame(renderer, screen.getChildAt(0))
+                assertEquals(0f, screen.energy(0f, 1), 0f)
+            }
         } finally {
             instrumentation.runOnMainSync {
                 app.hangup(); call.close(); app.setSpeakerEnabled(previousSpeaker); activity.finish()
