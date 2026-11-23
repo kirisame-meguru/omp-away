@@ -43,7 +43,7 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 		const replyText=opt.purpose==="away-extract" ? blueFields : opt.purpose==="away-consult" ? await consultAnswer() : "Which lane should we use?";
 		return {assistantMessage:{stopReason:"stop"}, replyText};
 	} } as unknown as AskContext;
-	const offer = (id:string) => runtime.offer({requestId:id,toolCallId:`tool-${id}`,html:'<form><label for="l">Private lane?</label><select name="lane" id="l"><option value="blue">Blue</option><option value="red">Red</option></select></form>', async submitConfirmed(id,values){submitted.push([id,values]);return "accepted"} } satisfies PendingAsk,ctx);
+	const offer = (id:string,html='<form><label for="l">Private lane?</label><select name="lane" id="l"><option value="blue">Blue</option><option value="red">Red</option></select></form>') => runtime.offer({requestId:id,toolCallId:`tool-${id}`,html, async submitConfirmed(id,values){submitted.push([id,values]);return "accepted"} } satisfies PendingAsk,ctx);
 	const join = (dev:string,id:string) => wire.onMessage(dev,{type:"join",requestId:id});
 	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations,sideCalls};
 }
@@ -143,6 +143,30 @@ test("bound informational speech consults the coding session without a model del
 		await tick(); expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
 		expect(f.consultations[0].promptText).toContain(question); expect(f.spoken.slice(1)).toEqual([{text:"The private handover is silver maple.",instruction:false}]);
 		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test.each([
+	"Ask the main model to come up with some other two drinks",
+	"Could you please ask the main model for two other drinks?",
+	"Please suggest two alternative drinks.",
+])("informational request answers the caller without approving the previous draft: %s",async request=>{
+	const answer="Water and orange juice are two other ideas; the form still lists Tea and Coffee.";
+	const f=await fixture(async()=>answer);
+	try {
+		f.wire.onConnect!("phone");
+		f.offer("A",'<form><fieldset><legend>Which drink would you like?</legend><label><input type="radio" name="drink" value="tea">Tea</label><label><input type="radio" name="drink" value="coffee">Coffee</label></fieldset></form>');
+		await f.join("phone","A"); const v=f.voices[0];
+		v.onSpeechStarted("proposal"); v.onTranscript("user","Coffee","proposal"); await tick();
+		v.onSpeechStarted("request"); v.onTranscript("user",request,"request"); await tick();
+		expect(f.spoken.at(-1)).toEqual({text:answer,instruction:false});
+		expect(f.sideCalls).toEqual(["away-consult"]);
+		expect(f.consultations[0].tools).toBe(false);
+		expect(f.consultations[0].promptText).toContain(request);
+		v.onSpeechStarted("yes"); v.onTranscript("user","Yes","yes"); await tick();
+		expect(f.submitted).toEqual([]);
+		v.onSpeechStarted("fresh"); v.onTranscript("user","Coffee","fresh"); await tick();
+		v.onSpeechStarted("confirm"); v.onTranscript("user","Yes","confirm"); await tick();
+		expect(f.submitted).toEqual([["A",{drink:"coffee"}]]);
 	} finally {await f.runtime.close()}
 });
 async function realVoiceFixture(stateDir=""){

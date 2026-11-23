@@ -21,12 +21,12 @@ interface Joined {
 	log?:CallLog; operations:number;
 }
 
-// A routing grammar for a single English informational question, not an authorization
-// predicate. Even an adversarial question reaches only the tool-free decision side turn.
-function informationalQuestion(text:string):boolean {
+// A fast path for English informational requests, not an authorization predicate.
+// Even an adversarial request reaches only the tool-free decision side turn.
+function informationalRequest(text:string):boolean {
 	const q=text.trim();
 	if (q.length>1000 || /[\r\n;]/u.test(q)) return false;
-	return /^(?:(?:what|why|how|which|when|where|who|whose|is|are|was|were|does|did)\b|do (?:we|I|these|those|the)\b|(?:can|could|would) you (?:please )?(?:explain|clarify|describe|compare|tell me|remind me)\b)[^?!.]+[?.]?$/iu.test(q);
+	return /^(?:(?:what|why|how|which|when|where|who|whose|is|are|was|were|does|did)\b|do (?:we|I|these|those|the)\b|(?:please )?(?:(?:can|could|would) you (?:please )?)?(?:explain|clarify|describe|compare|tell me|remind me|suggest|recommend|(?:ask|consult|check with) (?:the )?(?:main (?:model|agent)|coding session))\b)[^?!.]+[?.]?$/iu.test(q);
 }
 
 /** One host generation. Only the inner TLS endpoint can introduce a paired device.
@@ -106,7 +106,7 @@ export async function connectRuntime(settings:Settings, initial:Preferences, rep
 					// A duplicate final cannot cancel a live consultation.
 					if (onset!==utterance) {call.log?.event("caller-stale");return}
 					onset=undefined;
-					if (informationalQuestion(text)) {
+					if (informationalRequest(text)) {
 						const turn=revision;
 						++call.operations; call.log?.event("consult-started");
 						// Consultation invalidates confirmation and cannot submit.
