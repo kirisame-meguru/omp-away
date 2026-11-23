@@ -68,6 +68,12 @@ class LocalHost:
 
 
 class RelayTest(unittest.IsolatedAsyncioTestCase):
+    def make_ipc(self, init):
+        return LocalHost()
+
+    async def run_service(self):
+        await self.service.run()
+
     async def asyncSetUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -113,9 +119,10 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.server = TestServer(app, scheme='https', host='127.0.0.1')
         await self.server.start_server(ssl=server_tls, access_log=None)
         self.client = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=trust), trace_configs=[relay_trace()])
-        self.host = LocalHost()
-        self.service = Service({'url':str(self.server.make_url('/')), 'desktopToken':self.desktop_token, 'stateDir':str(self.root / 'desktop')}, self.host, self.client)
-        self.worker = asyncio.create_task(self.service.run())
+        init = {'op': 'start', 'url': str(self.server.make_url('/')), 'desktopToken': self.desktop_token, 'stateDir': str(self.root / 'desktop')}
+        self.host = self.make_ipc(init)
+        self.service = Service(init, self.host, self.client)
+        self.worker = asyncio.create_task(self.run_service())
         await self.host.expect('ready')
 
     async def asyncTearDown(self):
@@ -182,7 +189,7 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.host.expect('message'))['message'], {'type':'list'})
         sentinel = 'secret-question-' + secrets.token_hex(16)
         msg = {'type':'inbox','items':[{'requestId':'request_1','project':'private','question':sentinel,'createdAt':123}]}
-        self.assertFalse((await self.host.command('control', deviceId='phone_1', ref='obsolete', message=msg))['ok'])
+        self.assertFalse((await self.host.command('control', deviceId='phone_1', ref='0'*32, message=msg))['ok'])
         self.assertTrue((await self.host.command('control', deviceId='phone_1', ref=connected['ref'], message=msg))['ok'])
         self.assertEqual(json.loads((await phone.read_frame())[1]), msg)
         self.assertTrue((await self.host.command('ring', deviceId='phone_1', requestId='request_1'))['ok'])
@@ -197,7 +204,7 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         pcm = secrets.token_bytes(960)
         await phone.send_frame(2, pcm)
         self.assertEqual(await self.host.expect('pcm'), {'event':'pcm', **dest, 'pcm':pcm})
-        self.assertFalse((await self.host.command('pcm', deviceId='phone_1', ref='obsolete', pcm=pcm))['ok'])
+        self.assertFalse((await self.host.command('pcm', deviceId='phone_1', ref='0'*32, pcm=pcm))['ok'])
         self.assertTrue((await self.host.command('pcm', **dest, pcm=pcm))['ok'])
         self.assertEqual(await phone.read_frame(), (2, pcm))
         self.assertNotIn(pcm[:32], capture)

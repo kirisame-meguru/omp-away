@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import secrets
 import time
+import sys
 from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
@@ -11,6 +12,7 @@ from OpenSSL import SSL
 from .identity import IdentityStore, ROUTE, digest_bytes
 from .ipc import Stdio
 from .transport import ProtocolError, SecureStream, object_json, server_context
+from .broker import Broker, proxy
 
 
 EMOJI = '🐶🐱🦊🐻🐼🐸🐵🐯🦁🐷🐨🐰🐙🐧🐳🐢'
@@ -363,9 +365,15 @@ async def run():
         init = await ipc.read()
         if not fields(init, 'op', 'url', 'desktopToken', 'stateDir') or init['op'] != 'start':
             raise ProtocolError('invalid startup')
-        async with aiohttp.ClientSession(trace_configs=[relay_trace()], trust_env=False, auto_decompress=False,
-                                         timeout=aiohttp.ClientTimeout(total=15), cookie_jar=aiohttp.DummyCookieJar()) as http:
-            await Service(init, ipc, http).run()
+        if sys.argv[1:] == ['--broker']:
+            async with aiohttp.ClientSession(trace_configs=[relay_trace()], trust_env=False, auto_decompress=False,
+                                             timeout=aiohttp.ClientTimeout(total=15), cookie_jar=aiohttp.DummyCookieJar()) as http:
+                broker = Broker(init)
+                await broker.run(Service(init, broker, http))
+        elif not sys.argv[1:]:
+            await proxy(ipc, init)
+        else:
+            raise ProtocolError('invalid helper mode')
     except EOFError:
         pass
     except PermissionError:

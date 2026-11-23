@@ -37,6 +37,16 @@ async function until(predicate: () => boolean) {
   while (!predicate()) await once(events, 'change');
 }
 
+test('an occupied configured port gets an independent loopback adapter without taking over its owner',async()=>{
+  const owner=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('existing owner')});
+  cleanup.push(()=>owner.stop(true));
+  const adapter=await startAdapter(owner.port!,session,{request(){},end(){},lost(){}});
+  cleanup.push(()=>adapter.close());
+  expect(adapter.port).not.toBe(owner.port);
+  expect(await (await fetch(`http://127.0.0.1:${owner.port}/`)).text()).toBe('existing owner');
+  expect((await fetch(`http://127.0.0.1:${adapter.port}/`)).status).toBe(404);
+});
+
 async function fixture() {
   const requests: CollabUiRequest[] = [], ended: number[] = [], problems: string[] = [];
   let lost = 0, ready = 0;

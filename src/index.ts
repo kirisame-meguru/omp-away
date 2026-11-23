@@ -175,8 +175,10 @@ export default function away(pi: ExtensionAPI): void {
 					if (call?.firstTicket === reqId && !call.submitting) finish(activeId);
 				},
 			});
-			if (epoch === generation) adapter = next;
-			else await next.close();
+			if (epoch === generation) {
+				adapter = next;
+				if(next.port!==port) lookup("collab.relayUrl")!.override(pi.pi.settings,`ws://127.0.0.1:${next.port}`);
+			} else await next.close();
 		} catch {
 			logger.info("Away native bridge", { stage:"adapter-failed" });
 			if (epoch === generation) {

@@ -9,6 +9,22 @@ from .transport import HEADER, PCM_SIZE, ProtocolError, encode, object_json
 IPC_JSON_LIMIT = 131072
 
 
+def frame_size(kind, size):
+    if not (kind == 1 and 0 < size <= IPC_JSON_LIMIT or kind == 2 and PCM_SIZE + 22 <= size <= PCM_SIZE + 149):
+        raise ProtocolError('invalid helper frame')
+
+
+def decode_frame(kind, data):
+    frame_size(kind, len(data))
+    if kind == 1:
+        return object_json(data)
+    seq, n = struct.unpack_from('!IB', data)
+    device = data[5:5+n].decode('ascii')
+    if len(data) != 21 + n + PCM_SIZE or not ROUTE.fullmatch(device):
+        raise ProtocolError('invalid media route')
+    return {'op': 'pcm', 'deviceId': device, 'ref': data[5+n:21+n].hex(), 'id': seq, 'pcm': data[21+n:]}
+
+
 class Stdio:
     def __init__(self):
         if os.name == 'nt':
@@ -17,28 +33,24 @@ class Stdio:
             msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
         self.lock = asyncio.Lock()
 
-    def _read(self):
+    def _read_frame(self):
         header = sys.stdin.buffer.read(5)
         if not header:
             raise EOFError
         if len(header) != 5:
             raise ProtocolError('short header')
         kind, size = HEADER.unpack(header)
-        if not (kind == 1 and 0 < size <= IPC_JSON_LIMIT or kind == 2 and PCM_SIZE + 22 <= size <= PCM_SIZE + 149):
-            raise ProtocolError('invalid helper frame')
+        frame_size(kind, size)
         data = sys.stdin.buffer.read(size)
         if len(data) != size:
             raise ProtocolError('short helper frame')
-        if kind == 1:
-            return object_json(data)
-        seq, n = struct.unpack_from('!IB', data)
-        device = data[5:5+n].decode('ascii')
-        if len(data) != 21 + n + PCM_SIZE or not ROUTE.fullmatch(device):
-            raise ProtocolError('invalid media route')
-        return {'op': 'pcm', 'deviceId': device, 'ref': data[5+n:21+n].hex(), 'id': seq, 'pcm': data[21+n:]}
+        return kind, data
+
+    async def read_frame(self):
+        return await asyncio.to_thread(self._read_frame)
 
     async def read(self):
-        return await asyncio.to_thread(self._read)
+        return decode_frame(*(await self.read_frame()))
 
     def _write(self, kind, data):
         sys.stdout.buffer.write(HEADER.pack(kind, len(data)) + data)

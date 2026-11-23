@@ -100,8 +100,8 @@ def private_directory(path):
 
 
 @contextmanager
-def locked(directory):
-    path = directory / 'registry.lock'
+def locked(directory, name='registry.lock'):
+    path = directory / name
     fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, 'r+b') as file:
         checked_path(path, directory=False)
@@ -112,6 +112,34 @@ def locked(directory):
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield  # Closing the handle releases the OS lock, including on process death.
+
+
+def read_private_json(path, limit=1024 * 1024):
+    checked_path(path, directory=False)
+    with path.open('rb') as file:
+        raw = file.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('private file too large')
+    return json.loads(raw)
+
+
+def write_private_json(path, data):
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as file:
+            checked_path(Path(tmp), directory=False)
+            json.dump(data, file, separators=(',', ':'))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, path)
+        if os.name != 'nt':
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 class IdentityStore:
@@ -140,12 +168,7 @@ class IdentityStore:
             self.peers = data['peers']
 
     def _read(self):
-        checked_path(self.path, directory=False)
-        with self.path.open('rb') as f:
-            raw = f.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise ValueError('registry too large')
-        data = json.loads(raw)
+        data = read_private_json(self.path)
         peers = data['peers']
         if data['v'] != 1 or not isinstance(peers, dict) or len(peers) > 1024 or len(set(peers.values())) != len(peers):
             raise ValueError('invalid registry')
@@ -156,22 +179,7 @@ class IdentityStore:
         return data
 
     def _save(self, data):
-        fd, tmp = tempfile.mkstemp(dir=self.directory)
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                checked_path(Path(tmp), directory=False)
-                json.dump(data, f, separators=(',', ':'))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-            if os.name != 'nt':
-                fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        write_private_json(self.path, data)
 
     def register(self, device, pin):
         digest_bytes(pin)

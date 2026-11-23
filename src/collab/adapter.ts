@@ -142,8 +142,8 @@ export async function startAdapter(port: number, sessionId: string, callbacks: C
     }
   }
 
-  const server = Bun.serve<{ roomId: string }>({
-    hostname: '127.0.0.1', port, development: false, reusePort: false,
+  const bind = (listenPort:number) => Bun.serve<{ roomId: string }>({
+    hostname: '127.0.0.1', port:listenPort, development: false, reusePort: false,
     fetch(req, srv) {
       const url = new URL(req.url), match = /^\/r\/([A-Za-z0-9_-]{10,64})$/.exec(url.pathname);
       // No guest upgrades, HTTP control endpoint, browser origins or DNS aliases.
@@ -174,6 +174,12 @@ export async function startAdapter(port: number, sessionId: string, callbacks: C
       close(ws) { if (host && host.ws === ws) drop(host); },
     },
   });
+  let server:Bun.Server<{roomId:string}>;
+  try { server=bind(port); }
+  catch(error) {
+    if (!port || !(error instanceof Error) || !('code' in error) || error.code!=='EADDRINUSE') throw error;
+    server=bind(0);
+  }
   absent = setTimeout(() => {
     if (!closed && !host) callbacks.unavailable?.('No local Collab host connected. Check the loopback relay and control auto-start settings.');
   }, 15000).unref();
