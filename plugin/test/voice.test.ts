@@ -24,6 +24,19 @@ function harness(write?: () => void | Promise<void>, caption?: () => void, log?:
 	}, async message => { sent.push(message) }, error => { failures.push(error) },undefined,log);
 	return {session,sent,starts,transcripts,audio,events,failures,captions};
 }
+test('isolated loud microphone frames do not interrupt work, but sustained speech binds its first frame',()=>{
+	const starts:number[]=[];
+	let now=100;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now);
+	const session=new VoiceSession({onTranscript(){},onSpeechStarted(_id,at){starts.push(at!)},onAudio(){},onInterrupt(){}},async()=>{},()=>{});
+	try {
+		session.input(speech);now+=20;session.input(silence);
+		expect(starts).toHaveLength(0);
+		now=200;
+		for(let i=0;i<3;i++){session.input(speech);now+=20}
+		expect(starts).toEqual([200]);
+	} finally {session.stop();clock.mockRestore()}
+});
 test('local transcript retains both speakers and unfinished turns without sending speech to logger sinks',async()=>{
 	const root=await mkdtemp(join(tmpdir(),'away-speech-log-'));
 	const info=vi.spyOn(logger,'info').mockImplementation(()=>{});

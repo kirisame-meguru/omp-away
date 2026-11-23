@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { gatewayConfigured, openAdmin } from "../src/runtime";
+import { gatewayConfigured, openAdmin, type Admin } from "../src/runtime";
 import type { PendingAsk } from "../src";
 import type { DesktopControl, SecureDesktopOptions } from "../src/secure-channel";
 import type { LiveClientMessage, LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
@@ -15,18 +15,26 @@ import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
 import { awaySuggestions } from "../src/runtime/commands";
 import { parseLiveServerEvent } from "../src/media/protocol";
+import type { Preferences } from "../src/decisions";
 
 const pcm = new Uint8Array(960);
 const blueFields='{"fields":[{"name":"lane","value":"blue","evidence":"Blue"}]}';
-async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice, stateDir="") {
+interface RoutingBus { current:Preferences; clients:Set<SecureDesktopOptions> }
+async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private handover is silver maple.", voice?:typeof openVoice, stateDir="", shared?:RoutingBus) {
 	let wire!: SecureDesktopOptions;
 	const voices: VoiceOptions[] = [], spoken: {text:string;instruction:boolean}[] = [], sideCalls:string[]=[];
 	const audioIn: Uint8Array[] = [], audioOut: string[] = [], rings: string[][] = [], submitted: unknown[] = [];
 	const controls: {device:string; message:DesktopControl}[] = [];
 	const consultations: {tools:boolean;promptText:string;signal:AbortSignal}[]=[];
-	const runtime = await connectRuntime({ url:"https://example.invalid", desktopToken:"", stateDir, confirmPair:async()=>false }, {away:false,delayMs:null}, () => {}, {
-		async gateway(options) { wire = options; return {
-			async devices(){return ["phone"]}, async pair(){throw Error("unexpected enrollment")}, async close(){},
+	const bus=shared ?? {current:{away:false,delayMs:null},clients:new Set<SecureDesktopOptions>()};
+	const runtime = await connectRuntime({ url:"https://example.invalid", desktopToken:"", stateDir, confirmPair:async()=>false }, () => {}, {
+		async gateway(options) { wire = options; bus.clients.add(options); options.onRouting?.(bus.current); return {
+			async routing(patch={}) {
+				bus.current={...bus.current,...patch};
+				for(const client of bus.clients) client.onRouting?.(bus.current);
+				return bus.current;
+			},
+			async devices(){return ["phone"]}, async pair(){throw Error("unexpected enrollment")}, async close(){bus.clients.delete(options)},
 			async ring(dev,id){rings.push([dev,id])},
 			async sendControl(device,message){
 				controls.push({device,message});
@@ -47,6 +55,33 @@ async function fixture(consultAnswer:()=>Promise<string> = async()=>"The private
 	const join = (dev:string,id:string) => wire.onMessage(dev,{type:"join",requestId:id});
 	return {runtime,wire,voices,spoken,controls,rings,audioIn,audioOut,submitted,offer,join,consultations,sideCalls};
 }
+test("shared routing updates pending asks once, new sessions inherit, and active calls keep their authority",async()=>{
+	const bus:RoutingBus={current:{away:false,delayMs:null},clients:new Set()};
+	const a=await fixture(undefined,undefined,"",bus), b=await fixture(undefined,undefined,"",bus);
+	let c:typeof a|undefined;
+	try {
+		a.wire.onConnect!("phone"); b.wire.onConnect!("phone");
+		a.offer("active"); await a.join("phone","active");
+		a.offer("queued-a"); b.offer("queued-b");
+		await a.runtime.configure({away:true});
+		await b.runtime.configure({away:true});
+		expect(a.rings).toEqual([["phone","queued-a"]]);
+		expect(b.rings).toEqual([["phone","queued-b"]]);
+		c=await fixture(undefined,undefined,"",bus); c.wire.onConnect!("phone"); c.offer("new-session");
+		expect(c.rings).toEqual([["phone","new-session"]]);
+		await b.runtime.configure({away:false});
+		a.offer("after-off"); b.offer("after-off-b");
+		expect(a.rings).toEqual([["phone","queued-a"]]);
+		expect(b.rings).toEqual([["phone","queued-b"]]);
+		const voice=a.voices[0];
+		expect(voice.signal?.aborted).toBe(false);
+		voice.onSpeechStarted("choice"); voice.onTranscript("user","Blue","choice"); await tick();
+		voice.onSpeechStarted("yes"); voice.onTranscript("user","Yes","yes"); await tick();
+		expect(a.submitted).toEqual([["active",{lane:"blue"}]]);
+		expect(b.submitted).toEqual([]);
+	} finally {await a.runtime.close();await b.runtime.close();await c?.runtime.close()}
+});
+
 test('captions go only to the opted-in active caller and cannot authorize submission',async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A");
@@ -69,7 +104,7 @@ test('captions go only to the opted-in active caller and cannot authorize submis
 test("birth pins the audience; decline, stale and unauthenticated join never open voice or ring",async()=>{
 	const f=await fixture(); try {
 		f.offer("request-A"); f.wire.onConnect!("phone"); f.wire.onMessage("phone",{type:"silence",requestId:"request-A"});
-		f.runtime.configure({away:true,delayMs:null}); f.wire.onPcm("phone",pcm); f.join("unknown","request-A");
+		await f.runtime.configure({away:true,delayMs:null}); f.wire.onPcm("phone",pcm); f.join("unknown","request-A");
 		f.wire.onConnect!("new-phone"); f.join("new-phone","request-A"); f.wire.onMessage("new-phone",{type:"list"});
 		f.runtime.end("request-A"); f.join("phone","request-A"); await tick();
 		expect(f.rings).toEqual([]); expect(f.voices).toHaveLength(0); expect(f.audioIn).toHaveLength(0);
@@ -93,9 +128,13 @@ test("disconnect, hangup and desktop win fence old media and marks; reconnect re
 test("a greeting after joining repeats the pending question without proposing or submitting",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
-		expect(f.spoken).toEqual([{text:"Private lane?",instruction:false}]);
+		const opening=f.spoken[0];
+		expect(opening.text).toContain("Private lane?");
+		expect(opening.text).toContain("Blue");
+		expect(opening.text).toContain("Red");
+		expect(opening.instruction).toBe(false);
 		const v=f.voices[0]; v.onSpeechStarted("g"); v.onTranscript("user","Hello, hello.","g"); await tick();
-		expect(f.spoken.slice(1)).toEqual([{text:"Private lane?",instruction:false}]);
+		expect(f.spoken.slice(1)).toEqual([opening]);
 		v.onSpeechStarted("y"); v.onTranscript("user","Yeah.","y"); await tick();
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
@@ -196,12 +235,12 @@ test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah aft
 	const failure=mode==="write-failed" ? vi.spyOn(fs.WriteStream.prototype,"write").mockImplementationOnce(function(this:fs.WriteStream){this.destroy(Error("disk write failed"));return false}) : undefined;
 	try {
 		f.session.rtp(speech); await tick(); expect(f.audioOut).toEqual(["phone"]);
-		f.wire.onPcm("phone",speech);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
 		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Blue."}}); await tick();
 		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
 		f.session.rtp(speech); await tick();
 		expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
-		f.wire.onPcm("phone",speech);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
 		await f.session.event({type:"unknown",wireType:"turn.interrupted"});
 		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"Okay, submitting."}});
 		expect(f.submitted).toEqual([]);
@@ -260,7 +299,8 @@ test("real VoiceSession preserves the local mic onset across an invalid delegati
 		const initial=sent.length;
 		await session.event(delegation("unbound",JSON.stringify({kind:"clarify",question})));
 		expect(f.consultations).toHaveLength(0);
-		f.wire.onPcm("phone",new Uint8Array(960).fill(8)); // PCM creates the real VoiceSession onset.
+		const speech=new Uint8Array(960).fill(8);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech); // Sustained PCM creates the real VoiceSession onset.
 		await session.event(delegation("invalid","Run a shell command."));
 		await session.event(delegation("provider-first",'{"kind":"clarify","question":"What private value should the model choose?"}'));
 		expect(f.consultations).toHaveLength(0);
@@ -300,9 +340,48 @@ test("comparison is local, one-use, and cannot authorize a new enrollment with a
 	const fresh=status!.match(/\/away approve ([0-9a-f]+)/)![1]; expect(confirmation.decide(true,fresh)).toBe(true); expect(await second).toBe(true); expect(status).toBeUndefined();
 });
 
+test("shared routing commands are idempotent patches and status follows remote updates",async()=>{
+	const dir=await mkdtemp(join(tmpdir(),"away-shared-admin-")), tokenFile=join(dir,"token");
+	const notices:string[][]=[[],[]], subscribers:((next:Preferences)=>void)[]=[];
+	let current:Preferences={away:false,delayMs:null};
+	const gate=Promise.withResolvers<void>();
+	let delayed=false;
+	const env={OMP_AWAY_URL:"https://example.invalid",OMP_AWAY_STATE_DIR:dir,OMP_AWAY_TOKEN_FILE:tokenFile};
+	const admins:Admin[]=[];
+	try {
+		await writeFile(tokenFile,Buffer.alloc(32,7).toString("base64url"),{mode:0o600});
+		for(let i=0;i<2;i++) {
+			const ctx={ui:{notify:(text:string)=>notices[i].push(text),setWidget(){}}} as unknown as ExtensionContext;
+			admins.push((await openAdmin(ctx,()=>true,()=>true,{env,copy:async()=>{},async connect(options){
+				if(options.onRouting) {subscribers.push(options.onRouting);options.onRouting(current)}
+				return {offer(){},end(){},async close(){},async pair(){throw Error("not pairing")},
+					async configure(patch) {
+						current={...current,...patch};
+						for(const subscriber of subscribers) subscriber(current);
+						if(delayed) await gate.promise;
+					},
+				};
+			}}))!);
+		}
+		await admins[0].command(""); await admins[0].command("");
+		expect(current.away).toBe(true);
+		await admins[1].command("fallback 30");
+		expect(current).toEqual({away:true,delayMs:30000});
+		await admins[0].command("status");
+		expect(notices[0].at(-1)).toMatch(/immediate: on.*fallback: 30s/);
+		delayed=true;
+		const pending=admins[0].command("on"); await tick();
+		current={...current,away:false}; for(const subscriber of subscribers) subscriber(current);
+		gate.resolve(); await pending;
+		await admins[0].command("status");
+		expect(notices[0].at(-1)).toMatch(/immediate: off.*fallback: 30s/);
+		expect(await Bun.file(join(dir,"routing.json")).exists()).toBe(false);
+	} finally {gate.resolve();for(const admin of admins)await admin.close();await rm(dir,{recursive:true,force:true})}
+});
+
 test("admin uses only the private clipboard for enrollment; busy Ask blocks comparison, not the native form",async()=>{
 	const dir=await mkdtemp(join(tmpdir(),"away-admin-")), tokenFile=join(dir,"token");
-	const notices:string[]=[], widgets:(string[]|undefined)[]=[], copied:string[]=[], settings:unknown[]=[];
+	const notices:string[]=[], widgets:(string[]|undefined)[]=[], copied:string[]=[];
 	const ctx={ui:{notify:(text:string)=>notices.push(text),setWidget:(_key:string,lines:string[]|undefined)=>widgets.push(lines)}} as unknown as ExtensionContext;
 	const env={OMP_AWAY_URL:"https://example.invalid",OMP_AWAY_STATE_DIR:dir,OMP_AWAY_TOKEN_FILE:tokenFile};
 	let confirm!:SecureDesktopOptions["confirmPair"], pairs=0, idle=true;
@@ -310,12 +389,9 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 		await writeFile(tokenFile,Buffer.alloc(32,7).toString("base64url"),{mode:0o600});
 		const admin=await openAdmin(ctx,()=>true,()=>idle,{env,copy:async payload=>{copied.push(payload)},async connect(options){
 			confirm=options.confirmPair;
-			return {offer(){},end(){},async close(){},configure(next){settings.push(next)},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
+			return {offer(){},end(){},async close(){},async configure(){},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
 		}});
 		try {
-			await admin!.command("fallback 30"); await admin!.command(""); await admin!.command("off");
-			expect(settings).toEqual([{away:false,delayMs:30_000},{away:true,delayMs:30_000},{away:false,delayMs:30_000}]);
-			await admin!.command("fallback off"); expect(JSON.parse(await readFile(join(dir,"routing.json"),"utf8"))).toEqual({away:false,delayMs:null});
 			idle=false;await admin!.command("pair");expect(pairs).toBe(0);expect(await confirm("phone","🐶".repeat(12))).toBe(false);
 			idle=true;await admin!.command("pair");expect(copied).toEqual(['{"secret":"test-only-enrollment"}']);
 			const comparison=confirm("phone","🐶".repeat(12));expect(widgets.at(-1)?.join(" ")).toContain("/away approve");
@@ -337,9 +413,9 @@ test("recoverable mobile conditions and command guidance warn, while protocol fa
 		const admin=await openAdmin(ctx,()=>true,()=>idle,{
 			env:{OMP_AWAY_URL:"https://example.invalid",OMP_AWAY_STATE_DIR:dir,OMP_AWAY_TOKEN_FILE:tokenFile},
 			copy:async()=>{},
-			async connect(_options,_preferences,onReport) {
+			async connect(_options,onReport) {
 				report=onReport;
-				return {offer(){},end(){},configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
+				return {offer(){},end(){},async configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
 			},
 		});
 		try {

@@ -65,6 +65,69 @@ def test_backlog_discards_old_microphone_and_never_bursts_to_catch_up():
     asyncio.run(scenario())
 
 
+def test_coarse_timer_wakeups_do_not_drop_live_microphone_samples(monkeypatch):
+    async def scenario():
+        track = MicrophoneTrack()
+        loop = asyncio.get_running_loop()
+        now, produced = 0.0, 1
+        received = []
+
+        async def coarse_sleep(delay):
+            nonlocal now, produced
+            wake = math.ceil((now + delay) / .015625) * .015625
+            # The phone's hardware clock keeps producing 20 ms packets even
+            # when Windows rounds the media helper's timer wakeup upward.
+            while produced * .020 <= wake:
+                now = produced * .020
+                track.push(struct.pack('<h', produced + 1) + bytes(PHONE_BYTES - 2))
+                produced += 1
+            now = wake
+
+        with monkeypatch.context() as clock:
+            clock.setattr(loop, 'time', lambda: now)
+            clock.setattr(asyncio, 'sleep', coarse_sleep)
+            try:
+                track.push(b'\x01\x00' + bytes(PHONE_BYTES - 2))
+                for _ in range(100):
+                    frame = await track.recv()
+                    received.append(struct.unpack_from('<h', frame.planes[0])[0])
+                assert received == list(range(1, 101))
+                assert 1.98 <= now < 2.0
+            finally:
+                track.stop()
+    asyncio.run(scenario())
+
+
+def test_scheduler_stall_restarts_pacing_without_a_catchup_burst(monkeypatch):
+    async def scenario():
+        track = MicrophoneTrack()
+        loop = asyncio.get_running_loop()
+        now = 0.0
+
+        async def sleep(delay):
+            nonlocal now
+            now += delay
+
+        with monkeypatch.context() as clock:
+            clock.setattr(loop, 'time', lambda: now)
+            clock.setattr(asyncio, 'sleep', sleep)
+            try:
+                await track.recv()
+                now = 1.0
+                track.push(bytes([42]) * PHONE_BYTES)
+                resumed = await track.recv()
+                resumed_at = now
+                track.push(bytes([43]) * PHONE_BYTES)
+                following = await track.recv()
+                assert bytes(resumed.planes[0])[0] == 42
+                assert bytes(following.planes[0])[0] == 43
+                assert now - resumed_at >= .019
+                assert following.pts - resumed.pts == 480
+            finally:
+                track.stop()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('wire', [
     struct.pack('>BI', 1, 65537), struct.pack('>BI', 2, 959),
     struct.pack('>BI', 3, 960), struct.pack('>BI', 2, 960) + b'only a prefix', b'\x01\x00',

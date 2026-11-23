@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { DecisionCoordinator, loadPreferences, savePreferences, type DecisionCall, type DecisionReply, type SideContext } from "../src/decisions";
+import { DecisionCoordinator, type DecisionCall, type DecisionReply, type SideContext } from "../src/decisions";
 import type { PendingAsk } from "../src";
 
 const html = `<form><input type="hidden" name="rev" value="r4"><label for="target">Release lane</label><select name="lane" id="target" required><option value="d" selected>Development</option><option value="p">Production</option><option value="x" disabled>Retired</option></select><label for="n">Replicas</label><input id="n" name="count" type="number" value="1" min="1" max="4" required></form>`;
@@ -31,6 +28,18 @@ function readback(reply:DecisionReply){
 	if(reply.kind!=="say" || !reply.draft) throw Error("Expected a structured proposal");
 	return {draft:reply.draft,text:reply.text};
 }
+test('debounced speech that began before a readback cannot confirm the new draft',async()=>{
+	const f=fixture();
+	try {
+		f.core.offer({...f.ask("X"),html:choiceHtml},f.ctx,"project");
+		const call=f.core.join("X")!;await call.brief();
+		const began=performance.now();
+		await speak(call,"Coffee.");
+		call.speechStarted("early",began);
+		expect((await call.speechFinished("early","Yes.")).kind).toBe("ignored");
+		expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
 test.each(["Yes.","Yeah.","Yep!","Yup","Sure.","Okay.","OK.","Yeah, go ahead.","Yeah, please submit it.","Yeah…"])
 ('explicit affirmative %s submits the native draft without model checks',async affirmative=>{
 	const f=fixture(); try {
@@ -54,11 +63,18 @@ test('ASR punctuation and repeated replies still propose once and require a sepa
 		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
 	} finally {f.core.close()}
 });
-test('all native questions open without waiting for a model summary',async()=>{
+test('the opening names enabled choices and every field without waiting for a model summary',async()=>{
 	const f=fixture(), slow=Promise.withResolvers<string>(); f.setReply(()=>slow.promise);
 	try {
 		f.offer("A"); const call=f.core.join("A")!;
-		expect(await Promise.race([call.brief(),nextTurn("still waiting")])).toBe("Release lane; Replicas");
+		const brief=await Promise.race([call.brief(),nextTurn("still waiting")]);
+		expect(brief).toContain('"label":"Production"');
+		expect(brief).not.toContain('Retired');
+		expect(brief).not.toContain('"rev"');
+		expect(call.opening()).toContain("Development");
+		expect(call.opening()).toContain("Production");
+		expect(call.opening()).toContain("Replicas");
+		expect(call.opening()).not.toContain("Retired");
 		expect(f.efforts).toEqual([]); expect(f.writes).toEqual([]);
 	} finally {f.core.close();slow.resolve("Late context")}
 });
@@ -68,6 +84,26 @@ test('disabled, delayed and immediate routes ring at most once without expiring 
 		f.core.silence("quiet"); f.core.configure({away:false,delayMs:500}); f.offer("late"); f.advance(499); expect(f.invites).toEqual([]);
 		f.advance(1); expect(f.invites).toEqual(["late"]); f.core.configure({away:true,delayMs:null}); f.offer("now"); expect(f.invites).toEqual(["late","now"]);
 		f.advance(86_400_000); expect(f.core.list().map(x=>x.requestId)).toEqual(["quiet","late","now"]);
+	} finally {f.core.close()}
+});
+test("restored async fallback uses question creation time rather than attachment time",()=>{
+	const f=fixture(); try {
+		f.advance(25_000);
+		f.core.configure({away:false,delayMs:30_000});
+		f.core.offer({...f.ask("restored"),createdAt:100,deduplicationKey:"async:restored"},f.ctx,"project");
+		f.advance(4_999); expect(f.invites).toEqual([]);
+		f.advance(1); expect(f.invites).toEqual(["restored"]);
+	} finally {f.core.close()}
+});
+test("fresh async source keys permit restoration without weakening native tool-call deduplication",()=>{
+	const f=fixture(); try {
+		const original=f.ask("old");
+		expect(f.core.offer({...original,deduplicationKey:"async:old"},f.ctx,"project")).toBe(true);
+		f.core.end("old");
+		expect(f.core.offer({...original,requestId:"restored",deduplicationKey:"async:new"},f.ctx,"project")).toBe(true);
+		expect(f.core.join("old")).toBeUndefined();
+		expect(f.core.offer(f.ask("native"),f.ctx,"project")).toBe(true);
+		expect(f.core.offer({...f.ask("native"),requestId:"native-duplicate"},f.ctx,"project")).toBe(false);
 	} finally {f.core.close()}
 });
 test('local completion cancels invitations and permanently revokes a stale offer',()=>{
@@ -233,10 +269,4 @@ test('a natural clarification delegates only the caller question to the tool-fre
 		expect(await speak(call,question)).toEqual({kind:"say",text:"A implantação fica reversível."});
 		expect(f.prompts.at(-1)).toContain(question); expect(f.writes).toEqual([]);
 	} finally {f.core.close()}
-});
-test('preferences persist without carrying private request state',async()=>{
-	const dir=await mkdtemp(join(tmpdir(),"away-prefs-")); try {
-		const path=join(dir,"routing.json"); expect(await loadPreferences(path)).toEqual({away:false,delayMs:null});
-		await savePreferences(path,{away:true,delayMs:1200}); expect(await loadPreferences(path)).toEqual({away:true,delayMs:1200});
-	} finally {await rm(dir,{recursive:true,force:true})}
 });

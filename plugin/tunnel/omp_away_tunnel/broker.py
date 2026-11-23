@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .identity import digest_bytes, locked, private_directory, read_private_json, write_private_json
 from .ipc import IPC_JSON_LIMIT, decode_frame, frame_size
+from .preferences import load_preferences, patch_preferences, save_preferences
 from .transport import HEADER, JSON_LIMIT, ProtocolError, encode, object_json
 
 
@@ -47,6 +48,7 @@ class Client:
         self.inboxes = {}
         self.pending = set()
         self.confirmations = set()
+        self.routing = False
 
     def event(self, **msg):
         self.send(1, encode(msg))
@@ -63,6 +65,9 @@ class Broker:
         self.init = init
         self.auth = secrets.token_urlsafe(32)
         self.config = configuration(init)
+        self.directory = Path(init['stateDir'])
+        self.preferences = {}
+        self.routing_lock = asyncio.Lock()
         self.commands = asyncio.Queue(maxsize=MAX_CLIENTS * MAX_PENDING)
         self.clients = set()
         self.pending = {}
@@ -123,17 +128,44 @@ class Broker:
     def owner(self, device, request):
         return next((client for client in self.clients if any(item['requestId'] == request for item in client.inboxes.get(device, []))), None)
 
+    async def routing(self, client, cmd):
+        if not cmd.keys() <= {'op', 'id', 'patch'}:
+            raise ProtocolError('invalid routing command')
+        async with self.routing_lock:
+            if client not in self.clients:
+                return
+            next_preferences = patch_preferences(self.preferences, cmd.get('patch', {}))
+            changed = next_preferences != self.preferences
+            if changed:
+                # Shutdown must drain an in-flight atomic write before releasing
+                # gateway.lock, or a replacement broker could read stale state.
+                write = asyncio.create_task(asyncio.to_thread(save_preferences, self.directory, next_preferences))
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    await write
+                    raise
+                self.preferences = next_preferences
+            client.routing = True
+            for recipient in tuple(self.clients):
+                if recipient.routing and (changed or recipient is client):
+                    recipient.event(event='routing', preferences=self.preferences)
+            client.event(event='reply', id=cmd['id'], ok=True, value=self.preferences)
+
     async def command(self, client, cmd):
         if not isinstance(cmd, dict) or type(cmd.get('id')) is not int or not 0 < cmd['id'] < 2**32:
             raise ProtocolError('invalid command id')
         op = cmd.get('op')
-        if op not in ('devices', 'pair', 'ring', 'confirm', 'control', 'pcm'):
+        if op not in ('devices', 'pair', 'ring', 'confirm', 'control', 'pcm', 'routing'):
             raise ProtocolError('invalid session operation')
         if cmd['id'] in client.pending:
             raise ProtocolError('duplicate local command')
         try:
             if self.commands.full() or len(client.pending) >= MAX_PENDING:
                 raise ProtocolError('local gateway busy')
+            if op == 'routing':
+                await self.routing(client, cmd)
+                return
             if op == 'pair':
                 if self.pair_pending or self.pair_owner not in (None, client) and (self.service.pairs.available() or self.service.waiters):
                     raise ProtocolError('enrollment owned by another session')
@@ -167,7 +199,7 @@ class Broker:
                         if message['type'] != 'error' and message.get('requestId') != active[1]:
                             raise ProtocolError('stale call')
             await self.enqueue(client, cmd)
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, OSError):
             client.event(event='reply', id=cmd['id'], ok=False)
 
     async def event(self, **msg):
@@ -187,6 +219,7 @@ class Broker:
             return
         if event == 'ready':
             self.ready = True
+            msg = {**msg, 'routingVersion': 1}
         elif event == 'confirm':
             client = self.pair_owner
             if client in self.clients:
@@ -278,7 +311,7 @@ class Broker:
                 self.idle = None
             self.clients.add(client)
             if self.ready:
-                client.event(event='ready')
+                client.event(event='ready', routingVersion=1)
                 for device, phone in self.service.phones.items():
                     client.event(event='connected', deviceId=device, ref=phone.ref)
             while True:
@@ -305,6 +338,7 @@ class Broker:
         private_directory(directory)
         endpoint = directory / ENDPOINT
         with locked(directory, 'gateway.lock'):
+            self.preferences = load_preferences(directory)
             server = await asyncio.start_server(self.accept, '127.0.0.1', 0, limit=IPC_JSON_LIMIT + 5)
             try:
                 write_private_json(endpoint, {'v': 1, 'port': server.sockets[0].getsockname()[1], 'auth': self.auth, 'config': self.config})

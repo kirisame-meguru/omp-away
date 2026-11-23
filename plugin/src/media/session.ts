@@ -6,7 +6,7 @@ import type { CallLog } from './call-log';
 
 export interface VoiceCallbacks {
 	onTranscript(role: 'user' | 'assistant', text: string, utteranceId?: string): void;
-	onSpeechStarted(utteranceId: string): void;
+	onSpeechStarted(utteranceId: string, startedAt?: number): void;
 	onInterrupt(): void;
 	onAudio(pcm: Uint8Array): void | Promise<void>;
 	onCaption?(role: 'user' | 'assistant', text: string, final: boolean): void;
@@ -25,6 +25,7 @@ const FRAME_MS = 20, QUIET_FRAMES = 30, PLAYOUT_LEAD_MS = 100;
 const QUEUED_FRAMES = 250, FIRST_VOICE_MS = 10_000;
 // Endpoint only stable recognition plus live caller silence, never output quiet or a stalled microphone.
 const ENDPOINT_MS = 1500, ENDPOINT_FRAMES = ENDPOINT_MS / FRAME_MS, INPUT_FRESH_MS = 250;
+const ONSET_FRAMES = 3; // Reject isolated 20 ms microphone/echo spikes.
 export class NoVoiceAudioError extends Error {
 	constructor() { super('No voice audio received from the voice service') }
 }
@@ -46,6 +47,8 @@ export class VoiceSession {
 	#onset?: Onset;
 	#ambiguous = false;
 	#inputHot = false;
+	#hotInputFrames = 0;
+	#hotInputAt = 0;
 	#quietInput = 0;
 	#lastInputAt = -Infinity;
 	#lastVoicedAt = -Infinity;
@@ -139,7 +142,7 @@ export class VoiceSession {
 		this.#captionPending.clear(); this.#captionText.user = this.#captionText.assistant = '';
 		this.#onset = undefined; this.#seen.clear(); this.#clearAudio(); this.#clearAudioDeadline();
 	}
-	#speech(provider: boolean) {
+	#speech(provider: boolean, startedAt = this.#hotInputFrames ? this.#hotInputAt : performance.now()) {
 		this.trace?.step(provider ? 'onset.provider' : 'onset.local');
 		this.#clearAudioDeadline();
 		if (provider) this.#clearAudio();
@@ -155,7 +158,7 @@ export class VoiceSession {
 		this.#onset = { id: crypto.randomUUID(), providerSeen: provider };
 		// Capture the current draft at onset, never after a delayed final transcript.
 		// Raw microphone energy does not mute audio: route startup can be noisy.
-		this.cb.onSpeechStarted(this.#onset.id); this.trace?.step('speech.started.callback');
+		this.cb.onSpeechStarted(this.#onset.id,startedAt); this.trace?.step('speech.started.callback');
 	}
 	input(pcm: Uint8Array) {
 		if (!this.#live || pcm.length !== 960) throw new Error('Invalid voice input');
@@ -163,8 +166,14 @@ export class VoiceSession {
 		if (energy(pcm) >= 800 ** 2) {
 			this.#lastVoicedAt=this.#lastInputAt;
 			this.#quietInput = 0;
-			if (!this.#inputHot) { this.#inputHot = true; this.#speech(false) }
+			if (!this.#inputHot) {
+				if (this.#hotInputFrames++===0) this.#hotInputAt=this.#lastInputAt;
+				if (this.#hotInputFrames>=ONSET_FRAMES) {
+					this.#inputHot=true;this.#speech(false,this.#hotInputAt);this.#hotInputFrames=0;
+				}
+			}
 		} else {
+			this.#hotInputFrames=0;
 			++this.#quietInput;
 			if (this.#inputHot && this.#quietInput>=20) this.#inputHot=false;
 			if (this.#quietInput>=ENDPOINT_FRAMES) this.#armEndpoint();

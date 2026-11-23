@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { delimiter, isAbsolute } from 'node:path';
-import { Framer, frame, mediaPacket, readMedia } from './framing';
+import { Framer, frame, isRoute as route, mediaPacket, readMedia } from './framing';
+import { preferences, preferencePatch, type Preferences } from '../decisions/preferences';
 
 export type PhoneControl =
   | { type: 'list' }
@@ -27,19 +28,20 @@ export interface SecureDesktopOptions {
   onLoss(deviceId: string): void;
   onConnect?(deviceId: string): void;
   onError?(code: string): void;
+  onRouting?(next: Preferences): void;
 }
 
 export interface SecureDesktop {
   /** Fresh, sensitive, serialized Away/1 QR payload. Never log it. */
   pair(): Promise<string>;
   devices(): Promise<string[]>;
+  routing(patch?: Partial<Preferences>): Promise<Preferences>;
   ring(deviceId: string, requestId: string): Promise<void>;
   sendControl(deviceId: string, message: DesktopControl): Promise<void>;
   sendPcm(deviceId: string, pcm: Uint8Array): Promise<void>;
   close(): Promise<void>;
 }
 
-const route = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(x);
 const digest = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{43}$/.test(x) && Buffer.from(x, 'base64url').toString('base64url') === x;
 const emoji = /^[🐶🐱🦊🐻🐼🐸🐵🐯🦁🐷🐨🐰🐙🐧🐳🐢]{12}$/u;
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -69,6 +71,7 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
     cwd: import.meta.dir, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: helperEnv(),
   });
   let closing = false, stopped = false, seq = 0;
+  let routingVersion = 0, routingReceived = false;
   const connected = new Map<string, string>();
   const pending = new Map<number, { resolve(value: unknown): void; reject(err: Error): void; timer: ReturnType<typeof setTimeout> }>();
   const ready = Promise.withResolvers<void>();
@@ -110,6 +113,10 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
   function command(op: string, fields: Record<string, unknown> = {}) {
     return rpc(id => jsonFrame({op, id, ...fields}));
   }
+  async function routing(patch?: Partial<Preferences>): Promise<Preferences> {
+    if (routingVersion !== 1) throw new Error('shared-routing-upgrade-required');
+    return preferences(await command('routing', patch === undefined ? {} : {patch: preferencePatch(patch)}));
+  }
   function requireConnected(deviceId: string) {
     const ref = connected.get(deviceId);
     if (!ref) throw new Error('No authenticated tunnel');
@@ -129,7 +136,13 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
     }
     const msg = JSON.parse(decoder.decode(data));
     switch (msg.event) {
-      case 'ready': ready.resolve(); return;
+      case 'ready': routingVersion = msg.routingVersion; ready.resolve(); return;
+      case 'routing': {
+        const next = preferences(msg.preferences);
+        routingReceived = true;
+        deliver(() => opts.onRouting?.(next));
+        return;
+      }
       case 'fatal': stop(route(msg.code) ? msg.code : 'secure_helper_failed'); return;
       case 'error': notice(route(msg.code) ? msg.code : 'secure_helper_failed'); return;
       case 'reply': {
@@ -169,11 +182,16 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
   try {
     child.stdin.write(jsonFrame({op:'start', url:origin.origin, desktopToken:opts.desktopToken, stateDir:opts.stateDir}));
     await ready.promise;
+    if (opts.onRouting) {
+      await routing();
+      if (!routingReceived || stopped) throw new Error('shared-routing-snapshot-unavailable');
+    }
   } catch (err) {
     stop('secure_helper_failed');
     throw err;
   } finally { clearTimeout(startup); }
   return {
+    routing,
     async pair() {
       const qr = await command('pair') as Record<string, unknown>;
       if (qr?.v !== 1 || qr.url !== origin.origin || !route(qr.ticket) || !digest(qr.desktopPin) || !digest(qr.nonce) || !digest(qr.secret)) throw new Error('Invalid pairing payload');

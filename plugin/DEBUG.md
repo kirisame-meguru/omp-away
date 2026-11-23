@@ -74,11 +74,23 @@ Use stock interactive omp 19.1.0 main sessions, the normal desktop Codex login, 
 4. From an **idle local composer**, enter `/away pair`. This copies a one-time JSON payload to the system clipboard; it is never printed, entered into the composer, or emitted to the model. Disable third-party clipboard managers, syncing and capture; do not paste into a chat or online QR service. Paste into the trusted phone enrollment screen, or display a QR using a trusted **offline** renderer. Clear both clipboards and close the renderer immediately. The Windows writer opts out of clipboard history and roaming; the payload is valid for at most ten minutes. A new invitation invalidates the previous one.
 5. Compare **all twelve** emoji in order on **both** devices. For an exact match, approve on the phone and enter the local widget's `/away approve CODE` on the desktop. Otherwise `/away deny CODE`. `CODE` identifies this comparison only; it is not the enrollment secret. There is no approval dialog over a native Ask. Starting work cancels a pending comparison; pair again from idle. Failure or timeout is not success. A changed phone key must not regain requests addressed to its predecessor.
 
+### Optional Async Ask inbox
+
+Load updated `omp-async-ask` and Away plugins in the same interactive desktop. With the gateway configured and the phone already paired, pending and restored questions appear in the existing phone inbox without opening `/questions`. Async forwarding needs no Collab configuration; the native Ask requirements above remain unchanged.
+
+The same spoken selection, readback and separate onset-bound confirmation apply. Async Ask validates and saves the answer, then uses its ordinary user-attributed aside. Desktop answers, withdrawal and owner/session changes retire the phone offer. Agent-turn completion does not.
+
+Shared `/away` and fallback settings apply unchanged. Restored questions keep their original creation time; a fresh owner can ring a still-pending question again. Newly paired devices do not inherit existing offers. Unsupported forms remain in `/questions`.
+
+Saved is not delivered. After a failed or uncertain attempt, review `/questions`; there is no automatic mobile retry or resend. A closed call alone is not delivery confirmation. Each plugin remains usable without the other. Restart updated desktop plugins when work can safely pause; this integration requires no broker, relay or phone update.
+
 ### Routing and call behavior
 
-`/away` toggles immediate ringing; `/away on` and `/away off` set it explicitly. `/away fallback 90` enables normal-mode escalation after 90 seconds from request creation; `/away fallback off` disables it. The allowed interval is 1–2,147,483 whole seconds. `/away status` shows both settings. Defaults: immediate off, fallback off. Preferences persist in `routing.json` in private state; neither setting expires or auto-submits a native form. Turning off immediate mode does **not** turn off a configured fallback. Ringing sends only the opaque request ID to the enrolled device route.
+`/away` and `/away on` enable immediate ringing for every connected session sharing this paired state directory; repeating either command leaves it enabled. `/away off` disables immediate ringing globally. `/away fallback 90` enables shared normal-mode escalation after 90 seconds from request creation; `/away fallback off` disables it. The allowed interval is 1–2,147,483 whole seconds. `/away status` fetches both shared settings from the broker. Defaults: immediate off, fallback off. Turning off immediate mode does **not** turn off a configured fallback. Ringing sends only the opaque request ID to the enrolled device route.
 
-Each session loads persisted routing preferences at startup; commands change that session and the saved defaults, not another already-running session. The phone inbox combines all sessions' requests. Joining, microphone audio, captions and call controls remain bound to the request's owning session. Closing one session removes its offers and ends only its call. Pairing approval belongs only to the session that issued the invitation.
+The broker owns `routing.json`, persists changes before broadcasting, and serializes field patches so concurrent Away/fallback commands cannot overwrite each other. Connected sessions apply snapshots to their own pending questions, and new/reconnecting sessions inherit the latest state. Already-rung or silenced questions do not ring again; active calls are not interrupted. The phone inbox combines all sessions' requests. Joining, microphone audio, captions and call controls remain bound to the request's owning session. Closing one session removes its offers and ends only its call. Pairing approval belongs only to the session that issued the invitation.
+
+**One-time shared-routing upgrade:** update the plugin in all Away-enabled desktops, close those desktops, allow the existing broker to shut down after ten idle seconds, then reopen them. Do this only when their work can be safely paused; do not kill an active production broker to force an upgrade. Pairing and saved preferences are preserved. An older broker is detected explicitly and the new plugin refuses to pretend a local-only change is global. Legacy clients are not sent unknown routing events; they must also reload the updated plugin to participate. Routine mode changes after this upgrade need no restart. No Android or public-relay upgrade is needed.
 
 Pair **before** starting the native Ask. A newly enrolled device does not inherit open requests. The paired inbox reconciles on connect; **Not now** suppresses ringing for that request; **Hang up** or disconnect ends the call but leaves the Ask pending. Only joining opens desktop Codex voice.
 
@@ -94,6 +106,8 @@ An entire, unambiguous enabled option label drafts locally through the native va
 
 Informational requests also include commands such as “Ask the main model for two other drinks” and “Please suggest alternatives.” These use the existing tool-free consultation, not a form selection or a new verification model. Less direct phrasing can reach consultation through the existing interpretation step. Suggestions do not change the form's options, create a draft, or authorize an earlier draft; the caller must explicitly choose and separately confirm.
 
+The opening names every enabled native choice, including the automatic Other choice when supported, grouped with its field question. Disabled options and hidden values are not spoken. Forms whose complete opening exceeds the voice budget stay on the desktop rather than silently losing choices. Voice instructions and form context also travel over the supported non-spoken commentary channel; the coding session remains the authority for consultation and native submission.
+
 The **Away decision timing** debug event records only the operation category, elapsed milliseconds and completion status. Separate connection setup, recognition, actual proposal extraction, first PCM delivery and handset presentation when measuring latency. There are no verification-model calls.
 
 Closing a voice session logs an **Away voice summary** containing only elapsed time and stage counts. `voice.ready` means transport readiness, not phone playback. The legacy `rtp.replay.started` label now marks the first paced streaming write; no transcript or approval is required. A hardware presentation acknowledgment is useful test evidence but no longer authorizes submission.
@@ -108,6 +122,8 @@ If the provider does not finish a caller turn, Away uses a 1.5-second silence fa
 
 This is an intentional voice-confirmation tradeoff: “Yeah”, followed by a long pause and then “but actually no”, can submit before the qualifier. Speak a correction without that pause. The fallback does not remove the separate proposal/confirmation step, native validation, onset snapshot, or exactly-once submission.
 
+Local microphone onset requires three consecutive 20 ms loud frames, rather than treating a single acoustic spike as a new caller turn. The onset retains the first frame's time: a draft published during this debounce cannot become eligible for that utterance's confirmation. Provider-confirmed speech and cancellation remain active, and audio playback is still streamed without an authorization gate.
+
 ## Retained call transcripts
 
 Paired calls automatically record local JSONL files in `$env:OMP_AWAY_STATE_DIR\calls` (Unix: `$OMP_AWAY_STATE_DIR/calls`). Reload the desktop plugin after updating it; already-loaded code and earlier conversations cannot acquire transcripts retroactively.
@@ -119,7 +135,7 @@ Records include local call/request/session IDs, sequence numbers, timestamps, sp
 - `delta`: recognized caller or assistant fragments, retained even without a final event or after hangup.
 - `provider-final`: the provider's completed transcript, including late finals that decision handling may reject.
 - `resolved-provider` / `resolved-silence`: caller text actually passed to decision handling, with onset binding.
-- `event`: consultation and decision outcomes, including whether a validated draft exists, plus narration/readback appends and call ending. An `accepted` decision reply records native acceptance; speech saying “submitted” does not.
+- `event`: consultation and decision outcomes, including whether a validated draft exists, plus narration/readback appends and call ending. An `accepted` reply records native acceptance for Ask, or canonical save plus queued/recorded dispatch for Async Ask—not proof that the model read it. Speech saying “submitted” establishes neither.
 
 Do not concatenate every speech row: finals replace their turn's deltas, and resolved rows distinguish consumed caller text from provider observations. An `ended` event can precede `decision-reply: accepted` because native completion aborts the call before the submission promise settles. Normal call teardown keeps the file open for that outcome. Missing outcomes after process shutdown or a recording failure remain unknown.
 
@@ -136,9 +152,21 @@ Get-Content -LiteralPath $call.FullName | ConvertFrom-Json |
   Format-Table seq, kind, role, phase, text, stage, reply, draft -Wrap
 ```
 
+## Repeatable acoustic dialogues
+
+On this Windows test workstation, `python test/acoustic.py direct` runs one short native Ask dialogue; `python test/acoustic.py --all` runs all scenarios in `test/acoustic.json`. Individual names can also be supplied. The runner needs `pywinpty`, `sounddevice`, `soundfile` and `numpy`, the existing authenticated stock host, and the built Android test APK installed with `adb -s e497de61 install -r <test-apk>`. Never use `connectedDebugAndroidTest`, uninstall, or clear storage.
+
+The runner is deliberately restricted to dev phone `e497de61`, Maono Elf input 21 and Thunderbolt Dock output 16. Windows speech synthesis supplies the caller's lines through the speakers; the microphone measures handset playback before the next reply. Each scenario starts a disposable host with production gateway settings removed and connects the phone through USB reverse port 19583. It does not test the public relay.
+
+Scenarios cover a direct choice, asking for options, asking for two alternatives, revising a draft, an affirmative with an immediate qualifier, and saying Yes after a clarification invalidated the old draft. The caller does not answer the opening until captions name Tea, Coffee and Other/custom input and handset speech is heard and quiet. Success requires the expected native values, exactly one accepted submission, native Ask completion and passing hardware/caption instrumentation. The runner never treats an assistant's claim of submission as success.
+
+Each run prints its local `result.json` path. Retained call JSONL files are under the scenario's `voice.log.state/calls`; inspect final/resolved speech there for brevity, grounding and recognition failures. Logs stay local. No model verifies another model's answer, no response buffering or playback-authorization gate is introduced, and no test result changes native confirmation rules.
+
 ## Recording evidence
 
 After running the gate, record host version, date, case, observed sanitized values and event counts here; note whether the operator actually saw the dialog dismiss. On a failure report the first mismatch, not an inferred winner. Do not attach full session logs, registry contents, links, tokens, raw frames or unsanitized screenshots. The test root can be discarded after the host exits and safe evidence is captured.
+
+2026-11-23, Async Ask integration: an isolated stock 19.1.0 TUI with a scripted provider and controlled phone/voice transports completed independent work while a question remained pending. The actual `/questions` dialog opened and its handler closed after the confirmed answer. The provider observed the user-attributed answer both after agent end and during a later active work tool. No runtime errors; the owned host exited normally. This tested native inbox lifecycle and model receipt, not visual layout, acoustic recognition or a physical phone. The disposable desktop controller was removed afterward. The repeatable cross-plugin fixture separately passed ten load-order/race/restoration/failure scenarios.
 
 2026-11-23, consultation routing fix: a live model in an isolated stock host answered the recorded “Ask the main model to come up with some other two drinks” with hot chocolate and lemonade through one consultation. “Give me two more drink ideas” reached consultation through interpretation and returned sparkling water and apple juice. Both were non-draft narration; tools stayed disabled, subsequent Yes utterances submitted nothing, and a fresh Coffee/Yes sequence completed the synthetic submission once. This probe injected bound caller transcripts and used a synthetic submission capability; it did not test recognition, handset playback, or the paired relay.
 
@@ -167,3 +195,26 @@ The measurements below predate streaming and record the removed verification-gat
 2026-11-23: the isolated stock-host physical-phone probe completed opening and independently verified readback for an injected final `Coffee` transcript: two physical drains, one readback mark, zero submissions. Opening to first approved PCM write was 7.827 s; injected final transcript to first readback PCM write was 8.670 s, including 3.656 s of independent verification. The only decision-model call was `away-verify`, with minimum effort requested. This excludes speech recognition, the production conversation and the paired relay path; it is not an end-to-end latency acceptance.
 
 Two preceding synthetic-audio probes did not complete readback: one was interrupted by a new local microphone onset during verification; the controlled-input run received a partial input transcript but no final user turn before its deadline. No form was submitted. These failures remain separate from the passing decision/playback-only measurement.
+
+### 2026-11-23 shared sessions and acoustic dialogues
+
+Three independent stock `omp.exe` desktops were observed with their proxy connections attached to the same existing broker. No production desktop or broker was restarted for this check. The isolated two-desktop native Ask checks and the 23 tunnel tests also passed.
+
+Plugin verification passed 166 tests / 758 assertions and `bun check`. The six-scenario acoustic run (`away-dialogues-_d9jjp8q` under the local temp directory) announced Tea, Coffee and Other/custom input in every opening. Five dialogues completed exactly one accepted native submission with the expected values and passed hardware/caption instrumentation. The revision scenario stopped before its correction: the initial “Coffee” produced no caller transcript on either observed transport channel, so no answer was submitted. Earlier runs also exposed intermittent short-reply transcription loss; its cause was unresolved at this stage, and this was not a successful correction test. Qualified affirmative and stale-confirmation scenarios passed in that run.
+
+Commentary-channel context removed the invented extra alternative suggestions in the observed follow-up calls. Readbacks were short, but occasional unscripted opening acknowledgements remained. These results do not establish perfect recognition or exact model narration. Dev-phone display settings remained `15` / `3600000`, and voice-call volume remained `4`.
+
+### Microphone sample-clock follow-up
+
+The media helper scheduled each microphone frame 20 ms after its actual wakeup. On this Windows host, coarse timer wakeups accumulated into a slower consumer clock, overflowing the bounded microphone queue and dropping pieces of speech before Opus encoding. The fix advances the scheduled sample deadline instead; a scheduler stall of a full frame still rebases the deadline to prevent catchup bursts. It adds no model, playback gate or confirmation exception.
+
+A five-second synthetic sequence probe used the real media helper and 250 uniquely identifiable 20 ms input packets, without recording speech:
+
+| Measurement | Previous pacing | Deadline-based pacing |
+|---|---:|---:|
+| Mean frame interval (ms) | 31.15 | 20.24 |
+| Skipped packets before the last received packet | 81 | 0 |
+
+Packets still queued at the probe deadline are not counted as skipped. All 17 media tests passed, including deterministic coarse-timer packet continuity, no catchup burst after a long stall, and actual bidirectional Opus peers. The 166 plugin tests and `bun check` also passed.
+
+The post-fix real-phone run (`away-dialogues-gd3j5edo` under the local temp directory) passed all six scenarios without retries: direct choice, options, alternatives, revision, qualified affirmative and stale confirmation. Each opening included the choices; all caller turns reached decision handling, and each dialogue completed exactly one accepted native submission with the expected values and passing hardware/caption instrumentation. The stale affirmative remained ignored, and the qualified affirmative required the corrected readback and a fresh Yes. This helper-only fix is loaded when the next voice call spawns its media process; it requires no phone reinstall or desktop restart.

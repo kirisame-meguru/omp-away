@@ -2,14 +2,16 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import signal
 import struct
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from OpenSSL import SSL, crypto
-from omp_away_tunnel.broker import Broker, connect_local, connect_shared, read_frame, send_frame
-from omp_away_tunnel.identity import IdentityStore, read_private_json
+from omp_away_tunnel.broker import Broker, Client, connect_local, connect_shared, read_frame, send_frame
+from omp_away_tunnel.identity import IdentityStore, private_directory, read_private_json, write_private_json
 from omp_away_tunnel.ipc import decode_frame
 from omp_away_tunnel.transport import ProtocolError, SecureStream, encode
 import test_relay
@@ -29,7 +31,7 @@ class Session:
                 except FileNotFoundError:
                     await asyncio.sleep(.01)
 
-    async def expect(self, event):
+    async def expect(self, event=None):
         if self.writer is None:
             await self.connect()
         async with asyncio.timeout(4):
@@ -40,7 +42,7 @@ class Session:
             msg['event'] = 'pcm'
         else:
             msg = json.loads(data)
-        if msg.get('event') != event:
+        if event is not None and msg.get('event') != event:
             raise AssertionError(f"expected {event}, got {msg.get('event')}")
         return msg
 
@@ -56,6 +58,15 @@ class Session:
         if reply['id'] != self.seq:
             raise AssertionError('reply crossed session boundary')
         return reply
+
+    async def routing(self, **patch):
+        self.seq += 1
+        send_frame(self.writer, 1, encode({'op': 'routing', 'id': self.seq, 'patch': patch}))
+        snapshot = await self.expect('routing')
+        reply = await self.expect('reply')
+        if reply.get('id') != self.seq or reply.get('ok') is not True or reply.get('value') != snapshot['preferences']:
+            raise AssertionError('routing snapshot was not acknowledged')
+        return snapshot['preferences']
 
     async def close(self):
         if self.writer is not None and not self.writer.is_closing():
@@ -112,6 +123,115 @@ class BrokerTest(test_relay.RelayTest):
         phone = SecureStream(context, ws, False)
         await phone.handshake(self.service.identity.pin)
         return phone
+
+    async def test_routing_updates_all_subscribers_once_and_new_sessions_inherit(self):
+        first, second = self.host.local, await self.session()
+        legacy = await self.session()
+        self.assertEqual(await first.routing(), {'away': False, 'delayMs': None})
+        await second.routing()
+        enabled = {'away': True, 'delayMs': None}
+        self.assertEqual(await first.routing(away=True), enabled)
+        self.assertEqual((await second.expect('routing'))['preferences'], enabled)
+        self.assertEqual(await first.routing(away=True), enabled)
+        self.assertTrue((await second.command('devices'))['ok'])
+        self.assertTrue((await legacy.command('devices'))['ok'])
+        third = await self.session()
+        self.assertEqual(await third.routing(), enabled)
+        disabled = {'away': False, 'delayMs': None}
+        self.assertEqual(await second.routing(away=False), disabled)
+        for session in (first, third):
+            self.assertEqual((await session.expect('routing'))['preferences'], disabled)
+
+    async def test_concurrent_routing_patches_preserve_each_other_and_survive_broker_restart(self):
+        first, second = self.host.local, await self.session()
+        await first.routing()
+        await second.routing()
+        for session, change in ((first, {'away': True}), (second, {'delayMs': 30000})):
+            session.seq += 1
+            send_frame(session.writer, 1, encode({'op': 'routing', 'id': session.seq, 'patch': change}))
+        expected = {'away': True, 'delayMs': 30000}
+        for session in (first, second):
+            messages = [await session.expect() for _ in range(3)]
+            snapshots = [msg['preferences'] for msg in messages if msg['event'] == 'routing']
+            self.assertEqual(snapshots[-1], expected)
+            self.assertEqual(len([msg for msg in messages if msg['event'] == 'reply' and msg['ok']]), 1)
+        await first.close()
+        await second.close()
+        self.host.broker.stop()
+        await asyncio.wait_for(self.worker, 5)
+        init = self.host.broker.init
+        self.host = SharedHost(init)
+        self.service = test_relay.Service(init, self.host, self.client)
+        self.worker = asyncio.create_task(self.run_service())
+        await self.host.expect('ready')
+        self.assertEqual(await self.host.local.routing(), expected)
+
+    async def test_invalid_routing_and_failed_persistence_do_not_change_other_sessions(self):
+        first, second = self.host.local, await self.session()
+        enabled = {'away': True, 'delayMs': None}
+        await first.routing(away=True)
+        await second.routing()
+        for invalid in ({'away': 1}, {'delayMs': True}, {'delayMs': -1}, {'delayMs': 2147483648}, {'unknown': True}, []):
+            self.assertFalse((await first.command('routing', patch=invalid))['ok'])
+        with patch('omp_away_tunnel.broker.save_preferences', side_effect=PermissionError('test write denied')):
+            self.assertFalse((await first.command('routing', patch={'away': False}))['ok'])
+        self.assertEqual(await first.routing(), enabled)
+        self.assertTrue((await second.command('devices'))['ok'])
+        self.assertEqual(read_private_json(Path(self.host.broker.init['stateDir']) / 'routing.json'), enabled)
+
+    async def test_invalid_saved_routing_cannot_publish_a_default_off_broker(self):
+        directory = self.root / 'invalid-routing'
+        private_directory(directory)
+        write_private_json(directory / 'routing.json', {'away': True})
+        broker = Broker({**self.host.broker.init, 'stateDir': str(directory)})
+        async with asyncio.timeout(2):
+            with self.assertRaises(ProtocolError):
+                await broker.run(self.service)
+        self.assertFalse((directory / 'gateway.json').exists())
+
+    async def run_desktops(self, mode):
+        bun = shutil.which('bun')
+        if bun is None:
+            self.skipTest('Bun is required for the TypeScript gateway integration')
+        init = self.host.broker.init
+        token = Path(init['stateDir']) / f'test-token-{mode}'
+        with os.fdopen(os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as file:
+            file.write(init['desktopToken'])
+        fixture = Path(__file__).resolve().parents[2] / 'test' / 'fixtures' / 'shared-routing.ts'
+        child = await asyncio.create_subprocess_exec(bun, str(fixture), stdin=asyncio.subprocess.PIPE,
+                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            output, error = await asyncio.wait_for(child.communicate(encode({
+                **init, 'python': sys.executable, 'tokenFile': str(token), 'mode': mode,
+            })), 30)
+            self.assertEqual(child.returncode, 0, error.decode(errors='replace'))
+            return json.loads(output)
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+
+    async def test_real_typescript_admin_commands_share_routing_across_gateway_clients(self):
+        self.assertEqual(await self.run_desktops('normal'), {
+            'globalEnable': True, 'inherited': True, 'globalDisable': True, 'originExitSafe': True,
+        })
+        self.assertEqual(await self.host.local.routing(), {'away': True, 'delayMs': 30000})
+        self.assertEqual(self.control_ready.qsize(), 1)
+
+    async def test_real_typescript_gateway_rejects_legacy_broker_and_malformed_snapshot(self):
+        original = Client.event
+        for mode in ('legacy', 'malformed'):
+            with self.subTest(mode=mode):
+                def altered(client, **message):
+                    if mode == 'legacy' and message.get('event') == 'ready':
+                        message.pop('routingVersion', None)
+                    elif mode == 'malformed' and message.get('event') == 'routing':
+                        message['preferences'] = {'away': 'on', 'delayMs': None}
+                    original(client, **message)
+                with patch.object(Client, 'event', altered):
+                    self.assertEqual(await self.run_desktops(mode), {'rejected': True})
+                self.assertTrue((await self.host.command('devices'))['ok'])
+        self.assertEqual(self.control_ready.qsize(), 1)
 
     async def test_two_sessions_merge_inboxes_but_isolate_calls_and_survive_first_session_exit(self):
         phone = await self.phone()
@@ -214,7 +334,7 @@ class BrokerTest(test_relay.RelayTest):
             send_frame(child.stdin, 1, encode(init))
             async with asyncio.timeout(25):
                 kind, data = await read_frame(child.stdout)
-            self.assertEqual((kind, json.loads(data)), (1, {'event': 'ready'}))
+            self.assertEqual((kind, json.loads(data)), (1, {'event': 'ready', 'routingVersion': 1}))
             return child
         try:
             first, second = await asyncio.gather(start(), start())

@@ -1,5 +1,6 @@
 const PCM = 960;
 const routePattern = /^[A-Za-z0-9_-]{1,128}$/;
+export const isRoute = (value: unknown): value is string => typeof value === "string" && routePattern.test(value);
 
 function check(kind: number, size: number): void {
   if (!(kind === 1 && size > 0 && size <= 131072 || kind === 2 && size >= PCM + 22 && size <= PCM + 149)) {
@@ -17,7 +18,7 @@ export function frame(kind: number, data: Uint8Array): Buffer {
 }
 
 export function mediaPacket(id: number, deviceId: string, ref: string, pcm: Uint8Array): Buffer {
-  if (!routePattern.test(deviceId) || !/^[a-f0-9]{32}$/.test(ref) || pcm.length !== PCM) throw new Error('Invalid media packet');
+  if (!isRoute(deviceId) || !/^[a-f0-9]{32}$/.test(ref) || pcm.length !== PCM) throw new Error('Invalid media packet');
   const body = Buffer.allocUnsafe(21 + deviceId.length + PCM);
   body.writeUInt32BE(id);
   body[4] = deviceId.length;
@@ -31,7 +32,7 @@ export function readMedia(data: Uint8Array): {id: number; deviceId: string; ref:
   const view = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
   const n = view[4];
   const deviceId = view.toString('latin1', 5, 5 + n);
-  if (!routePattern.test(deviceId) || data.length !== 21 + n + PCM) throw new Error('Invalid media route');
+  if (!isRoute(deviceId) || data.length !== 21 + n + PCM) throw new Error('Invalid media route');
   return {id: view.readUInt32BE(0), deviceId, ref: view.toString('hex', 5 + n, 21 + n), pcm: view.subarray(21 + n)};
 }
 

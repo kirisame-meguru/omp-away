@@ -7,7 +7,6 @@ import type { Exchange, SideContext } from "./side";
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
 export type { Preferences } from "./preferences";
-export { loadPreferences, savePreferences } from "./preferences";
 export type { SideContext } from "./side";
 
 export interface InboxItem { requestId:string; project:string; question:string; createdAt:number }
@@ -45,13 +44,16 @@ export class DecisionCoordinator {
 		for(const entry of this.#pending.values()) this.#route(entry);
 	}
 	offer(ask:PendingAsk,ctx:SideContext,project:string):boolean {
-		if(this.#closed || this.#seen.has(ask.requestId) || this.#tools.has(ask.toolCallId)) return false;
-		this.#seen.add(ask.requestId); this.#tools.add(ask.toolCallId);
+		const key=ask.deduplicationKey ?? ask.toolCallId;
+		const createdAt=ask.createdAt ?? this.#clock.now();
+		if(this.#closed || this.#seen.has(ask.requestId) || this.#tools.has(key)) return false;
+		if(!Number.isSafeInteger(createdAt) || createdAt<0) return false;
+		this.#seen.add(ask.requestId); this.#tools.add(key);
 		let form:DecisionForm|undefined;
-		try { form=prepare(ask.html); } catch { /* An unsupported form must remain local. */ }
+		try { form=prepare(ask.html,ask.context); } catch { /* An unsupported form must remain local. */ }
 		if(!form) { this.#opt.error?.("unsupported-form"); return false; }
 		const life=new AbortController();
-		const item={requestId:ask.requestId,project:project.slice(0,128),question:form.question,createdAt:this.#clock.now()};
+		const item={requestId:ask.requestId,project:project.slice(0,128),question:(ask.context?.title ?? form.question).slice(0,256),createdAt};
 		const entry:Entry={item,ask,ctx,form,history:[],life,silenced:false,rang:false,submitted:false};
 		this.#pending.set(ask.requestId,entry); this.#route(entry); this.#opt.changed?.(); return true;
 	}
