@@ -7,10 +7,13 @@ import android.view.View
 import kotlin.math.*
 
 /** Lower-cost approximation; no native engine, image allocation, or blur during drawing. */
-internal class OrbFallback(context: Context) : View(context) {
+internal class OrbFallback(context: Context, private val shell: ShellMotion) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val lens = Path()
     private val sheet = Path()
+    private val contourX = FloatArray(129) { cos(it * 2.0 * PI / 128).toFloat() }
+    private val contourY = FloatArray(129) { sin(it * 2.0 * PI / 128).toFloat() }
+    private var cachedShape = Float.NaN
     private var background: Shader? = null
     private var glass: Shader? = null
     private var rim: Shader? = null
@@ -41,11 +44,16 @@ internal class OrbFallback(context: Context) : View(context) {
         background = LinearGradient(0f,0f,w.toFloat(),h*.6f,intArrayOf(0xff46372b.toInt(),0xff777065.toInt(),0xffaaa195.toInt()),null,Shader.TileMode.CLAMP)
         glass = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(Color.BLACK, Color.BLACK, 0xff3c3839.toInt(), 0xff645c4b.toInt()), floatArrayOf(0f,.33f,.65f,1f), Shader.TileMode.CLAMP)
         rim = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(0x223e454c,0x779798a2,0xffe2e1d5.toInt()), null, Shader.TileMode.CLAMP)
+    }
+
+    private fun updateLens() {
+        if (cachedShape == shell.shape) return
+        cachedShape = shell.shape
+        val power = 2f / cachedShape
         lens.reset()
         for (i in 0..128) {
-            val angle = i * 2.0 * PI / 128
-            val x = cos(angle).let { sign(it) * abs(it).pow(2.0 / 2.55) }.toFloat()
-            val y = sin(angle).let { sign(it) * abs(it).pow(2.0 / 2.55) * .744 }.toFloat()
+            val x = sign(contourX[i]) * abs(contourX[i]).pow(power)
+            val y = sign(contourY[i]) * abs(contourY[i]).pow(power) * .744f
             if (i == 0) lens.moveTo(x,y) else lens.lineTo(x,y)
         }
         lens.close()
@@ -53,8 +61,13 @@ internal class OrbFallback(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         val now = SystemClock.uptimeMillis()
-        if (motion && resumed && previous != 0L) elapsed += (now - previous).coerceAtMost(100) / 1000f
+        if (motion && resumed && previous != 0L) {
+            val dt = (now - previous).coerceIn(0,100) / 1000f
+            elapsed += dt
+            shell.advance(dt)
+        }
         previous = now
+        updateLens()
         paint.style = Paint.Style.FILL
         paint.alpha = 255
         paint.shader = background
@@ -70,7 +83,12 @@ internal class OrbFallback(context: Context) : View(context) {
         canvas.drawRoundRect(-1.4f,.36f,-.12f,1.72f,.17f,.17f,paint)
         paint.color = if (light) 0xffd4d1c9.toInt() else 0xff242424.toInt()
         canvas.drawRoundRect(.03f,.36f,1.31f,1.72f,.17f,.17f,paint)
+        // Background remains fixed while the lens translates, stretches and changes curvature.
+        canvas.translate(0f,-shell.lift)
+        canvas.scale(shell.width,shell.height)
+        val visibility = (255f*shell.opacity).toInt().coerceIn(0,255)
         paint.color = Color.WHITE
+        paint.alpha = visibility
         paint.shader = glass
         canvas.drawPath(lens, paint)
         canvas.save()
@@ -90,10 +108,10 @@ internal class OrbFallback(context: Context) : View(context) {
             }
             sheet.close()
             paint.shader = spectral[layer]
-            paint.alpha = if (layer == 2) 160 else 210
+            paint.alpha = (if (layer == 2) 160 else 210) * visibility / 255
             canvas.drawPath(sheet, paint)
         }
-        paint.alpha = 255
+        paint.alpha = visibility
         paint.blendMode = null
         canvas.restore()
         paint.style = Paint.Style.STROKE
@@ -103,8 +121,11 @@ internal class OrbFallback(context: Context) : View(context) {
         canvas.restore()
         paint.style = Paint.Style.FILL
         paint.shader = null
+        paint.alpha = 255
         paint.color = 0xe8000000.toInt()
         canvas.drawRect(0f, height*.58f, width.toFloat(), height.toFloat(), paint)
-        if (motion && resumed && isShown && windowVisibility == VISIBLE) postInvalidateOnAnimation()
+        if (motion && resumed && isShown && windowVisibility == VISIBLE && (shell.moving || shell.opacity > 0f)) {
+            postInvalidateOnAnimation()
+        } else previous = 0L
     }
 }

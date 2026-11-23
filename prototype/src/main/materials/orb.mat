@@ -6,13 +6,15 @@ material {
         { type : float2, name : viewport, precision : high },
         { type : float, name : time, precision : high },
         { type : float, name : energy, precision : high },
-        { type : float, name : backdrop, precision : high }
+        { type : float, name : backdrop, precision : high },
+        { type : float4, name : shellPose, precision : high },
+        { type : float, name : shellShape, precision : high }
     ]
 }
 fragment {
     // Mobile mediump quantizes the lens coordinates before coverage is evaluated.
     precision highp float;
-    const float SHAPE = 2.55;
+    #define SHAPE materialParams.shellShape
     const float HEIGHT = 0.744;
     const float DEPTH = 0.42;
     const float IOR = 1.43;
@@ -37,6 +39,9 @@ fragment {
         c = mix(c,mix(vec3(0.08,0.25,0.39),vec3(0.13,0.42,0.64),clamp(-p.y-0.15,0.0,1.0)),left);
         c = mix(c,vec3(0.83,0.82,0.79),right);
         return c * mix(0.10,1.0,materialParams.backdrop);
+    }
+    vec2 lensToWorld(vec2 p) {
+        return p * materialParams.shellPose.xy + vec2(0.0,materialParams.shellPose.z);
     }
     float radialPower(vec2 p) {
         return pow(abs(p.x),SHAPE) + pow(abs(p.y/HEIGHT),SHAPE);
@@ -108,12 +113,13 @@ fragment {
         radiance += vec3(0.65,0.75,0.80)*quiet*envelope*(1.0-level)*0.65;
         return radiance;
     }
-    vec3 shade(vec2 p, float pixel) {
+    vec3 shade(vec2 p, float worldPixel) {
+        float pixel = worldPixel/min(materialParams.shellPose.x,materialParams.shellPose.y);
         float power = radialPower(p);
         float shell = pow(power,1.0/SHAPE);
         float coverage = 1.0-smoothstep(1.0-pixel,1.0+pixel,shell);
-        vec3 outside = background(p,pixel);
-        if (coverage<=0.0) return outside;
+        vec3 outside = background(lensToWorld(p),worldPixel);
+        if (coverage<=0.0 || materialParams.shellPose.w<=0.0) return outside;
         float z = DEPTH*sqrt(max(0.0001,1.0-min(power,0.9999)));
         vec3 front = vec3(p,z);
         vec3 normal = surfaceNormal(p,z);
@@ -135,9 +141,11 @@ fragment {
         float totalReflection = step(dot(outgoing,outgoing),0.001);
         vec2 backdropPoint = exitPoint.xy+outgoing.xy*((exitPoint.z+0.70)/max(-outgoing.z,0.12));
         vec2 dispersion = (backdropPoint-p)*0.007;
-        vec3 transmittedColor = vec3(background(backdropPoint+dispersion,pixel).r,
-                                     background(backdropPoint,pixel).g,
-                                     background(backdropPoint-dispersion,pixel).b);
+        vec2 worldBackdrop = lensToWorld(backdropPoint);
+        vec2 worldDispersion = dispersion * materialParams.shellPose.xy;
+        vec3 transmittedColor = vec3(background(worldBackdrop+worldDispersion,worldPixel).r,
+                                     background(worldBackdrop,worldPixel).g,
+                                     background(worldBackdrop-worldDispersion,worldPixel).b);
         float fresnel = 0.031+0.969*pow(1.0-clamp(normal.z,0.0,1.0),5.0);
         float cap = smoothstep(-0.01,0.34,p.y);
         vec3 glass = transmittedColor*exp(-vec3(0.22,0.20,0.17)*travel)*(1.0-fresnel)*(1.0-cap);
@@ -154,7 +162,7 @@ fragment {
         float lower = 1.0-smoothstep(-0.05,0.30,p.y);
         glass += vec3(0.55,0.60,0.62)*rim*lower*(0.35+0.65*fresnel);
         // RGB subpixel energy is filtered analytically; edge width follows physical pixels.
-        return mix(outside,clamp(glass,0.0,1.0),coverage);
+        return mix(outside,clamp(glass,0.0,1.0),coverage*materialParams.shellPose.w);
     }
     void material(inout MaterialInputs material) {
         prepareMaterial(material);
@@ -163,6 +171,7 @@ fragment {
         float radius = min(size.x,size.y)*0.40;
         vec2 p = (uv-vec2(0.5,0.33))*size/radius;
         p.y = -p.y;
+        p = (p-vec2(0.0,materialParams.shellPose.z))/materialParams.shellPose.xy;
         float pixel = 1.0/radius;
         vec3 color = shade(p,pixel);
         color *= 1.0-0.92*smoothstep(0.53,0.72,uv.y);

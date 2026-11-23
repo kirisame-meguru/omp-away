@@ -15,6 +15,7 @@ internal class OrbSurface(
     context: Context,
     private val report: (String) -> Unit,
     private val slow: () -> Unit,
+    private val shell: ShellMotion,
 ) : SurfaceView(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
@@ -126,6 +127,9 @@ internal class OrbSurface(
         val dt = if (previous == 0L) 0f else ((frameTimeNanos - previous) / 1e9f).coerceIn(0f, .1f)
         previous = frameTimeNanos
         if (!still) elapsed += dt
+        if (!still) shell.advance(dt)
+        instance.setParameter("shellPose", shell.width, shell.height, shell.lift, shell.opacity)
+        instance.setParameter("shellShape", shell.shape)
         instance.setParameter("time", elapsed)
         instance.setParameter("energy", Choreography.energy(elapsed, mode))
         val chain = swapChain
@@ -136,8 +140,9 @@ internal class OrbSurface(
             submitted = true
             frames++
         }
-        if (still && submitted) {
-            report("Still frame · native lens study")
+        if (submitted && (still || (!shell.moving && shell.opacity == 0f))) {
+            resetMeasurement()
+            report(if (still) "Still frame · native lens study" else "Retracted · native lens study")
             return
         }
         if (!still) {

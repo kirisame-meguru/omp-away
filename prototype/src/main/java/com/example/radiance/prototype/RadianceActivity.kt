@@ -22,13 +22,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 class RadianceActivity : ComponentActivity() {
     private lateinit var surface: OrbSurface
     private lateinit var fallback: OrbFallback
+    private val shell = ShellMotion()
     private var autoFlat by mutableStateOf(false)
     private var diagnostics by mutableStateOf("Preparing native renderer…")
     private var motionEnabled by mutableStateOf(true)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        surface=OrbSurface(this,{ diagnostics=it },{ autoFlat=true })
-        fallback=OrbFallback(this)
+        surface=OrbSurface(this,{ diagnostics=it },{ autoFlat=true },shell)
+        fallback=OrbFallback(this,shell)
         setContent {
             var mode by remember { mutableIntStateOf(1) }
             var reduced by remember { mutableStateOf(false) }
@@ -42,6 +43,7 @@ class RadianceActivity : ComponentActivity() {
             val sceneStill=reduced || (!motionEnabled && !animatePreview)
             val sceneLight=light
             SideEffect {
+                shell.target(sceneMode,sceneStill)
                 surface.update(sceneMode,sceneStill,sceneLight,!flat,quality==0)
                 fallback.update(!sceneStill && flat,sceneLight,sceneMode)
             }

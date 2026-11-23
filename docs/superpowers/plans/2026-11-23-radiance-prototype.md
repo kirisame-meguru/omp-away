@@ -11,7 +11,7 @@ A separately installable, reference-driven liquid-glass voice visualization. The
 
 ## Reference findings
 
-The glass silhouette stays nearly fixed. Motion happens inside it: curved translucent light sheets expand, fold, overlap and settle. Bright folds become nearly white while outer lobes retain saturated color. The lower lens refracts visible background geometry; the upper cap is dark. Native-resolution inspection is required: reduced previews hide precision stair-stepping, shading bands and boundary defects.
+Within the listening pose, curved translucent light sheets expand, fold, overlap and settle inside a relatively stable shell. Bright folds become nearly white while outer lobes retain saturated color. Interaction recordings additionally show separate shell choreography: capsule-to-lens entry, contraction into a thinking capsule, expansion into an answer panel, and retraction on dismissal. Tablet entry includes a necked droplet separating from the bezel. These are distinct from audio-driven wave motion; the original audio-to-visual mapping remains unknown. The lower lens refracts visible background geometry; the upper cap is dark. Native-resolution inspection is required: reduced previews hide precision stair-stepping, shading bands and boundary defects.
 
 ## Architecture
 
@@ -21,7 +21,9 @@ The material evaluates a convex superelliptical lens, Snell refraction at entry 
 
 The Canvas fallback approximates the same silhouette, palette and movement using cached paths and gradients. It deliberately does not claim the primary renderer's optical fidelity. Auto ignores startup and switches after three consecutive two-second windows below 27 submitted frames/second. Manual GPU and 2D controls remain available. Actual presentation timing must be measured independently; submitted-frame diagnostics are not a GPU benchmark.
 
-The system animation preference is respected by default. A labeled, local preview override does not change system settings. Reduced motion renders a still frame. Backgrounding stops frame callbacks; destruction releases the surface and native resources.
+One mutable `ShellMotion` pose is shared across the native and fallback renderers. Closed-form critically damped springs animate width, height, upward displacement, visibility and superellipse curvature without per-frame allocations. Retargeting preserves pose and velocity; height settles behind width rather than uniformly scaling the whole object. Listen retains the approved lens exactly; Speak uses a wider, shallower shell; Connect and Silence use compact visible pills; End retracts and fades. These are prototype mode mappings, not a reproduction of the original answer UI or tablet droplet topology. Wave equations, palette and synthetic envelope remain unchanged. Background geometry stays fixed during shell movement; only the lens and its contents transform.
+
+The system animation preference is respected by default. A labeled, local preview override does not change system settings. Reduced motion immediately settles the shell to its target and renders a still frame. Fully retracted shells stop scheduling frames until another state or surface change requires rendering. Backgrounding stops frame callbacks; destruction releases the surface and native resources.
 
 ## Build and material reproduction
 
@@ -49,11 +51,12 @@ The compiler and runtime versions must stay aligned. Only mobile OpenGL and Vulk
 
 ## Acceptance
 
-- Build and deterministic choreography/quality-policy tests pass.
+- Build and deterministic choreography, quality-policy and shell-transition tests pass, including interruption, repeated targets, frame-rate independence, dismissal and reduced motion.
 - Inspect original-resolution PNGs and 1:1 crops, without resizing or sharpening. Use native-resolution recordings to assess temporal behavior separately.
 - Compare shell displacement, shaded folds, highlight softness and resting/active motion with the reference. Do not call subjective fidelity or pixel identity proven by unit tests.
 - Measure actual SurfaceFlinger presentation intervals during sustained motion; distinguish capture overhead and warmup from steady state.
 - Exercise mode controls, backgrounds, reduced motion, explicit override, GPU/2D/Auto, pause/resume and resource cleanup.
+- Compare the settled listening-wave crop against the prior renderer at native resolution; verify mode transitions and rapid reversals in recordings, not only endpoint screenshots. Switching GPU/2D must retain the shared shell pose.
 - Audit intended files and generated material for private data; commit only owned changes using a generic project identity. Publish from an isolated clean clone of the authorized private repository.
 
 ## Limitations
