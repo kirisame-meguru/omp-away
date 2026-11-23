@@ -8,3 +8,4 @@ dependencyResolutionManagement {
 rootProject.name = "omp-away"
 include(":app")
 include(":prototype")
+include(":radiance")

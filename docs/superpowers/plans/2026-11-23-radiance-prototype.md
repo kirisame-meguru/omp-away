@@ -17,6 +17,8 @@ Within the listening pose, curved translucent light sheets expand, fold, overlap
 
 Compose provides native labels and study controls above a Filament 1.56.0 SurfaceView. The scene is one full-screen quad with a precompiled material, not a procedural scene ray marcher.
 
+The `radiance` Android library owns the shared renderer, shell motion, quality policy and material. The Study app injects its unchanged synthetic `Choreography` through `EnergySource`; the library itself does not generate audio energy.
+
 The material evaluates a convex superelliptical lens, Snell refraction at entry and exit, Fresnel reflections, absorption and subtle dispersion. Its bounded five-step Newton solve finds the exit of that single lens. Three parametric light sheets use surface tangents for shaded transmission, graded emission, an achromatic fold highlight and analytic scattering lobes. The background is synthetic geometry, evaluated at refracted coordinates; this is not refraction of arbitrary Compose content. All spatial calculations and uniforms use high precision. Analytic pixel coverage and low-amplitude dithering address aliasing and output banding without a full-screen blur chain.
 
 The Canvas fallback approximates the same silhouette, palette and movement using cached paths and gradients. It deliberately does not claim the primary renderer's optical fidelity. Auto ignores startup and switches after three consecutive two-second windows below 27 submitted frames/second. Manual GPU and 2D controls remain available. Actual presentation timing must be measured independently; submitted-frame diagnostics are not a GPU benchmark.
@@ -32,16 +34,16 @@ Use JDK 17 and an Android SDK containing API 36 and Build Tools 36.0.0. Supply S
 From the Android root:
 
 ```powershell
-./gradlew.bat :prototype:testDebugUnitTest :prototype:assembleDebug
+./gradlew.bat :radiance:testDebugUnitTest :prototype:testDebugUnitTest :prototype:assembleDebug
 ```
 
-The compiled Android material is checked in. After editing `prototype/src/main/materials/orb.mat`, use the `matc` executable from Filament 1.56.0:
+The compiled Android material is checked in. After editing `radiance/src/main/materials/orb.mat`, use the `matc` executable from Filament 1.56.0:
 
 ```powershell
 ./prototype/tools/compile-materials.ps1 -Matc matc
 ```
 
-Equivalent command, from the prototype directory, on a platform with the pinned compiler:
+Equivalent command, from the radiance directory, on a platform with the pinned compiler:
 
 ```text
 matc --platform mobile --api opengl --api vulkan --optimize-size -o src/main/assets/orb.filamat src/main/materials/orb.mat

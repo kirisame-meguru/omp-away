@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
-    <application android:name=".Gateway" android:label="omp-away" android:icon="@drawable/ic_invite" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/private_data" android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <application android:name=".Gateway" android:label="${appLabel}" android:icon="@drawable/ic_invite" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/private_data" android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".InboxActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -1,4 +1,4 @@
-package com.example.radiance.prototype
+package com.example.radiance
 
 import android.content.Context
 import android.graphics.*
@@ -7,7 +7,11 @@ import android.view.View
 import kotlin.math.*
 
 /** Lower-cost approximation; no native engine, image allocation, or blur during drawing. */
-internal class OrbFallback(context: Context, private val shell: ShellMotion) : View(context) {
+class OrbFallback(
+    context: Context,
+    private val shell: ShellMotion,
+    private val energySource: EnergySource,
+) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val lens = Path()
     private val sheet = Path()
@@ -93,7 +97,7 @@ internal class OrbFallback(context: Context, private val shell: ShellMotion) : V
         canvas.drawPath(lens, paint)
         canvas.save()
         canvas.clipPath(lens)
-        val energy = Choreography.energy(elapsed, mode)
+        val energy = energySource.energy(elapsed, mode)
         val amplitude = .018f+.235f*energy
         paint.blendMode = BlendMode.PLUS
         for (layer in 0..2) {

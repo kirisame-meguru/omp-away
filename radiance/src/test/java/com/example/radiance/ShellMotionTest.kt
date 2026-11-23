@@ -1,4 +1,4 @@
-package com.example.radiance.prototype
+package com.example.radiance
 
 import org.junit.Assert.*
 import org.junit.Test

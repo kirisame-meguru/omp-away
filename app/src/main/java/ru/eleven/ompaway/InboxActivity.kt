@@ -16,6 +16,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -29,20 +30,24 @@ class InboxActivity : Activity() {
     private val app get() = application as Gateway
     private lateinit var scroll: ScrollView
     private lateinit var column: LinearLayout
+    private lateinit var root: FrameLayout
+    private var callScreen: CallScreen? = null
+    private var callSource: CallVisualSource? = null
     private var selectedId: String? = null
     private var incomingPair: String? = null
     private var notice: String? = null
     private var emojiDialog: AlertDialog? = null
     private var shownEmoji: String? = null
     private var resumed = false
-    private var transcriptViews: CallTranscriptViews? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         scroll = ScrollView(this).apply { isFillViewport = true }
         column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(24)) }
-        scroll.addView(column); setContentView(scroll)
+        scroll.addView(column)
+        root = FrameLayout(this).apply { addView(scroll, FrameLayout.LayoutParams(-1, -1)) }
+        setContentView(root)
         if (Build.VERSION.SDK_INT >= 30) scroll.setOnApplyWindowInsetsListener { view, insets ->
             val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
@@ -57,20 +62,51 @@ class InboxActivity : Activity() {
 
     override fun onResume() {
         super.onResume(); resumed = true
+        if (app.callId == null) clearCallScreen()
         app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
     }
     override fun onPause() {
         resumed = false
+        callScreen?.pause()
         app.background(); dismissEmoji()
         super.onPause()
     }
 
+    override fun onDestroy() {
+        clearCallScreen()
+        super.onDestroy()
+    }
+
+    private fun clearCallScreen() {
+        callScreen?.let { it.dispose(); root.removeView(it) }
+        callScreen = null; callSource = null
+        scroll.visibility = View.VISIBLE
+    }
     private fun render() {
         if (!resumed || isFinishing) return
+        val visual = app.callVisual
+        if (visual != null) {
+            if (callSource !== visual) {
+                clearCallScreen()
+                val screen = CallScreen(this, visual, app::setSpeakerEnabled, app::hangup)
+                callScreen = screen; callSource = visual
+                root.addView(screen, FrameLayout.LayoutParams(-1, -1))
+                scroll.visibility = View.GONE
+                screen.resume()
+            }
+            callScreen?.setSpeaker(app.speakerEnabled)
+            renderVoice()
+            return
+        }
+        callScreen?.let { screen ->
+            screen.dismiss {
+                if (callScreen === screen) { clearCallScreen(); render() }
+            }
+            return
+        }
         val y = scroll.scrollY
         column.removeAllViews()
-        transcriptViews = null
         text("Away inbox", 28, bold = true)
         text(app.status, 16)
         notice?.let { text(it, 14) }
@@ -103,11 +139,6 @@ class InboxActivity : Activity() {
             } else button("Cancel pairing") { app.retry() }
         } else {
             if (app.callId == null) button(if (app.verifiedInbox) "Refresh inbox" else "Reconnect") { notice = null; app.retry() }
-            app.callId?.let {
-                transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 17), text("", 17))
-                renderVoice()
-                button("Hang up") { app.hangup() }
-            }
         }
         val state = app.store.state
         val selected = selectedId
@@ -151,7 +182,7 @@ class InboxActivity : Activity() {
 
     private fun renderVoice() {
         if (!resumed || app.callId == null) return
-        transcriptViews?.update(app.talking, app.speaking, app.callerCaption, app.callerCaptionFinal,
+        callScreen?.captions(app.callerCaption, app.callerCaptionFinal,
             app.assistantCaption, app.assistantCaptionFinal)
     }
 

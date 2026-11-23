@@ -18,6 +18,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.radiance.OrbFallback
+import com.example.radiance.OrbSurface
+import com.example.radiance.ShellMotion
 
 class RadianceActivity : ComponentActivity() {
     private lateinit var surface: OrbSurface
@@ -28,8 +31,8 @@ class RadianceActivity : ComponentActivity() {
     private var motionEnabled by mutableStateOf(true)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        surface=OrbSurface(this,{ diagnostics=it },{ autoFlat=true },shell)
-        fallback=OrbFallback(this,shell)
+        surface=OrbSurface(this,{ diagnostics=it },{ autoFlat=true },shell,Choreography)
+        fallback=OrbFallback(this,shell,Choreography)
         setContent {
             var mode by remember { mutableIntStateOf(1) }
             var reduced by remember { mutableStateOf(false) }

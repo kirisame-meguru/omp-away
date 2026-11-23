@@ -1,4 +1,4 @@
-package com.example.radiance.prototype
+package com.example.radiance
 
 /** Ignore startup; require three consecutive slow two-second windows. Never oscillate tiers. */
 internal class QualityPolicy {

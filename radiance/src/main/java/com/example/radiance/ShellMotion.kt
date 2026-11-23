@@ -1,10 +1,10 @@
-package com.example.radiance.prototype
+package com.example.radiance
 
 import kotlin.math.abs
 import kotlin.math.exp
 
 /** Mutable shell pose shared by native and fallback renderers; waves have their own clock. */
-internal class ShellMotion {
+class ShellMotion {
     companion object {
         // Width, height, upward displacement (lens radii), visibility, superellipse power.
         private val poses = arrayOf(

@@ -36,7 +36,7 @@ internal class CallService(
     private val failed: () -> Unit,
     private val ready: () -> Unit = {},
     private val speaking: (Boolean) -> Unit = {},
-) : AutoCloseable {
+) : AutoCloseable, CallVisualSource {
     private val app = context.applicationContext
     private val audio = checkNotNull(app.getSystemService(AudioManager::class.java))
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -49,19 +49,35 @@ internal class CallService(
     private val live = AtomicBoolean(true)
     private val captureReady = CountDownLatch(1)
     private var recording: AudioRecord? = null
-    private var output: AudioTrack? = null
+    @Volatile private var output: AudioTrack? = null
     private var ownsFocus = false
     private var previousMode: Int? = null
     private var started = false
     private var speakerEnabled = CallAudioSettings(app).speakerEnabled
     private var routedSpeaker = false
     private var previousSpeakerphone: Boolean? = null
+    private val visualLevels = AudioVisualLevels()
+    override val active get() = live.get()
+    @Volatile override var connected = false
+        private set
+
+    override fun microphoneLevel(nowMillis: Long): Float =
+        if (live.get()) visualLevels.microphone(nowMillis) else 0f
+
+    override fun playbackLevel(): Float {
+        if (!live.get()) return 0f
+        val track = output ?: return 0f
+        // Playback-head position is display-only. Strict acknowledgement still uses timestamps.
+        val position = try { track.playbackHeadPosition.toLong() and 0xffffffffL }
+            catch (_: IllegalStateException) { return 0f }
+        return visualLevels.playback(position)
+    }
 
     // Serial channel reader owns each PCM array; do not copy or return it to a pool.
     fun receive(pcm: ByteArray) { if (live.get() && (pcm.size != BYTES || !queue.offer(pcm))) fail() }
     fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail() }
 
-    fun invalidate() { live.set(false); captureReady.countDown() }
+    fun invalidate() { live.set(false); connected = false; visualLevels.close(); captureReady.countDown() }
 
     fun setSpeakerEnabled(enabled: Boolean): Boolean {
         if (!live.get()) return false
@@ -115,10 +131,12 @@ internal class CallService(
     }, name).start()
 
     private fun fail() {
-        if (live.getAndSet(false)) { captureReady.countDown(); failed() }
+        if (live.getAndSet(false)) { connected = false; visualLevels.close(); captureReady.countDown(); failed() }
     }
 
     private fun capture() {
+        if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            throw IOException("Microphone permission unavailable")
         val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(min > 0)
         val record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
@@ -148,6 +166,7 @@ internal class CallService(
                 if (n == 0) { Thread.sleep(4); continue }
                 offset += n
                 if (offset == BYTES) {
+                    visualLevels.capture(buffer, SystemClock.elapsedRealtime())
                     synchronized(gate) { if (live.get()) send(buffer) } // channel takes its own snapshot synchronously
                     if (first) { first = false; captureReady.countDown() }
                     offset = 0
@@ -193,18 +212,16 @@ internal class CallService(
                                 track.play()
                             }
                         }
+                        val energy = AudioVisualLevels.power(next)
+                        visualLevels.enqueue(framesWritten, BYTES / 2, energy)
                         write(track, next)
                         framesWritten += BYTES / 2
-                        var energy = 0L
-                        for (i in next.indices step 2) {
-                            val sample = ((next[i].toInt() and 255) or (next[i + 1].toInt() shl 8)).toShort().toLong()
-                            energy += sample * sample
-                        }
                         if (energy >= 64L * 64 * (BYTES / 2)) {
                             lastVoiceFrame = framesWritten; lastVoiceAt = SystemClock.elapsedRealtime()
                             if (!speechActive) { speechActive = true; speaking(true) }
                         }
                         if (framesWritten == BYTES / 2L && live.get()) {
+                            connected = true
                             ready()
                         }
                         receivedAudio = true

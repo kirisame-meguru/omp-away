@@ -8,7 +8,7 @@ if ($LASTEXITCODE -ne 0 -or $version -ne '56') {
     throw 'Use matc from Filament 1.56.0 (material version 56), matching the Android dependency.'
 }
 
-Push-Location (Join-Path $PSScriptRoot '..')
+Push-Location (Join-Path $PSScriptRoot '../../radiance')
 try {
     & $compiler --platform mobile --api opengl --api vulkan --optimize-size `
         -o src/main/assets/orb.filamat src/main/materials/orb.mat

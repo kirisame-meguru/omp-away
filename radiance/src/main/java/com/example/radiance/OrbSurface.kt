@@ -1,4 +1,4 @@
-package com.example.radiance.prototype
+package com.example.radiance
 
 import android.content.Context
 import android.view.Choreographer
@@ -11,11 +11,12 @@ import java.nio.ByteOrder
 import java.util.Locale
 
 /** Analytic lens and three light sheets. No ray marching, blur passes, or frame allocations. */
-internal class OrbSurface(
+class OrbSurface(
     context: Context,
     private val report: (String) -> Unit,
     private val slow: () -> Unit,
     private val shell: ShellMotion,
+    private val energySource: EnergySource,
 ) : SurfaceView(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
@@ -131,7 +132,7 @@ internal class OrbSurface(
         instance.setParameter("shellPose", shell.width, shell.height, shell.lift, shell.opacity)
         instance.setParameter("shellShape", shell.shape)
         instance.setParameter("time", elapsed)
-        instance.setParameter("energy", Choreography.energy(elapsed, mode))
+        instance.setParameter("energy", energySource.energy(elapsed, mode))
         val chain = swapChain
         var submitted = false
         if (chain != null && helper.isReadyToRender && renderer.beginFrame(chain, frameTimeNanos)) {

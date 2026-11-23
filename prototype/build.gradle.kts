@@ -26,6 +26,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.activity:activity-compose:1.11.0")
-    implementation("com.google.android.filament:filament-android:1.56.0")
+    implementation(project(":radiance"))
     testImplementation("junit:junit:4.13.2")
 }
