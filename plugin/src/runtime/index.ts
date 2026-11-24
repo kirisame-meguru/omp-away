@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { Preferences } from "../decisions";
 import { Enrollment } from "./enrollment";
 import { connectRuntime, type MobileRuntime } from "./routing";
+import { PairingQr } from "./pairing-qr";
 
 const runtimeWarnings: Readonly<Record<string,string>> = {
 	phone_disconnected: "Phone connection was interrupted",
@@ -60,7 +61,13 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(text,type)};
 	const status=(prefs:Preferences)=>`Away (all sessions) immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`;
 	const enrollment=new Enrollment(text=>ctx.ui.setWidget("omp-away-pairing",text?.split("\n")));
-	function cancelEnrollment() {++nextPair; expires=0; enrollment.cancel()}
+	let expiryTimer: NodeJS.Timeout | undefined;
+	function clearQr() {
+		clearTimeout(expiryTimer);
+		expiryTimer=undefined;
+		ctx.ui.setWidget("omp-away-pairing-qr",undefined);
+	}
+	function cancelEnrollment() {++nextPair; expires=0; clearQr(); enrollment.cancel()}
 	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,
 		onRouting(next) {
 			if (!current()) return;
@@ -70,6 +77,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		confirmPair:async (_device,emoji)=>{
 			if (!current() || !idle() || Date.now()>=expires) return false;
 			expires=0;
+			clearQr();
 			const accepted=await enrollment.compare(emoji);
 			return accepted && current() && idle();
 		},
@@ -89,23 +97,45 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				if (!idle() || !enrollment.decide(decision[1]==="approve",decision[2])) notify("No matching idle local comparison.","warning");
 				return;
 			}
-			if (args==="pair") {
+			if (args==="pair" || args==="pair clipboard") {
 				if (!idle() || pairing) {notify("Pair only from the idle desktop composer.","warning");return}
 				cancelEnrollment();const epoch=nextPair;pairing=true;
 				try {
 					const payload=await runtime.pair();
 					if (!current() || !idle() || epoch!==nextPair) return;
-					await resources.copy(payload,python);
-					if (!current() || !idle() || epoch!==nextPair) return;
+					if (args==="pair clipboard") {
+						await resources.copy(payload,python);
+						if (!current() || !idle() || epoch!==nextPair) return;
+					} else {
+						let availableRows=()=>0;
+						const qr=new PairingQr(payload,()=>availableRows());
+						ctx.ui.setWidget("omp-away-pairing-qr",tui=>{
+							availableRows=()=>tui.terminal.rows;
+							return qr;
+						});
+					}
 					expires=Date.now()+600_000;
-					notify("Away enrollment copied. Paste only into your phone's pairing screen or a trusted offline QR renderer. Compare all 12 emojis here and on the phone.");
-				} catch {notify("Away enrollment or private clipboard unavailable; no device approved.","error")}
+					expiryTimer=setTimeout(()=>{
+						if (epoch!==nextPair) return;
+						cancelEnrollment();
+						notify("Away pairing expired. Run /away pair for a new QR.","warning");
+					},600_000);
+					expiryTimer.unref();
+					notify(args==="pair clipboard"
+						? "Away enrollment copied. Paste only into your phone's pairing screen. Compare all 12 emojis here and on the phone."
+						: "Scan the QR with Away on your phone, then compare all 12 emojis. Clipboard alternative: /away pair clipboard.");
+				} catch {
+					if (epoch===nextPair) cancelEnrollment();
+					notify(args==="pair clipboard"
+						? "Away enrollment or private clipboard unavailable; no device approved."
+						: "Away QR unavailable. Retry /away pair or use /away pair clipboard; no device approved.","error");
+				}
 				finally {pairing=false}
 				return;
 			}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
 			if (args!=="" && args!=="on" && args!=="off" && args!=="status" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
-				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair]", "warning");return;
+				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair [clipboard]]", "warning");return;
 			}
 			// Preserve this session's command order; the broker serializes patches
 			// across all sessions and broadcasts the committed state back to us.

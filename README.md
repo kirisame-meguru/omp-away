@@ -101,7 +101,7 @@ Wait for **Away: local guest ready** and **Away: secure mobile gateway ready**. 
 ### 3. Pair, then enable invitations
 
 1. From an idle desktop composer, run `/away pair`.
-2. Use the phone’s **Pair from clipboard** flow, or a trusted offline QR renderer. Never paste the pairing payload into a chat or an online QR service.
+2. Tap **Scan pairing QR** on the phone and scan the desktop QR. It expires after ten minutes. For clipboard pairing instead, run `/away pair clipboard` and use the phone’s **Pair from clipboard** flow. Clipboard transfer to the phone is your responsibility; never paste the pairing payload into a chat or an online QR service.
 3. Compare **all twelve emoji**, in order, on both devices. Approve on the phone and use the desktop widget’s `/away approve CODE` only when they match.
 4. Enable invitations and notification permission in the app. Grant microphone access when you want to answer by voice.
 5. Run `/away on` on the desktop. Pair before creating a request: newly paired devices do not inherit already-open questions.
@@ -115,7 +115,8 @@ Wait for **Away: local guest ready** and **Away: secure mobile gateway ready**. 
 | `/away fallback 90` | Escalate an unanswered request after 90 seconds |
 | `/away fallback off` | Disable delayed escalation |
 | `/away status` | Inspect the current routing settings |
-| `/away pair` | Start a new, explicitly approved pairing from an idle desktop |
+| `/away pair` | Display a temporary pairing QR from an idle desktop |
+| `/away pair clipboard` | Copy pairing data instead of displaying a QR |
 
 For routing scope, multi-session behavior, and upgrade notes, see [routing and call behavior](plugin/DEBUG.md#routing-and-call-behavior).
 

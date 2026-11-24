@@ -1,6 +1,7 @@
 const action = (value:string, description:string) => ({value,label:value,description});
 const actions = [
-	action("pair", "Pair a phone with this desktop"),
+	action("pair", "Show a QR to pair a phone with this desktop"),
+	action("pair clipboard", "Copy pairing data instead of displaying a QR"),
 	action("status", "Show shared immediate and fallback settings"),
 	action("on", "Enable immediate ringing for all connected sessions"),
 	action("off", "Stop immediate ringing in all sessions; keep fallback"),
