@@ -18,6 +18,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /** Native controls only. Agent-provided markup never runs scripts or loads remote resources. */
@@ -47,18 +48,52 @@ internal class QuestionFormView(
         orientation = VERTICAL
         isSaveEnabled = false // Drafts live only in application memory, never instance-state parcels.
         isSaveFromParentEnabled = false
-        schema.optString("title").takeIf { it.isNotBlank() }?.let { addView(label(it, true)) }
-        schema.optString("description").takeIf { it.isNotBlank() }?.let { addView(label(it)) }
+        val contextTitle = schema.optString("title")
+        val description = schema.optString("description")
+        val titleKey = normalized(contextTitle)
+        val descriptionKey = normalized(description)
+        var titleInContent = false
+        var descriptionInContent = false
+        fun authored(text: CharSequence) {
+            if ((titleKey.isEmpty() || titleInContent) && (descriptionKey.isEmpty() || descriptionInContent)) return
+            val key = normalized(text)
+            if (key == titleKey) titleInContent = true
+            if (key == descriptionKey) descriptionInContent = true
+        }
         val sections = schema.getJSONArray("sections")
         for (i in 0 until sections.length()) {
             val section = sections.getJSONObject(i)
             val title = spans(section.optJSONArray("title"))
-            if (title.isNotEmpty()) addView(label(title, true))
             val blocks = section.getJSONArray("blocks")
+            var fieldCount = 0
+            var singleField: JSONObject? = null
+            for (j in 0 until blocks.length()) {
+                val block = blocks.getJSONObject(j)
+                if (block.getString("kind") == "field") {
+                    fieldCount++
+                    singleField = block.getJSONObject("field")
+                }
+            }
+            // A fieldset's legend already labels its sole field. Multiple independent fields
+            // retain their own captions, even when their labels happen to be identical.
+            val sharedCaption = singleField?.takeIf {
+                fieldCount == 1 && title.isNotBlank() &&
+                    normalized(it.optString("question", it.getString("name"))) == normalized(title)
+            }
+            if (title.isNotEmpty()) {
+                authored(title)
+                val caption = if (sharedCaption?.optBoolean("required") == true)
+                    SpannableStringBuilder(title).append(" *") else title
+                addView(label(caption, true))
+            }
             for (j in 0 until blocks.length()) {
                 val block = blocks.getJSONObject(j)
                 when (block.getString("kind")) {
-                    "text" -> addView(label(spans(block.getJSONArray("spans")), block.optBoolean("heading")))
+                    "text" -> {
+                        val text = spans(block.getJSONArray("spans"))
+                        authored(text)
+                        addView(label(text, block.optBoolean("heading")))
+                    }
                     "pre" -> addView(HorizontalScrollView(context).apply {
                         addView(label(block.getString("text")).apply { typeface = Typeface.MONOSPACE })
                     })
@@ -79,11 +114,22 @@ internal class QuestionFormView(
                         }
                         addView(HorizontalScrollView(context).apply { addView(table) })
                     }
-                    "field" -> field(block.getJSONObject("field"), draft)
+                    "field" -> {
+                        val definition = block.getJSONObject("field")
+                        if (definition !== sharedCaption)
+                            authored(definition.optString("question", definition.getString("name")))
+                        field(definition, draft, showCaption = definition !== sharedCaption)
+                    }
                     "image", "svg" -> addView(label(block.optString("alt").ifBlank { "Image" } + " — view on desktop"))
                 }
             }
         }
+        // Metadata may repeat authored content, but authored paragraphs/sections are never removed.
+        var metadataIndex = 0
+        if (contextTitle.isNotBlank() && !titleInContent) addView(label(contextTitle, true), metadataIndex++)
+        if (description.isNotBlank() && !descriptionInContent &&
+            (titleInContent || descriptionKey != titleKey)) addView(label(description), metadataIndex)
+        if (childCount == 0) throw JSONException("Empty touch form")
         message.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         addView(message); addView(send, LayoutParams(-1, -2))
     }
@@ -99,10 +145,10 @@ internal class QuestionFormView(
     fun values() = JSONObject().also { result -> readers.forEach { (name, read) -> read()?.let { result.put(name, it) } } }
     fun notes() = JSONArray().also { result -> noteReaders.forEach { read -> read()?.let { result.put(it) } } }
 
-    private fun field(field: JSONObject, draft: JSONObject?) {
+    private fun field(field: JSONObject, draft: JSONObject?, showCaption: Boolean) {
         val name = field.getString("name")
         val caption = field.optString("question", name) + if (field.optBoolean("required")) " *" else ""
-        addView(label(caption, true))
+        if (showCaption) addView(label(caption, true))
         if (field.getString("kind") == "text") {
             val edit = editor(field.optBoolean("multiline"))
             edit.contentDescription = caption
@@ -156,6 +202,7 @@ internal class QuestionFormView(
             val control = if (multi) CheckBox(context) else RadioButton(context)
             control.id = View.generateViewId()
             control.text = spans(option.getJSONArray("label")).ifEmpty { value }
+            control.contentDescription = "$caption: ${control.text}"
             control.setTextColor(RadianceUi.cream); control.buttonTintList = RadianceUi.tint; control.textSize = 16f
             control.minHeight = dp(48); control.isEnabled = !option.optBoolean("disabled")
             if (control.isEnabled) inputs.add(control)
@@ -170,6 +217,7 @@ internal class QuestionFormView(
             val custom = values.firstOrNull { value -> controls.none { it.second == value } }
             other = if (multi) CheckBox(context) else RadioButton(context)
             other.id = View.generateViewId(); other.text = "Other"; other.setTextColor(RadianceUi.cream)
+            other.contentDescription = "$caption: Other"
             other.buttonTintList = RadianceUi.tint; other.minHeight = dp(48)
             inputs.add(other)
             group.addView(other, LayoutParams(-1, -2))
@@ -272,5 +320,7 @@ internal class QuestionFormView(
             if (style != null) setSpan(style, start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
     }
+    private fun normalized(text: CharSequence) = whitespace.replace(text.toString().trim(), " ")
+    private companion object { val whitespace = Regex("[\\s\\u00a0]+") }
     private fun dp(value: Int) = (value * resources.displayMetrics.density + .5f).toInt()
 }

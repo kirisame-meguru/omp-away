@@ -395,8 +395,7 @@ class InboxActivity : Activity() {
         val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == app.callId }.thenByDescending { it.createdAt })
         for (item in rows) card {
             requestHeading(item)
-            if (app.verifiedInbox) text(item.question, 17)
-            renderForm(item)
+            renderQuestionBody(item, showDetails = false)
             voiceButton(item)
             button("View details") { selectedId = item.id; app.acknowledge(item.id); page = Page.DETAILS; render() }
             if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
@@ -411,12 +410,22 @@ class InboxActivity : Activity() {
         }
     }
 
-    private fun renderForm(item: Pending) {
+    private fun renderQuestionBody(item: Pending, showDetails: Boolean) {
+        if (renderForm(item)) return
+        if (showDetails) {
+            val detail = detailViews.getOrPut(item.id) { QuestionDetailView(this) }
+            (detail.parent as? ViewGroup)?.removeView(detail)
+            detail.bind(item, app.store.state.details[item.id], app.verifiedInbox)
+            contentTarget.addView(detail, LinearLayout.LayoutParams(-1, -2))
+        } else if (app.verifiedInbox) text(item.question, 17)
+    }
+
+    private fun renderForm(item: Pending): Boolean {
         val schema = app.forms[item.id]
         if (schema == null || !app.verifiedInbox) {
             text(app.formMessages[item.id] ?: if (app.verifiedInbox) "Loading question…" else "Reconnect to answer.", 16)
             app.loadForm(item.id)
-            return
+            return false
         }
         val cached = formViews[item.id]
         val view = if (cached != null && cached.schema === schema) cached else {
@@ -427,12 +436,13 @@ class InboxActivity : Activity() {
                 }.also { formViews[item.id] = it }
             } catch (_: org.json.JSONException) {
                 text("This question cannot be displayed here. Review details or answer on the desktop.", 16)
-                return
+                return false
             }
         }
         (view.parent as? ViewGroup)?.removeView(view)
         view.availability(app.verifiedInbox && app.idle, item.id in app.submitting, app.formMessages[item.id])
         contentTarget.addView(view, LinearLayout.LayoutParams(-1, -2))
+        return true
     }
 
     private fun voiceButton(item: Pending) {
@@ -463,13 +473,8 @@ class InboxActivity : Activity() {
         }
         card {
             requestHeading(item)
-            if (app.verifiedInbox) text(item.question, 18)
             notice?.let { text(it, 14) }
-            renderForm(item)
-            val detail = detailViews.getOrPut(item.id) { QuestionDetailView(this) }
-            (detail.parent as? ViewGroup)?.removeView(detail)
-            detail.bind(item, state.details[item.id], app.verifiedInbox)
-            contentTarget.addView(detail, LinearLayout.LayoutParams(-1, -2))
+            renderQuestionBody(item, showDetails = true)
         }
         if (app.callId == item.id) {
             card {
