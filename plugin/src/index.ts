@@ -272,7 +272,7 @@ export default function away(pi: ExtensionAPI): void {
 	pi.registerTool<typeof endCallParameters>({
 		name: "away_end_call",
 		label: "End Away call",
-		description: "End this session's Away voice call once its purpose is resolved or the user asks to hang up. Use the requestId from the omp-away-plugin call context. This stops handset audio and native live mode; it does not submit an answer. Do not leave a completed call open. Do not call while awaiting the user's answer or continuing the conversation.",
+		description: "End this session's Away voice call as soon as its question and necessary clarifications are resolved, explicitly cancelled or deferred, or the user asks to hang up. Use the requestId from the omp-away-plugin call context. This stops handset audio and native live mode; it does not submit an answer or resolve a pending form. Do not wait for implementation to finish or ask for extra permission to hang up. After ending, apply the spoken outcome and resume interrupted work, or start the authorized work that was waiting for the answer. Do not stop at reporting that the call ended while work remains. Honor explicit instructions to stop work; otherwise do not end on a pause or during necessary clarification.",
 		parameters: endCallParameters,
 		loadMode: "essential",
 		approval: "write",
