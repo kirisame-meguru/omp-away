@@ -6,6 +6,9 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.content.res.ColorStateList
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -15,6 +18,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.window.OnBackInvokedDispatcher
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.FrameLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -24,6 +28,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.EditText
+import android.widget.ImageButton
 import com.google.zxing.integration.android.IntentIntegrator
 import com.journeyapps.barcodescanner.CaptureActivity
 import java.text.DateFormat
@@ -32,6 +37,7 @@ import java.util.Date
 class InboxActivity : Activity() {
     private val app get() = application as Gateway
     private lateinit var scroll: ScrollView
+    private lateinit var refresh: InboxRefreshLayout
     private lateinit var column: LinearLayout
     private var selectedId: String? = null
     private var incomingPair: String? = null
@@ -52,6 +58,9 @@ class InboxActivity : Activity() {
     private lateinit var screenPreferences: ScreenPreferences
     private lateinit var panelBack: Button
     private lateinit var panelTitle: TextView
+    private lateinit var panelStatus: TextView
+    private lateinit var panelSettings: ImageButton
+    private val statusDot = GradientDrawable().apply { shape = GradientDrawable.OVAL }
     private lateinit var contentTarget: LinearLayout
     private lateinit var panelToolbar: LinearLayout
     private lateinit var panelLensSlot: View
@@ -90,6 +99,32 @@ class InboxActivity : Activity() {
         column = RadianceUi.column(this).apply { setPadding(dp(16), 0, dp(16), dp(20)) }
         contentTarget = column
         scroll.addView(column)
+        refresh = InboxRefreshLayout(this).apply {
+            setColorSchemeColors(RadianceUi.cream)
+            setProgressBackgroundColorSchemeColor(RadianceUi.controlColor)
+            setOnChildScrollUpCallback { _, _ -> scroll.canScrollVertically(-1) }
+            setOnRefreshListener {
+                if (resumed && page == Page.REQUESTS && app.canRefresh) {
+                    saveDrafts()
+                    notice = null
+                    app.refreshQuestions()
+                } else isRefreshing = false
+            }
+        }
+        scroll.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                if (page == Page.REQUESTS && app.canRefresh && !app.refreshing)
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.refresh_questions, "Refresh questions"))
+            }
+            override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
+                if (action == R.id.refresh_questions && resumed && page == Page.REQUESTS && app.canRefresh && !app.refreshing) {
+                    saveDrafts(); notice = null; app.refreshQuestions()
+                    return true
+                }
+                return super.performAccessibilityAction(host, action, args)
+            }
+        }
         callScreen = CallScreen(this, null, app::setSpeakerEnabled, app::hangup, ::openInbox, ::showSettings)
         val panelHeader = RadianceUi.column(this).apply {
             setPadding(dp(12), dp(8), dp(12), dp(12))
@@ -108,7 +143,32 @@ class InboxActivity : Activity() {
         panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
         panelToolbar.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
         panelHeader.addView(panelToolbar, LinearLayout.LayoutParams(-1, -2))
-        panelHeader.addView(panelTitle, LinearLayout.LayoutParams(-1, -2))
+        panelStatus = RadianceUi.text(this, "", 14).apply {
+            setPadding(dp(8), 0, dp(8), dp(4))
+            compoundDrawablePadding = dp(8)
+            statusDot.setBounds(0, 0, dp(6), dp(6))
+            setCompoundDrawablesRelative(statusDot, null, null, null)
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        panelSettings = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_settings)
+            imageTintList = ColorStateList.valueOf(RadianceUi.cream)
+            contentDescription = "Settings"
+            tooltipText = "Settings"
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = RippleDrawable(ColorStateList.valueOf(0x33f4f1eb), null,
+                RadianceUi.surface(this@InboxActivity))
+            setOnClickListener { if (resumed) showSettings() }
+        }
+        val heading = RadianceUi.column(this).apply {
+            addView(panelTitle, LinearLayout.LayoutParams(-1, -2))
+            addView(panelStatus, LinearLayout.LayoutParams(-1, -2))
+        }
+        panelHeader.addView(LinearLayout(this).apply {
+            gravity = Gravity.TOP
+            addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(panelSettings, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }, LinearLayout.LayoutParams(-1, -2))
         panel = RadianceUi.column(this).apply {
             background = RadianceUi.surface(this@InboxActivity)
             visibility = View.GONE
@@ -120,9 +180,11 @@ class InboxActivity : Activity() {
                 setMargins(dp(12), dp(12), dp(12), dp(12))
             })
         }
+        refresh.panel = panel
+        refresh.addView(overlay, ViewGroup.LayoutParams(-1, -1))
         setContentView(FrameLayout(this).apply {
             addView(callScreen, FrameLayout.LayoutParams(-1, -1))
-            addView(overlay, FrameLayout.LayoutParams(-1, -1))
+            addView(refresh, FrameLayout.LayoutParams(-1, -1))
             (callScreen.voiceOverlay.parent as? ViewGroup)?.removeView(callScreen.voiceOverlay)
             addView(callScreen.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
         })
@@ -134,9 +196,17 @@ class InboxActivity : Activity() {
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
             overlay.setOnApplyWindowInsetsListener { view, insets ->
                 val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
+                refresh.setTopInset(safe.top)
                 view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
             }
-        } else overlay.fitsSystemWindows = true
+        } else {
+            overlay.fitsSystemWindows = true
+            overlay.setOnApplyWindowInsetsListener { view, insets ->
+                @Suppress("DEPRECATION")
+                refresh.setTopInset(insets.systemWindowInsetTop)
+                view.onApplyWindowInsets(insets)
+            }
+        }
         if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(
             OnBackInvokedDispatcher.PRIORITY_DEFAULT
         ) {
@@ -358,6 +428,14 @@ class InboxActivity : Activity() {
             page = if (app.paired) Page.REQUESTS else Page.PAIRING
         }
         showInboxPanel(page != Page.NONE)
+        refresh.isEnabled = page == Page.REQUESTS && app.canRefresh
+        refresh.isRefreshing = page == Page.REQUESTS && app.refreshing
+        panelSettings.visibility = if (page == Page.REQUESTS) View.VISIBLE else View.GONE
+        panelStatus.visibility = if (page == Page.REQUESTS) View.VISIBLE else View.GONE
+        if (page == Page.REQUESTS) {
+            panelStatus.text = if (app.refreshing) "Refreshing questions…" else app.status
+            statusDot.setColor(if (app.verifiedInbox) RadianceUi.cream else RadianceUi.disabled)
+        }
         if (page == Page.NONE) { renderedPage = null; return }
         panelBack.text = if (page == Page.SETTINGS) "Done" else "Back"
         panelBack.visibility = if (page == Page.REQUESTS) View.GONE else View.VISIBLE
@@ -395,20 +473,18 @@ class InboxActivity : Activity() {
     }
 
     private fun renderRequests() {
-        card {
-            text(app.status, 16)
+        if (app.answerReceipt != null || notice != null || app.pushWarning != null || !app.paired ||
+            app.needsRelayOrigin || !Invites.allowed(this) || app.callId != null) card {
             app.answerReceipt?.let { text(it, 16).accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
             notice?.let { text(it, 14) }
             app.pushWarning?.let { text(it, 14) }
             if (!app.paired) button("Pair desktop", primary = true) { openPairing() }
             else if (app.needsRelayOrigin) button("Restore relay address", primary = true) { page = Page.RELAY; render() }
-            else if (app.callId == null) button(if (app.verifiedInbox) "Refresh questions" else "Reconnect") { notice = null; app.retry() }
             if (!Invites.allowed(this)) notificationSettings()
-            button("Settings") { showSettings() }
             if (app.callId != null) button("Return to voice") { page = Page.NONE; render() }
         }
         val state = app.store.state
-        if (state.pending.isEmpty()) card { text(if (app.verifiedInbox) "No pending questions." else "No cached questions.", 16) }
+        if (state.pending.isEmpty()) card { text("No pending questions.", 16) }
         val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == app.callId }.thenByDescending { it.createdAt })
         for (item in rows) card {
             requestHeading(item)

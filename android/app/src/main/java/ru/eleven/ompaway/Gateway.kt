@@ -57,6 +57,15 @@ class Gateway : Application() {
         private set
     internal var status = "Offline"
         private set
+    internal var refreshing = false
+        private set
+    internal val canRefresh get() = observer != null && paired && !needsRelayOrigin && idle &&
+        requestedJoin == null && submitting.isEmpty() && !pairing
+    private val refreshTimeout = Runnable {
+        finishRefresh()
+        status = "Refresh timed out. Pull down to try again."
+        changed()
+    }
     internal var verifyEmoji: String? = null
         private set
     internal var pairing = false
@@ -181,6 +190,20 @@ class Gateway : Application() {
 
     internal fun retry() {
         endCall(null); retire(); status = "Offline"; connect(); refreshToken(); changed()
+    }
+
+    internal fun refreshQuestions() {
+        if (!canRefresh || refreshing) return
+        if (!verifiedInbox) retry()
+        refreshing = true
+        main.postDelayed(refreshTimeout, 30_000)
+        if (verifiedInbox) current().channel.list()
+        changed()
+    }
+
+    private fun finishRefresh() {
+        refreshing = false
+        main.removeCallbacks(refreshTimeout)
     }
 
     private fun refreshToken() {
@@ -348,6 +371,7 @@ class Gateway : Application() {
     }
 
     private fun retire() {
+        finishRefresh()
         val old = session; session = null
         endingId = null
         verifiedInbox = false; verifyEmoji = null; pairing = false; sentSilences.clear()
@@ -359,6 +383,7 @@ class Gateway : Application() {
     /** Main-thread authoritative snapshot handler; the live transport invokes it only after pinned TLS. */
     internal fun reconcileInbox(items: List<InboxItem>) {
         check(Looper.myLooper() == Looper.getMainLooper())
+        finishRefresh()
         val channel = current().channel
         val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
         for (id in removed) {
@@ -475,6 +500,7 @@ class Gateway : Application() {
                 pushWarning = "Push registration unavailable. Reopen the inbox to retry."
                 changed(); return@ui
             }
+            finishRefresh()
             requestedJoin = null
             verifiedInbox = false; store.state.invalidateDetails()
             invalidateForms()
@@ -491,6 +517,7 @@ class Gateway : Application() {
         override fun onDisconnected() {
             val media = stream; stream = null; media?.invalidate()
             ui {
+                finishRefresh()
                 endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
                 store.state.invalidateDetails()
                 invalidateForms()

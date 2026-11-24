@@ -36,6 +36,16 @@ class RadianceHomeTest {
                 val panel = InboxActivity::class.java.getDeclaredField("panel").apply { isAccessible = true }.get(activity) as View
                 val margin = (panel.layoutParams as android.widget.FrameLayout.LayoutParams).topMargin
                 assertEquals(RadianceUi.dp(activity, 12), margin)
+                val settings = descendants(activity.window.decorView).filterIsInstance<android.widget.ImageButton>()
+                    .single { it.contentDescription == "Settings" }
+                assertTrue(settings.isShown)
+                assertTrue(settings.width >= RadianceUi.dp(activity, 48))
+                assertTrue(settings.height >= RadianceUi.dp(activity, 48))
+                assertFalse(descendants(activity.window.decorView).filterIsInstance<android.widget.Button>()
+                    .any { it.isShown && it.text.toString() in listOf("Settings", "Refresh questions", "Reconnect") })
+                val refresh = descendants(activity.window.decorView)
+                    .filterIsInstance<androidx.swiperefreshlayout.widget.SwipeRefreshLayout>().single()
+                assertFalse("Unpaired inbox must not refresh", refresh.isEnabled)
             }
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
             val renderer = scene.getChildAt(0)
@@ -399,7 +409,8 @@ class RadianceHomeTest {
         await {
             val root = instrumentation.uiAutomation.rootInActiveWindow
             val matches = root?.findAccessibilityNodeInfosByText(text).orEmpty()
-                .filter { it.text?.toString()?.equals(text, ignoreCase = true) == true }
+                .filter { it.text?.toString()?.equals(text, ignoreCase = true) == true ||
+                    it.contentDescription?.toString()?.equals(text, ignoreCase = true) == true }
             node = matches.firstOrNull { it.isVisibleToUser }
             if (node == null) {
                 val target = matches.firstOrNull()
