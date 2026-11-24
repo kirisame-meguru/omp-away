@@ -20,6 +20,7 @@ export interface PendingAsk {
 	createdAt?: number;
 	context?: QuestionContext;
 	submitConfirmed(requestId: string, values: Values): Promise<Delivery>;
+	withdraw?(requestId: string, reason: string): Promise<Delivery>;
 }
 
 interface Call {
@@ -74,6 +75,7 @@ export default function away(pi: ExtensionAPI): void {
 	const approvals = new Set<string>();
 	const calls = new Map<string, Call>();
 	const owns = (ctx: ExtensionContext) => ctx.agent.kind === "main" && session === ctx.sessionManager.getSessionId();
+	const voiceContext = (ctx: ExtensionContext) => Object.assign(Object.create(ctx) as ExtensionContext, { awaySdk: pi.pi });
 
 	function finish(key: string, data?: unknown) {
 		const call = calls.get(key);
@@ -105,6 +107,20 @@ export default function away(pi: ExtensionAPI): void {
 		const requestId = call.id;
 		const pending: PendingAsk = {
 			requestId, toolCallId, html: call.html,
+			async withdraw(id, reason) {
+				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
+				if (!reason.trim() || Buffer.byteLength(reason) > 16384) throw Error("Invalid call result");
+				call.submitting = true;
+				try {
+					pi.sendMessage({
+						customType: "omp-away:call-result", display: true, attribution: "agent",
+						content: JSON.stringify({ question: requestId, voiceDiscussion: reason }),
+					}, { deliverAs: "aside" });
+					if (await call.responder.withdraw(id) !== "accepted") return "stale";
+					await call.native.promise;
+					return ready ? "accepted" : "stale";
+				} finally { call.submitting = false; }
+			},
 			async submitConfirmed(id, values) {
 				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
 				call.submitting = true;
@@ -119,7 +135,7 @@ export default function away(pi: ExtensionAPI): void {
 				} finally { call.submitting = false; }
 			},
 		};
-		if (mobileConfigured) admin?.offer(pending, call.ctx);
+		if (mobileConfigured) admin?.offer(pending, voiceContext(call.ctx));
 		else pi.events.emit("omp-away:pending-ask", pending); // isolated local-gate integration only
 		// Observe only after delivery; no capability, question, or session context crosses this boundary.
 		queueMicrotask(() => {
@@ -140,7 +156,7 @@ export default function away(pi: ExtensionAPI): void {
 		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle()).then(async mobile => {
 			if (epoch === generation && mobile) {
 				admin = mobile;
-				asyncQuestions = connectAsyncQuestions(pi.events, sessionId, mobile, ctx, code => {
+				asyncQuestions = connectAsyncQuestions(pi.events, sessionId, mobile, voiceContext(ctx), code => {
 					if (epoch !== generation) return;
 					const message = code === "async-answer-saved"
 						? "Async answer saved, but delivery was not confirmed. Review /questions; nothing was resent."

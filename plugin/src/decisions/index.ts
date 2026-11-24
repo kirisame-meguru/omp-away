@@ -1,19 +1,22 @@
 import type { PendingAsk } from "../index";
-import { createCall, type DecisionCall } from "./call";
 import { type DecisionForm, prepare } from "./form";
 import { preferences, type Preferences } from "./preferences";
-import type { Exchange, SideContext } from "./side";
 import { displayExcerpt } from "./display";
 
-export type { DecisionCall, DecisionReply } from "./call";
-export type { SpokenDraft } from "./form";
 export type { Preferences } from "./preferences";
 export type { SideContext } from "./side";
-
+export type { DecisionCall, DecisionReply } from "./call";
+export type { SpokenDraft } from "./form";
 export interface InboxItem { requestId:string; project:string; question:string; createdAt:number; session?:string }
 export interface Clock { now():number; after(ms:number, callback:()=>void):()=>void }
+export interface QuestionCall {
+	signal:AbortSignal;
+	question:PendingAsk;
+	withdraw(reason:string):Promise<"accepted"|"stale">;
+	close():void;
+}
 interface Options {
-	invite(requestId:string):void | Promise<void>;
+	invite(requestId:string):void|Promise<void>;
 	changed?():void;
 	retired?(requestId:string):void;
 	error?(code:string):void;
@@ -21,13 +24,11 @@ interface Options {
 	clock?:Clock;
 }
 interface Entry {
-	item:InboxItem; ask:PendingAsk; ctx:SideContext; form:DecisionForm; history:Exchange[];
-	life:AbortController; cancelTimer?:()=>void;
-	silenced:boolean; rang:boolean; submitted:boolean;
+	item:InboxItem; ask:PendingAsk; form:DecisionForm;
+	cancelTimer?:()=>void; silenced:boolean; rang:boolean; withdrawing:boolean;
 }
-const realtime:Clock={ now:Date.now,after(ms,fn){const timer=setTimeout(fn,ms); return ()=>clearTimeout(timer);} };
+const realtime:Clock={now:Date.now,after(ms,fn){const timer=setTimeout(fn,ms);return ()=>clearTimeout(timer)}};
 
-/** Session-generation authority. Runtime authenticates and authorizes each peer per request (see API.md). */
 export class DecisionCoordinator {
 	readonly #pending=new Map<string,Entry>();
 	readonly #seen=new Set<string>();
@@ -35,84 +36,81 @@ export class DecisionCoordinator {
 	readonly #opt:Options;
 	readonly #clock:Clock;
 	#prefs:Preferences;
-	#active?:{entry:Entry;call:DecisionCall};
+	#active?:{entry:Entry;call:QuestionCall};
 	#closed=false;
 	constructor(opt:Options) {
-		this.#opt=opt; this.#clock=opt.clock ?? realtime;
-		this.#prefs=preferences(opt.preferences ?? {away:false,delayMs:null});
+		this.#opt=opt;this.#clock=opt.clock??realtime;
+		this.#prefs=preferences(opt.preferences??{away:false,delayMs:null});
 	}
 	configure(data:Preferences) {
 		this.#prefs=preferences(data);
 		for(const entry of this.#pending.values()) this.#route(entry);
 	}
-	offer(ask:PendingAsk,ctx:SideContext,project:string,session?:string):boolean {
-		const key=ask.deduplicationKey ?? ask.toolCallId;
-		const createdAt=ask.createdAt ?? this.#clock.now();
-		if(this.#closed || this.#seen.has(ask.requestId) || this.#tools.has(key)) return false;
-		if(!Number.isSafeInteger(createdAt) || createdAt<0) return false;
-		this.#seen.add(ask.requestId); this.#tools.add(key);
+	offer(ask:PendingAsk,_ctx:unknown,project:string,session?:string):boolean {
+		const key=ask.deduplicationKey??ask.toolCallId,createdAt=ask.createdAt??this.#clock.now();
+		if(this.#closed||this.#seen.has(ask.requestId)||this.#tools.has(key)||!Number.isSafeInteger(createdAt)||createdAt<0) return false;
+		this.#seen.add(ask.requestId);this.#tools.add(key);
 		let form:DecisionForm|undefined;
-		try { form=prepare(ask.html,ask.context); } catch { /* An unsupported form must remain local. */ }
-		if(!form) { this.#opt.error?.("unsupported-form"); return false; }
-		const life=new AbortController();
-		const item:InboxItem={requestId:ask.requestId,project:displayExcerpt(project,128),question:form.question,createdAt,...(session ? {session:displayExcerpt(session,128)} : {})};
-		const entry:Entry={item,ask,ctx,form,history:[],life,silenced:false,rang:false,submitted:false};
-		this.#pending.set(ask.requestId,entry); this.#route(entry); this.#opt.changed?.(); return true;
+		try {form=prepare(ask.html,ask.context)} catch {}
+		if(!form) {this.#opt.error?.("unsupported-form");return false}
+		const item:InboxItem={requestId:ask.requestId,project:displayExcerpt(project,128),question:form.question,createdAt,...(session?{session:displayExcerpt(session,128)}:{})};
+		const entry:Entry={item,ask,form,silenced:false,rang:false,withdrawing:false};
+		this.#pending.set(ask.requestId,entry);this.#route(entry);this.#opt.changed?.();return true;
 	}
 	#route(e:Entry) {
-		e.cancelTimer?.(); e.cancelTimer=undefined;
-		if(e.life.signal.aborted || e.rang || e.silenced || e.submitted) return;
+		e.cancelTimer?.();e.cancelTimer=undefined;
+		if(e.rang||e.silenced||e.withdrawing) return;
 		const {away,delayMs}=this.#prefs;
-		if(!away && delayMs===null) return;
-		const wait=away ? 0 : Math.max(0,e.item.createdAt + delayMs! - this.#clock.now());
+		if(!away&&delayMs===null) return;
 		const ring=()=>{
 			e.cancelTimer=undefined;
-			if(e.life.signal.aborted || e.rang || e.silenced || e.submitted) return;
+			if(this.#closed||this.#pending.get(e.item.requestId)!==e||e.rang||e.silenced||e.withdrawing) return;
 			e.rang=true;
-			const failed=()=>{if(!e.life.signal.aborted) this.#opt.error?.("invite-unavailable");};
-			try { Promise.resolve(this.#opt.invite(e.item.requestId)).catch(failed); } catch { failed(); }
+			const failed=()=>{if(this.#pending.get(e.item.requestId)===e&&!e.silenced) this.#opt.error?.("invite-unavailable")};
+			try {Promise.resolve(this.#opt.invite(e.item.requestId)).catch(failed)} catch {failed()}
 		};
-		if(wait===0) ring(); else e.cancelTimer=this.#clock.after(wait,ring);
+		const wait=away?0:Math.max(0,e.item.createdAt+delayMs!-this.#clock.now());
+		if(wait===0) ring();else e.cancelTimer=this.#clock.after(wait,ring);
 	}
-	list():InboxItem[] { return Array.from(this.#pending.values(),e=>({...e.item})); }
-	display(id:string) { return this.#pending.get(id)?.form.display; }
-	voiceAvailable(id:string) { return this.#pending.get(id)?.form.voiceSupported===true; }
+	list():InboxItem[] {return Array.from(this.#pending.values(),e=>({...e.item}))}
+	display(id:string) {return this.#pending.get(id)?.form.display}
+	voiceAvailable(id:string) {return typeof this.#pending.get(id)?.ask.withdraw==="function"}
 	silence(id:string):boolean {
-		const e=this.#pending.get(id); if(!e) return false;
-		e.silenced=true; e.cancelTimer?.(); e.cancelTimer=undefined; return true;
+		const e=this.#pending.get(id);if(!e) return false;
+		e.silenced=true;e.cancelTimer?.();e.cancelTimer=undefined;return true;
 	}
-	join(id:string):DecisionCall|undefined {
+	join(id:string):QuestionCall|undefined {
 		const entry=this.#pending.get(id);
-		if(this.#active || !entry || !entry.form.voiceSupported || entry.submitted || this.#closed) return;
+		if(this.#closed||this.#active||!entry||!entry.ask.withdraw||entry.withdrawing) return;
 		this.silence(id);
-		const call=createCall({form:entry.form,ctx:entry.ctx,history:entry.history,
-			close:()=>{if(this.#active?.call===call) this.#active=undefined;},
-			submit:async values=>{
-				if(this.#active?.call!==call || this.#pending.get(id)!==entry || entry.submitted) return "stale";
-				// Before the first await: never retry partially dispatched Collab answers.
-				entry.submitted=true;
-				const result=await entry.ask.submitConfirmed(id,values);
-				if(result==="accepted" && this.#pending.get(id)===entry) this.end(id);
+		const life=new AbortController();
+		const call:QuestionCall={
+			signal:life.signal,question:entry.ask,
+			close:()=>{if(this.#active?.call===call) this.#active=undefined;life.abort()},
+			withdraw:async reason=>{
+				if(life.signal.aborted||this.#pending.get(id)!==entry||entry.withdrawing) return "stale";
+				if(!reason.trim()||Buffer.byteLength(reason)>16384) throw Error("Invalid withdrawal reason");
+				entry.withdrawing=true;
+				const result=await entry.ask.withdraw!(id,reason);
+				if(result==="accepted"&&this.#pending.get(id)===entry) this.end(id);
 				return result;
 			},
-		});
-		this.#active={entry,call}; return call;
+		};
+		this.#active={entry,call};return call;
 	}
-	/** Call synchronously from every native finish/loss path, before resolving a native result or awaiting I/O. */
 	end(id:string):void {
 		if(this.#closed) return;
 		this.#seen.add(id);
-		const e=this.#pending.get(id); if(!e) return;
-		this.#opt.retired?.(id);
-		this.#pending.delete(id); e.cancelTimer?.(); e.life.abort(); e.history.length=0;
-		if(this.#active?.entry===e) this.#active.call.close();
-		this.#opt.changed?.();
+		const entry=this.#pending.get(id);if(!entry) return;
+		this.#pending.delete(id);entry.cancelTimer?.();
+		if(this.#active?.entry===entry) this.#active.call.close();
+		this.#opt.retired?.(id);this.#opt.changed?.();
 	}
 	close():void {
 		if(this.#closed) return;
-		// Seal first: even synchronous listener re-entry cannot acquire a closing capability.
 		this.#closed=true;
-		for(const e of this.#pending.values()) {this.#opt.retired?.(e.item.requestId);e.cancelTimer?.(); e.life.abort(); e.history.length=0;}
-		this.#pending.clear(); this.#active?.call.close(); this.#seen.clear(); this.#tools.clear(); this.#opt.changed?.();
+		this.#active?.call.close();
+		for(const e of this.#pending.values()) {e.cancelTimer?.();this.#opt.retired?.(e.item.requestId)}
+		this.#pending.clear();this.#seen.clear();this.#tools.clear();this.#opt.changed?.();
 	}
 }

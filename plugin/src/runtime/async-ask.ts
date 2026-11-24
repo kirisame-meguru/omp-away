@@ -13,6 +13,7 @@ export interface AsyncQuestion {
 	readonly id: string; readonly requestId: string; readonly toolCallId: string; readonly title: string;
 	readonly html: string; readonly blockedWork: string; readonly createdAt: number;
 	submitConfirmed(values: Values): QuestionSubmission;
+	withdraw?(reason: string): { kind: "withdrawn" | "stale" };
 }
 export interface QuestionSource {
 	readonly version: 1; readonly sessionId: string; readonly signal: AbortSignal;
@@ -101,6 +102,13 @@ export function connectAsyncQuestions(
 							pending: {
 								requestId, toolCallId: item.toolCallId, deduplicationKey: `async:${requestId}`,
 								html: item.html, createdAt: item.createdAt, context: { title: item.title, blockedWork: item.blockedWork },
+								...(typeof item.withdraw === "function" ? {
+									async withdraw(id: string, reason: string) {
+										if (id !== requestId || !owned() || !offer.active || next.offers.get(item.id) !== offer) return "stale" as const;
+										const result = item.withdraw!(reason);
+										return result.kind === "withdrawn" ? "accepted" as const : "stale" as const;
+									},
+								} : {}),
 								async submitConfirmed(id, values) {
 									if (id !== requestId || !owned() || !offer.active || next.offers.get(item.id) !== offer) return "stale";
 									let result: unknown;
