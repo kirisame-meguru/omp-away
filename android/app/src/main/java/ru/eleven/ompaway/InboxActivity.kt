@@ -89,7 +89,14 @@ class InboxActivity : Activity() {
         settingsReturn = Page.values().firstOrNull { it.name == savedInstanceState?.getString("settingsReturn") } ?: Page.REQUESTS
         answerRequested = savedInstanceState?.getString("answerRequested")?.takeIf(::validId)
         permissionAnswer = savedInstanceState?.getString("permissionAnswer")?.takeIf(::validId)
-        scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
+        scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            // Hand edge pulls to the whole-card refresh parent instead of
+            // stretching content inside a stationary native scroll viewport.
+            isNestedScrollingEnabled = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
         column = RadianceUi.column(this).apply { setPadding(dp(16), 0, dp(16), dp(20)) }
         contentTarget = column
         scroll.addView(column)
