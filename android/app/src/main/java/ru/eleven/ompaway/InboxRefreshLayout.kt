@@ -21,6 +21,8 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
     private val restingOffset = RadianceUi.dp(context, 72).toFloat()
     private val maximumOffset = RadianceUi.dp(context, 128).toFloat()
     private val threshold = RadianceUi.dp(context, 128).toFloat()
+    private val revealStart = RadianceUi.dp(context, 40).toFloat()
+    private val indicatorTopPadding = RadianceUi.dp(context, 4)
     private var topInset = 0
     private var offset = 0f
     private var originOffset = 0f
@@ -38,8 +40,24 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
     private var connection = Gateway.InboxConnection.DISCONNECTED
     private var displayed: Gateway.InboxConnection? = null
     private var detail = ""
+    private var manualRefresh = false
+    private var refreshStarted = 0L
+    private var connectionPending = false
+    private val showSlowConnection = Runnable {
+        connectionPending = false
+        if (active && busy && !manualRefresh) present()
+    }
+    private val completeRefresh = Runnable {
+        if (active && manualRefresh && connection == Gateway.InboxConnection.CONNECTED) present()
+    }
     private val busy get() = connection == Gateway.InboxConnection.CONNECTING || connection == Gateway.InboxConnection.REFRESHING
-    private val hideSuccess = Runnable { if (active && connection == Gateway.InboxConnection.CONNECTED && !dragging && distance == 0f) settle(0f) }
+    private val hideSuccess = Runnable {
+        if (active && connection == Gateway.InboxConnection.CONNECTED && !dragging && !pulling) {
+            manualRefresh = false
+            displayed = null
+            settle(0f)
+        }
+    }
     private val motion = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 260
         interpolator = DecelerateInterpolator(1.5f)
@@ -48,7 +66,7 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
 
     init {
         addView(indicator, LayoutParams(-2, RadianceUi.dp(context, 48), Gravity.TOP or Gravity.CENTER_HORIZONTAL))
-        indicator.visibility = GONE
+        indicator.visibility = INVISIBLE
         indicator.setOnClickListener { requestRefresh() }
     }
 
@@ -67,16 +85,47 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
             dragging = false; pulling = false; distance = 0f; pointer = MotionEvent.INVALID_POINTER_ID
             displayed = null
         }
-        if (displayed != state) present()
-        else if (state == Gateway.InboxConnection.DISCONNECTED)
-            indicator.show(InboxStatusIndicator.Kind.ERROR, "Not connected", "Not connected. $detail", animations)
+        if (busy) {
+            removeCallbacks(completeRefresh)
+            if (manualRefresh || displayed != null) {
+                cancelConnectionDelay()
+                if (displayed != state) present()
+            } else if (!connectionPending) {
+                connectionPending = true
+                postDelayed(showSlowConnection, 1000)
+            }
+            return
+        }
+        cancelConnectionDelay()
+        if (state == Gateway.InboxConnection.DISCONNECTED) {
+            removeCallbacks(completeRefresh)
+            manualRefresh = false
+            if (displayed != state) present()
+            else indicator.show(InboxStatusIndicator.Kind.ERROR, "Not connected", "Not connected. $detail", animations)
+        } else if (manualRefresh) {
+            if (displayed != state) {
+                removeCallbacks(completeRefresh)
+                postDelayed(completeRefresh, (refreshStarted + 350 - android.os.SystemClock.uptimeMillis()).coerceAtLeast(0))
+            }
+        } else if (displayed != null) {
+            displayed = null
+            settle(0f)
+        }
     }
 
     fun pause() {
         active = false; displayed = null; dragging = false; nested = false; pulling = false
         touchActive = false
         distance = 0f; pointer = MotionEvent.INVALID_POINTER_ID
+        manualRefresh = false
+        cancelConnectionDelay()
+        removeCallbacks(completeRefresh)
         removeCallbacks(hideSuccess); motion.cancel(); place(0f)
+    }
+
+    private fun cancelConnectionDelay() {
+        removeCallbacks(showSlowConnection)
+        connectionPending = false
     }
 
     private fun present() {
@@ -88,9 +137,9 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
             else -> InboxStatusIndicator.Kind.BUSY
         }
         val label = when (connection) {
-            Gateway.InboxConnection.CONNECTING -> "Connecting…"
-            Gateway.InboxConnection.REFRESHING -> "Refreshing…"
-            Gateway.InboxConnection.CONNECTED -> "Connected!"
+            Gateway.InboxConnection.CONNECTING -> if (manualRefresh) "Refreshing…" else "Connecting…"
+            Gateway.InboxConnection.REFRESHING -> if (manualRefresh) "Refreshing…" else "Connecting…"
+            Gateway.InboxConnection.CONNECTED -> "Up to date"
             Gateway.InboxConnection.DISCONNECTED -> "Not connected"
         }
         indicator.show(kind, label, if (kind == InboxStatusIndicator.Kind.ERROR) "$label. $detail" else label, animations)
@@ -98,20 +147,29 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
         if (connection == Gateway.InboxConnection.CONNECTED) postDelayed(hideSuccess, 1600)
     }
 
-    private fun requestRefresh() {
-        if (!active || !isEnabled || busy) return
+    fun requestRefresh(): Boolean {
+        if (!active || !isEnabled || busy) return false
         removeCallbacks(hideSuccess)
+        removeCallbacks(completeRefresh)
+        cancelConnectionDelay()
+        manualRefresh = true
+        refreshStarted = android.os.SystemClock.uptimeMillis()
         displayed = null
         indicator.show(InboxStatusIndicator.Kind.BUSY, "Refreshing…", "Refreshing…", animations)
         settle(restingOffset)
-        if (onRefresh?.invoke() != true) present()
+        if (onRefresh?.invoke() == true) return true
+        manualRefresh = false
+        if (connection == Gateway.InboxConnection.CONNECTED) settle(0f) else present()
+        return false
     }
 
     private fun pull(raw: Float) {
         motion.cancel(); removeCallbacks(hideSuccess)
         if (!pulling) {
             originOffset = offset
-            indicator.show(InboxStatusIndicator.Kind.BUSY, "Pull to refresh", "Pull to refresh", animations)
+            manualRefresh = false
+            removeCallbacks(completeRefresh)
+            indicator.show(InboxStatusIndicator.Kind.BUSY, "Refreshing…", "Refreshing…", animations)
             pulling = true
         }
         distance = raw.coerceAtLeast(0f)
@@ -122,7 +180,7 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
         val refresh = !cancelled && distance >= threshold
         distance = 0f; dragging = false; pulling = false; pointer = MotionEvent.INVALID_POINTER_ID
         if (refresh) requestRefresh()
-        else if (connection == Gateway.InboxConnection.CONNECTED) { displayed = connection; settle(0f) }
+        else if (connection == Gateway.InboxConnection.CONNECTED) { displayed = null; settle(0f) }
         else if (active) present()
     }
 
@@ -135,12 +193,11 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
     private fun place(value: Float) {
         offset = value
         panel?.translationY = value
-        val height = indicator.measuredHeight.takeIf { it > 0 } ?: RadianceUi.dp(context, 48)
-        val end = topInset + RadianceUi.dp(context, 20).toFloat()
-        indicator.translationY = if (value <= restingOffset) -height + (end + height) * value / restingOffset
-            else end + (value - restingOffset) * .5f
-        indicator.alpha = (value / restingOffset).coerceIn(0f, 1f)
-        indicator.visibility = if (value > 0f) VISIBLE else GONE
+        // Reveal only once the card has made room; never slide a clipped capsule
+        // through the display edge or the status bar.
+        indicator.translationY = topInset + indicatorTopPadding + (value - revealStart).coerceAtLeast(0f) * .5f
+        indicator.alpha = ((value - revealStart) / (restingOffset - revealStart)).coerceIn(0f, 1f)
+        indicator.visibility = if (value > revealStart) VISIBLE else INVISIBLE
     }
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {

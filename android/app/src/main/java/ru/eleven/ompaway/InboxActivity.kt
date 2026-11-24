@@ -112,8 +112,7 @@ class InboxActivity : Activity() {
             }
             override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
                 if (action == R.id.refresh_questions && resumed && page == Page.REQUESTS && app.canRefresh && !app.refreshing) {
-                    saveDrafts(); notice = null; app.refreshQuestions()
-                    return true
+                    return refresh.requestRefresh()
                 }
                 return super.performAccessibilityAction(host, action, args)
             }
@@ -166,6 +165,8 @@ class InboxActivity : Activity() {
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         val overlay = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
             addView(panel, FrameLayout.LayoutParams(-1, -1).apply {
                 setMargins(dp(12), dp(12), dp(12), dp(12))
             })

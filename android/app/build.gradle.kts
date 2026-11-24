@@ -42,8 +42,8 @@ android {
         manifestPlaceholders["answerActivity"] = "$applicationId.AnswerCall"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1_000_015
-        versionName = "1.0.15"
+        versionCode = 1_000_016
+        versionName = "1.0.16"
         releaseVersionCode?.let { versionCode = it }
         releaseTag?.let { versionName = it.drop(1) }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

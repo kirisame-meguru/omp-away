@@ -100,7 +100,7 @@ internal class InboxStatusIndicator(context: Context) : View(context) {
                 y = x * s + y * c; x = next
             }
         }
-        val tint = when (kind) { Kind.BUSY -> RadianceUi.cream; Kind.SUCCESS -> 0xff59c98e.toInt(); Kind.ERROR -> 0xffe78383.toInt() }
+        val tint = if (kind == Kind.ERROR) 0xffe78383.toInt() else RadianceUi.cream
         color = Color.rgb(blend(Color.red(originColor), Color.red(tint), amount),
             blend(Color.green(originColor), Color.green(tint), amount), blend(Color.blue(originColor), Color.blue(tint), amount))
         capsule.draw(canvas)
