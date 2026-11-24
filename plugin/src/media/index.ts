@@ -2,7 +2,10 @@ import type { ExtensionContext, ExtensionLiveSession } from '@oh-my-pi/pi-coding
 import type { QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
 
-export type VoiceContext=ExtensionContext & {awayContext?:(content:string)=>Promise<void>};
+export type VoiceContext=Pick<ExtensionContext,'cwd'|'startLive'> & {
+	sessionManager:Pick<ExtensionContext['sessionManager'],'getSessionId'|'getSessionName'>;
+	awayContext?:(content:string)=>Promise<void>;
+};
 export interface VoiceOptions {
 	ctx: VoiceContext;
 	call: QuestionCall;
@@ -15,7 +18,7 @@ export interface VoiceCall {
 	close():Promise<void>;
 }
 
-export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
+export async function openVoice(options:VoiceOptions,peerFactory:typeof spawnPeer=spawnPeer):Promise<VoiceCall> {
 	const {ctx,call}=options;
 	call.signal.throwIfAborted();
 	if (typeof ctx.startLive !== 'function' || typeof ctx.awayContext !== 'function') throw Error('This host does not expose native remote live mode');
@@ -39,7 +42,7 @@ export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 	const timer=setTimeout(()=>{void close(Error('Voice setup timed out'))},60000).unref();
 	call.signal.addEventListener('abort',abort,{once:true});
 	async function start() {
-		peer=spawnPeer(pcm=>{
+		peer=peerFactory(pcm=>{
 			if(closed) return;
 			if(++queued>250) {void close(Error('Phone audio transport stalled'));return}
 			output=output.then(()=>closed?undefined:options.onAudio(pcm)).catch(()=>{void close(Error('Phone audio unavailable'))}).finally(()=>{--queued});

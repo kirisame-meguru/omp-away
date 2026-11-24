@@ -27,7 +27,7 @@ internal fun parseJson(text: String): JSONObject {
     require(text.length in 1..65536)
     return JsonReader(StringReader(text)).use { reader ->
         fun value(depth: Int): Any {
-            require(depth <= 7) // question.display.fields[].options[].label
+            require(depth <= 32) // Bounded nested touch sections, fields, options and rich-text spans.
             return when (reader.peek()) {
                 JsonToken.BEGIN_OBJECT -> JSONObject().apply {
                     reader.beginObject()
@@ -36,8 +36,14 @@ internal fun parseJson(text: String): JSONObject {
                 }
                 JsonToken.BEGIN_ARRAY -> JSONArray().apply { reader.beginArray(); while (reader.hasNext()) put(value(depth + 1)); reader.endArray() }
                 JsonToken.STRING -> reader.nextString()
-                JsonToken.NUMBER -> reader.nextString().toLong()
+                JsonToken.NUMBER -> {
+                    val number = reader.nextString()
+                    if (number.indexOf('.') >= 0 || number.indexOf('e', ignoreCase = true) >= 0)
+                        number.toDouble().also { require(it.isFinite()) }
+                    else number.toLong()
+                }
                 JsonToken.BOOLEAN -> reader.nextBoolean()
+                JsonToken.NULL -> { reader.nextNull(); JSONObject.NULL }
                 else -> error("Unexpected JSON value")
             }
         }

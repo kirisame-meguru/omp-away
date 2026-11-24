@@ -1,93 +1,83 @@
-import { mock, vi } from 'bun:test';
+import { mock } from 'bun:test';
 import * as utils from '@oh-my-pi/pi-utils';
-import * as sdk from '../../src/media/live-sdk.generated.mjs';
-import type { LiveClientMessage } from '../../src/media/protocol';
+import type { ExtensionLiveStartOptions } from '@oh-my-pi/pi-coding-agent';
+import type { VoiceContext } from '../../src/media';
+import type { QuestionCall } from '../../src/decisions';
 
 const [version, scenario = 'valid'] = process.argv.slice(2);
-let peers = 0, answers = 0, pcm = 0, closedPeers = 0, closedTransports = 0, ended = 0;
-const sent: LiveClientMessage[] = [];
-let consumerReady = false, earlyContextMessages = 0;
-let contextReads = 0, leaf = 'initial';
-const branch = [{type:'message',id:'u1',message:{role:'user',content:'Build an offline notes app without deployment.'}}];
-const contextChecks = {initialGrounded:false,updatedGrounded:false,unchangedNotResent:false,refreshCommentaryOnly:false,stopped:false};
-const contextText = (messages: readonly LiveClientMessage[] = sent) => messages.map(message => message.type==='session.context.append'
-	? message.content.map(part => part.type==='input_text' ? part.text : '').join('') : '').join('');
-mock.module('@oh-my-pi/pi-utils', () => ({ ...utils, VERSION: version }));
-mock.module('../../src/media/peer', () => ({
-	spawnPeer() {
-		++peers;
+let peers=0,answers=0,pcm=0,closedPeers=0,closedTransports=0,ended=0,takeovers=0;
+const order:string[]=[],contexts:string[]=[],captions:unknown[]=[];
+const life=new AbortController(), release=Promise.withResolvers<void>();
+let startOptions:ExtensionLiveStartOptions|undefined;
+let emitAudio:((pcm:Uint8Array)=>void)|undefined;
+let audio=0;
+mock.module('@oh-my-pi/pi-utils',()=>({...utils,VERSION:version}));
+mock.module('../../src/media/peer',()=>({
+	spawnPeer(onAudio:(pcm:Uint8Array)=>void) {
+		++peers;order.push('peer');emitAudio=onAudio;
 		return {
-			offer: Promise.resolve('test offer'),
-			async answer(value: string) { if (value !== 'test answer') throw Error('Wrong SDP'); ++answers },
-			sendPcm(value: Uint8Array) { pcm += value.byteLength },
-			async close() { ++closedPeers },
+			offer:Promise.resolve('test offer'),
+			async answer(value:string) {
+				if(value!=='test answer') throw Error('Wrong SDP');
+				if(scenario==='peer-answer-failed') throw Error('peer answer failed');
+				++answers;order.push('answer');
+			},
+			sendPcm(value:Uint8Array){pcm+=value.byteLength},
+			async close(){++closedPeers},
 		};
 	},
 }));
-mock.module('../../src/media/live-sdk.generated.mjs', () => ({
-	...sdk,
-	LiveTransport: class {
-		sdpAnswer = 'test answer';
-		async connect() { if (scenario === 'signaling-failed') throw Error('test signaling failure') }
-		async send(value: LiveClientMessage) { if (!consumerReady) ++earlyContextMessages; sent.push(value) }
-		async close() { ++closedTransports }
+// This test intentionally loads the media boundary after installing its process-isolated peer replacement.
+const {openVoice}=await import('../../src/media');
+const ctx:VoiceContext={
+	cwd:'/example/project',
+	sessionManager:{getSessionId:()=>'session',getSessionName:()=>'Synthetic task'},
+	async awayContext(content) {
+		order.push('context');
+		if(scenario==='context-failed') throw Error('context failed');
+		contexts.push(content);
 	},
-}));
-// Load after boundary replacements; a static import would bind the real media launcher first.
-const { openVoice } = await import('../../src/media');
-const ctx = {
-	sessionManager: { getSessionId: () => 'test-session' },
-	modelRegistry: { authStorage: { oauth: { async access() {} }, limits: { async rotate() {} } } },
+	async startLive(options) {
+		order.push('live');startOptions=options;
+		if(options.sdpOffer!=='test offer') throw Error('Wrong offer');
+		if(scenario==='signaling-failed') {options.onEnd?.(Error('signaling failed'));throw Error('signaling failed')}
+		if(scenario==='abort-during-start') {life.abort();await release.promise}
+		return {sdpAnswer:'test answer',voice:'test',async stop(){++closedTransports;options.onEnd?.()}};
+	},
 };
-if (scenario === 'context-refresh') {
-	vi.useFakeTimers();
-	Object.assign(ctx.sessionManager,{
-		getLeafId:()=>leaf,
-		getSessionName:()=>'Synthetic notes task',
-		getBranch:()=>{++contextReads;return branch},
-	});
-}
-// Deliberately malformed runtime hosts cannot be represented by the SDK's static type.
-if (scenario === 'missing-session') Object.assign(ctx.sessionManager, { getSessionId: () => undefined });
-if (scenario === 'missing-session-api') Object.assign(ctx, { sessionManager: {} });
-if (scenario === 'missing-auth') Object.assign(ctx.modelRegistry, { authStorage: undefined });
-if (scenario === 'missing-access') Object.assign(ctx.modelRegistry.authStorage.oauth, { access: undefined });
-if (scenario === 'missing-rotation') Object.assign(ctx.modelRegistry.authStorage.limits, { rotate: undefined });
-let error: string | undefined;
+const call:QuestionCall={
+	signal:life.signal,
+	question:{requestId:'request',toolCallId:'tool',html:'<form><label>Drink<select name="drink"><option value="tea">Tea</option><option value="coffee">Coffee</option></select></label></form>',
+		context:{title:'Synthetic choice',blockedWork:'Choose a drink'},async submitConfirmed(){throw Error('Voice must not submit a form')}},
+	async takeOver(){++takeovers;order.push('takeover');if(scenario==='takeover-failed') throw Error('takeover failed')},
+	async withdraw(){throw Error('Startup must not withdraw a discussion result')},
+	close(){life.abort()},
+};
+// Intentionally malformed host capability envelopes test runtime checks, not casts.
+if(scenario==='missing-live') Object.assign(ctx,{startLive:undefined});
+if(scenario==='noncallable-live') Object.assign(ctx,{startLive:true});
+if(scenario==='missing-context') Object.assign(ctx,{awayContext:undefined});
+if(scenario==='noncallable-context') Object.assign(ctx,{awayContext:true});
+let error:string|undefined;
 try {
-	const call = await openVoice({
-		ctx: ctx as unknown as Parameters<typeof openVoice>[0]['ctx'],
-		brief: 'Choose tea or coffee.', onTranscript() {}, onAudio() {}, onInterrupt() {}, onSpeechStarted() {},
-		onEnd() { ++ended },
-	});
-	try {
-		consumerReady = true;
-		await call.sendSpeakable('Choose tea or coffee.');
-		call.sendPcm(new Uint8Array(960));
-		if (scenario === 'context-refresh') {
-			const opening=sent.findIndex(message=>message.type==='session.context.append' && message.channel==='speakable');
-			const initialContext=contextText(sent.slice(0,opening));
-			contextChecks.initialGrounded=opening>=0 && initialContext.includes('Build an offline notes app without deployment.') && !initialContext.includes('Recovery tests passed.');
-			const initialMessages=sent.length;
-			vi.advanceTimersByTime(1000);
-			for(let i=0;i<20;i++) await Promise.resolve();
-			contextChecks.unchangedNotResent=sent.length===initialMessages && contextReads===1;
-			branch.push({type:'message',id:'a1',message:{role:'assistant',content:'Recovery tests passed.'}});
-			leaf='updated';
-			vi.advanceTimersByTime(1000);
-			for(let i=0;i<20;i++) await Promise.resolve();
-			contextChecks.updatedGrounded=contextText().includes('Recovery tests passed.') && contextReads===2;
-			contextChecks.refreshCommentaryOnly=sent.slice(initialMessages).every(message=>message.type==='session.context.append' && message.channel==='commentary');
-		}
-	} finally {
-		await call.close();await call.close();
-		if (scenario === 'context-refresh') {
-			const finalMessages=sent.length;
-			leaf='after-close';vi.advanceTimersByTime(2000);
-			for(let i=0;i<20;i++) await Promise.resolve();
-			contextChecks.stopped=sent.length===finalMessages && contextReads===2;
-		}
+	const opening=openVoice({ctx,call,onAudio(){++audio},onCaption(...caption){captions.push(caption)},onEnd(){++ended}});
+	if(scenario==='abort-during-start') {
+		await opening.catch(reason=>{error=reason instanceof Error?reason.message:'Unknown failure'});
+		release.resolve();
+		for(let i=0;i<10;i++) await Promise.resolve();
+	} else {
+		const voice=await opening;
+		try {
+			voice.sendPcm(new Uint8Array(960));
+			startOptions?.onPhase?.('muted');voice.sendPcm(new Uint8Array(960));
+			startOptions?.onPhase?.('listening');voice.sendPcm(new Uint8Array(960));
+			startOptions?.onTranscript?.({role:'user',text:'Coffee',turn:1,final:true});
+			emitAudio?.(new Uint8Array(960));
+			for(let i=0;i<5;i++) await Promise.resolve();
+		} finally {await voice.close();await voice.close()}
+		startOptions?.onTranscript?.({role:'assistant',text:'Late',turn:1,final:true});
+		emitAudio?.(new Uint8Array(960));
 	}
-} catch (reason) { error = reason instanceof Error ? reason.message : 'Unknown failure' }
-finally { if (scenario === 'context-refresh') vi.useRealTimers() }
-console.log(JSON.stringify({ error, peers, answers, pcm, closedPeers, closedTransports, ended, contextMessages: sent.length, earlyContextMessages, contextChecks }));
+} catch(reason) {error=reason instanceof Error?reason.message:'Unknown failure'}
+finally {release.resolve()}
+console.log(JSON.stringify({error,peers,answers,pcm,closedPeers,closedTransports,ended,takeovers,order,contexts,captions,audio}));

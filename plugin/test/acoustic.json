@@ -1,151 +1,30 @@
 [
-  {"name":"direct","expected":{"drink":"coffee"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Yes.","after":"readback"}]},
-  {"name":"options","expected":{"drink":"tea"},"steps":[{"say":"What are my options?","after":"opening"},{"say":"Tea.","after":"answer"},{"say":"Yes.","after":"readback"}]},
-  {"name":"alternatives","expected":{"drink":"lemonade"},"steps":[{"say":"Ask the main model to come up with two other drinks.","after":"opening"},{"say":"Let's try lemonade.","after":"answer"},{"say":"Yes.","after":"readback"}]},
-  {"name":"revision","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Actually, tea instead.","after":"readback"},{"say":"Yes.","after":"readback"}]},
-  {"name":"qualified-yes","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"Yes, but change it to tea.","after":"readback"},{"say":"Yes.","after":"readback"}]},
-  {"name":"stale-confirmation","expected":{"drink":"tea"},"steps":[{"say":"Coffee.","after":"opening"},{"say":"What are my options?","after":"readback"},{"say":"Yes.","after":"answer"},{"say":"Tea.","after":"pause","seconds":5},{"say":"Yes.","after":"readback"}]},
-  {"name":"literal-yes","form":"<form><fieldset><legend>Would you like to enable the synthetic test option?</legend><label><input type=\"radio\" name=\"answer\" value=\"yes\">Yes</label><label><input type=\"radio\" name=\"answer\" value=\"no\">No</label></fieldset></form>","prompt":"This is a synthetic Yes/No choice. The first spoken response is the selected field value, not submission approval. A separate confirmation follows the readback.","openingWords":["yes","no"],"expected":{"answer":"yes"},"steps":[{"say":"Yes.","after":"opening"},{"say":"Yes.","after":"readback"}]},
-  {"name":"literal-no","form":"<form><fieldset><legend>Would you like to enable the synthetic test option?</legend><label><input type=\"radio\" name=\"answer\" value=\"yes\">Yes</label><label><input type=\"radio\" name=\"answer\" value=\"no\">No</label></fieldset></form>","prompt":"This is a synthetic Yes/No choice. The first spoken response is the selected field value, not submission approval. A separate confirmation follows the readback.","openingWords":["yes","no"],"expected":{"answer":"no"},"steps":[{"say":"No.","after":"opening"},{"say":"Yes.","after":"readback"}]},
   {
-    "name":"notes-recall",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"I've stepped away from the keyboard. Remind me which project we're working on and what task you were doing.","after":"opening"},
-      {"say":"What's already working, and what have you actually tested so far?","after":"answer","spokenWords":[["pocket","offline"],["notes"],["storage","persistence"]]},
-      {"say":"What remains unfinished, and which decision do you need from me right now?","after":"answer","spokenWords":[["editor"],["tests","tested"]]},
-      {"say":"What constraints did I ask you not to lose while making that choice?","after":"answer","spokenWords":[["migration","migrations"],["storage","sqlite","json"]]},
-      {"say":"Use SQLite for storage and Keep local for rollout. Do not deploy anything.","after":"answer","spokenWords":[["offline"],["notes","data"]]},
-      {"say":"Before I confirm, remind me why we're keeping it local rather than deploying now.","after":"readback"},
-      {"say":"Understood. My decision is SQLite and Keep local. Read those two choices back to me.","after":"answer","spokenWords":[["local","deploy","deployment"],["migration","migrations","tests","recovery"]]},
-      {"say":"Yes, please go ahead.","after":"readback","spokenWords":[["local"],["sqlite","sql"]]}
+    "name": "direct",
+    "mode": "native-live",
+    "form": "<form><fieldset><legend>Which drink would you like?</legend><label><input type=\"radio\" name=\"drink\" value=\"tea\">Tea</label><label><input type=\"radio\" name=\"drink\" value=\"coffee\">Coffee</label></fieldset></form>",
+    "prompt": "This probe checks natural discussion only. Explain the pending drink question and its choices; do not submit a form or perform any work. Continue the discussion until the caller hangs up.",
+    "openingWords": ["tea", "coffee"],
+    "openingAny": [],
+    "finalWords": [["tea"], ["coffee"]],
+    "steps": [
+      {"say": "Please explain the two drink choices without selecting or submitting anything.", "after": "opening"},
+      {"say": "Keep this as a discussion only. Remind me of both drink choices once more.", "after": "answer", "spokenWords": [["tea"], ["coffee"]]}
     ]
   },
   {
-    "name":"notes-tradeoffs",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"json","rollout":"keep_local"},
-    "steps":[
-      {"say":"Compare SQLite and JSON for this particular notes app, including the downside of each.","after":"opening"},
-      {"say":"Why do you recommend SQLite rather than just a human-readable JSON file?","after":"answer","spokenWords":[["sqlite"],["json"],["sqlite","sql"]]},
-      {"say":"What would a crash in the middle of a save mean for each approach?","after":"answer","spokenWords":[["transaction","transactions","recovery"]]},
-      {"say":"Have we already implemented the recovery work, or is that still a promise?","after":"answer","spokenWords":[["atomic","transaction","transactions","backup","backups"]]},
-      {"say":"For this local prototype, choose JSON and Keep local. We will still need atomic replacement and backups before trusting real notes.","after":"answer","spokenWords":[["not","unfinished","pending","remaining"]]},
-      {"say":"Does choosing JSON mean export or cloud sync is already available?","after":"readback"},
-      {"say":"All right. JSON storage and Keep local rollout are my choices. Please read both back.","after":"answer","spokenWords":[["not","no"],["export","sync"]]},
-      {"say":"Okay, please submit it.","after":"readback","spokenWords":[["json"],["local"]]}
-    ]
-  },
-  {
-    "name":"notes-followup",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"Explain the recommendation and specifically how SQLite protects a note when saving fails.","after":"opening"},
-      {"say":"What is the downside of that approach for the little app we're building?","after":"answer","spokenWords":[["sqlite"],["transaction","transactions","recovery","rollback"]]},
-      {"say":"Would it still work without the internet, or would that make us depend on a service?","after":"answer","spokenWords":[["sqlite"],["migration","migrations","complexity","dependency","dependencies","schema"]]},
-      {"say":"Okay, choose SQLite and Keep local.","after":"answer","spokenWords":[["offline","internet","network"],["local","no","not"]]},
-      {"say":"Would that choice also authorize the rollout we were discussing earlier?","after":"readback"},
-      {"say":"Then keep the two decisions separate: SQLite for storage, Keep local for rollout. Read that back.","after":"answer","spokenWords":[["deploy","deployment","rollout"],["no","not","separate","local"]]},
-      {"say":"Yes.","after":"readback","spokenWords":[["local"],["sqlite","sql"]]}
-    ]
-  },
-  {
-    "name":"notes-correction",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"Remind me how far we got before I walked away.","after":"opening"},
-      {"say":"Let's choose JSON storage and Deploy for rollout.","after":"answer","spokenWords":[["editor"],["adapter","persistence"]]},
-      {"say":"Actually, I misspoke. Change storage to SQLite and rollout to Keep local. I am not approving the earlier draft.","after":"readback"},
-      {"say":"Before I approve the corrected draft, why is keeping it local the safer next step?","after":"readback","spokenWords":[["sqlite","sql"],["local"]]},
-      {"say":"Yes, that explanation makes sense, but tell me whether migration is already complete before we go ahead.","after":"answer","spokenWords":[["migration","migrations","tests","recovery"]]},
-      {"say":"Thanks. My corrected decision remains SQLite and Keep local. Please read the corrected choices back.","after":"answer","spokenWords":[["migration","migrations"],["not","unfinished","pending"]]},
-      {"say":"Yes, please go ahead.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]}
-    ]
-  },
-  {
-    "name":"notes-qualified-yes",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"Why is SQLite your recommendation for Pocket Notes?","after":"opening"},
-      {"say":"Choose SQLite and Keep local.","after":"answer","spokenWords":[["transaction","transactions","recovery"]]},
-      {"say":"Yes, but before you submit anything, compare the maintenance burden with JSON. I am agreeing with the explanation, not confirming the form.","after":"readback"},
-      {"say":"Yes, that's what I meant, but don't submit yet. Remind me which tests have actually passed.","after":"answer","spokenWords":[["sqlite"],["json"]]},
-      {"say":"For now, make the draft JSON storage and Keep local rollout.","after":"answer","spokenWords":[["editor"],["tests","tested"]]},
-      {"say":"Yes, although on second thought change JSON back to SQLite. Keep local must stay unchanged. That was a correction, not permission to submit.","after":"readback"},
-      {"say":"Before the final confirmation, summarize what work still remains after this decision.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]},
-      {"say":"My final choices are SQLite and Keep local. Read those choices back once more.","after":"answer","spokenWords":[["migration","migrations"],["recovery","tests"]]},
-      {"say":"Okay, please submit it.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]}
-    ]
-  },
-  {
-    "name":"notes-hold-clarify",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"json","rollout":"keep_local"},
-    "steps":[
-      {"say":"Draft JSON storage and Deploy for rollout.","after":"opening"},
-      {"say":"Don't submit yet. I was distracted. What is actually ready and what has not been implemented?","after":"readback"},
-      {"say":"Why did you recommend the other storage option originally?","after":"answer","spokenWords":[["editor"],["migration","migrations","recovery"]]},
-      {"say":"If we use JSON for a local-only prototype, what protections would we still need for existing notes?","after":"answer","spokenWords":[["sqlite"],["transaction","transactions","recovery"]]},
-      {"say":"Change the draft to SQLite and Keep local.","after":"answer","spokenWords":[["atomic","backup","backups"],["json","notes"]]},
-      {"say":"Still don't submit. Is export already implemented, or would that be separate work?","after":"readback"},
-      {"say":"I understand. Replace the draft with JSON and Keep local for this prototype. Those are my new choices; read them back.","after":"answer","spokenWords":[["export"],["not","no","separate"]]},
-      {"say":"Yes.","after":"readback","spokenWords":[["json"],["local"]]}
-    ]
-  },
-  {
-    "name":"notes-unknown-context",
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"Which colleague approved the production deployment yesterday, and how much did it cost?","after":"opening"},
-      {"say":"By the way, can you tell me whether it will rain where I am this afternoon?","after":"answer","spokenWords":[["unknown","not","no","don't","cannot","unavailable"]]},
-      {"say":"What production error rate are we seeing for Pocket Notes? If we don't have that information, please say so.","after":"answer","spokenWords":[["unknown","not","no","don't","cannot","unavailable"]]},
-      {"say":"Back to the actual task: what do we know about the project and the tests we completed?","after":"answer","spokenWords":[["unknown","not","no","don't","cannot","unavailable"],["production","metrics","deployment","deployed"]]},
-      {"say":"Thanks for separating known facts from guesses. Choose SQLite and Keep local.","after":"answer","spokenWords":[["pocket"],["editor"],["tests","tested"]]},
-      {"say":"Yes, please go ahead.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]}
-    ]
-  },
-  {
-    "name":"notes-barge-in",
-    "bargeIn":true,
-    "durationSeconds":720,
-    "taskContext":"Invented project: Pocket Notes, an offline single-user desktop notes app. Task: add durable note storage without changing the editor UI. Completed: note list and editor work; eighteen synthetic editor unit tests pass. A persistence adapter skeleton exists but is not wired in. Not completed: migrations, crash recovery tests, export, cloud sync, or deployment. Existing notes must survive upgrades; offline use is mandatory; no paid service or credentials are configured. Pending decision has two independent fields: storage (SQLite or JSON) and rollout (Keep local or Deploy). Recommendation: SQLite for transactions and recovery, Keep local until migration and recovery tests are done. JSON is inspectable and simpler for a prototype but needs careful atomic replacement and backups; it has no database transactions. Deployment needs separate explicit approval and a readiness review. No real repository facts, production metrics, colleague identities, weather, secrets, or billing information are known.",
-    "form":"<form><fieldset><legend>Choose durable storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset><fieldset><legend>Choose rollout separately</legend><label><input type=\"radio\" name=\"rollout\" value=\"keep_local\">Keep local</label><label><input type=\"radio\" name=\"rollout\" value=\"deploy\">Deploy</label></fieldset></form>",
-    "openingWords":["json","local"],"openingAny":["sqlite","sql"],
-    "expected":{"storage":"sqlite","rollout":"keep_local"},
-    "steps":[
-      {"say":"Remind me what we finished before this storage decision.","after":"opening"},
-      {"say":"Choose JSON and Deploy.","after":"answer","spokenWords":[["editor"],["tests","tested"]]},
-      {"say":"Wait, stop. I meant SQLite and Keep local, not JSON and Deploy. Correct both choices and do not submit the old draft.","after":"during-readback","seconds":0.2},
-      {"say":"Before confirming the correction, explain why you recommended SQLite.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]},
-      {"say":"Would that still let the app work offline?","after":"answer","spokenWords":[["sqlite"],["transaction","transactions","recovery"]]},
-      {"say":"Then my corrected choices remain SQLite and Keep local. Read both back.","after":"answer","spokenWords":[["offline"],["local","no","not"]]},
-      {"say":"Okay, please submit it.","after":"readback","spokenWords":[["sqlite","sql"],["local"]]}
+    "name": "notes-context",
+    "mode": "native-live",
+    "durationSeconds": 300,
+    "taskContext": "Synthetic project: Pocket Notes, an offline notes app. Pending task: durable local storage. SQLite supports transactions; JSON requires atomic replacement and backups. No deployment or paid service is authorized. Migration and crash recovery tests are unfinished.",
+    "form": "<form><fieldset><legend>Choose durable local storage for Pocket Notes</legend><label><input type=\"radio\" name=\"storage\" value=\"sqlite\">SQLite</label><label><input type=\"radio\" name=\"storage\" value=\"json\">JSON</label></fieldset></form>",
+    "prompt": "Discuss the pending storage choice using the actual synthetic task context. Do not select, submit, deploy or implement anything. Remain available for questions until hangup.",
+    "openingWords": ["json"],
+    "openingAny": ["sqlite", "sql"],
+    "finalWords": [["migration", "migrations"], ["recovery", "tests"]],
+    "steps": [
+      {"say": "Remind me why offline use matters for this project and explain the storage tradeoff.", "after": "opening"},
+      {"say": "Before any choice, tell me which migration and recovery work remains unfinished. Do not submit anything.", "after": "answer", "spokenWords": [["offline"], ["json"], ["sqlite", "sql"]]}
     ]
   }
 ]

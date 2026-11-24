@@ -11,6 +11,7 @@ class OrbFallback(
     context: Context,
     private val shell: ShellMotion,
     private val energySource: EnergySource,
+    private val placement: LensPlacement = LensPlacement(),
 ) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val lens = Path()
@@ -45,6 +46,7 @@ class OrbFallback(
     fun pause() { resumed = false; previous = 0L }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        placement.resize(w, h)
         background = LinearGradient(0f,0f,w.toFloat(),h*.6f,intArrayOf(0xff46372b.toInt(),0xff777065.toInt(),0xffaaa195.toInt()),null,Shader.TileMode.CLAMP)
         glass = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(Color.BLACK, Color.BLACK, 0xff3c3839.toInt(), 0xff645c4b.toInt()), floatArrayOf(0f,.33f,.65f,1f), Shader.TileMode.CLAMP)
         rim = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(0x223e454c,0x779798a2,0xffe2e1d5.toInt()), null, Shader.TileMode.CLAMP)
@@ -79,7 +81,7 @@ class OrbFallback(
         paint.shader = null
         paint.color = if (light) 0x00000000 else 0xbb000000.toInt()
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-        val radius = min(width, height) * .40f
+        val radius = placement.baseRadius
         canvas.save()
         canvas.translate(width * .5f, height * .33f)
         canvas.scale(radius, radius)
@@ -88,8 +90,8 @@ class OrbFallback(
         paint.color = if (light) 0xffd4d1c9.toInt() else 0xff242424.toInt()
         canvas.drawRoundRect(.03f,.36f,1.31f,1.72f,.17f,.17f,paint)
         // Background remains fixed while the lens translates, stretches and changes curvature.
-        canvas.translate(0f,-shell.lift)
-        canvas.scale(shell.width,shell.height)
+        canvas.translate(0f, -placement.lift(shell))
+        canvas.scale(shell.width * placement.scale, shell.height * placement.scale)
         val visibility = (255f*shell.opacity).toInt().coerceIn(0,255)
         paint.color = Color.WHITE
         paint.alpha = visibility

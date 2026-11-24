@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.example.radiance.EnergySource
+import com.example.radiance.LensPlacement
 import com.example.radiance.OrbFallback
 import com.example.radiance.OrbSurface
 import com.example.radiance.ShellMotion
@@ -30,16 +31,17 @@ internal class CallScreen(
     private val openSettings: () -> Unit = {},
 ) : FrameLayout(context), EnergySource, Choreographer.FrameCallback {
     private val shell = ShellMotion()
+    private val placement = LensPlacement(topAnchored = true, density = resources.displayMetrics.density)
     private val state = CallVisualState()
     private val scheduler = Choreographer.getInstance()
     private val preferences = ScreenPreferences(context)
-    private val fallback = OrbFallback(context, shell, this)
+    private val fallback = OrbFallback(context, shell, this, placement)
     private var autoFlat = false
     private var quality = preferences.quality
     private var light = preferences.lightBackdrop
     private var animations = preferences.animations
     private val surface = try {
-        OrbSurface(context, null, { useFallback() }, shell, this)
+        OrbSurface(context, null, { useFallback() }, shell, this, placement)
     } catch (_: RuntimeException) { null } catch (_: LinkageError) { null }
     private val flat get() = surface == null || quality == 2 || (quality == 0 && autoFlat)
     private val title = label("Your desktop, in reach.", 30f)
@@ -60,15 +62,18 @@ internal class CallScreen(
     private var previous = 0L
     private var lastMode = -1
     private var finishDismissal: Runnable? = null
-    private var compact = false
     private var panelOpen = false
     private var awaitingReply = false
     private var lastUserCaption = ""
     private var lastUserFinal = false
     private val heading = LinearLayout(context)
+    private var safeLeft = 0
+    private var safeRight = 0
+    private var safeBottom = 0
+    internal val voiceContentTop get() = (placement.restingBottom - placement.topInset).toInt() + dp(12)
 
     init {
-        shell.target(if (source == null) 1 else 4, true)
+        shell.target(4, true)
         setBackgroundColor(Color.BLACK)
         surface?.let { addView(it, LayoutParams(-1, -1)) }
         addView(fallback, LayoutParams(-1, -1))
@@ -121,11 +126,26 @@ internal class CallScreen(
         callActions.addView(end, LinearLayout.LayoutParams(0, -2, 1f))
         controls.addView(callActions, LinearLayout.LayoutParams(-1, -2))
         addView(controls, LayoutParams(-1, -2, Gravity.BOTTOM))
-        if (Build.VERSION.SDK_INT >= 30) setOnApplyWindowInsetsListener { _, insets ->
-            val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            setPadding(safe.left, safe.top, safe.right, if (compact) 0 else safe.bottom)
+        setOnApplyWindowInsetsListener { _, insets ->
+            val top: Int
+            if (Build.VERSION.SDK_INT >= 30) {
+                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                safeLeft = safe.left; safeRight = safe.right; safeBottom = safe.bottom; top = safe.top
+            } else {
+                @Suppress("DEPRECATION")
+                safeLeft = insets.systemWindowInsetLeft
+                @Suppress("DEPRECATION")
+                safeRight = insets.systemWindowInsetRight
+                @Suppress("DEPRECATION")
+                safeBottom = insets.systemWindowInsetBottom
+                @Suppress("DEPRECATION")
+                top = insets.systemWindowInsetTop
+            }
+            placement.resize(width, height, top.toFloat())
+            layoutControls()
+            surface?.refreshPlacement(); fallback.invalidate()
             insets
-        } else fitsSystemWindows = true
+        }
         showActions()
         refreshAppearance()
         setSpeaker(false)
@@ -136,17 +156,10 @@ internal class CallScreen(
     private fun showActions() {
         callActions.visibility = if (source == null) GONE else VISIBLE
         callNotice.visibility = if (source == null) GONE else VISIBLE
-        heading.visibility = if (compact) GONE else VISIBLE
-        controls.visibility = if (panelOpen || compact) INVISIBLE else VISIBLE
+        heading.visibility = if (panelOpen || source == null) GONE else VISIBLE
+        controls.visibility = if (panelOpen || source == null) INVISIBLE else VISIBLE
         settingsButton.visibility = if (panelOpen) GONE else VISIBLE
         content.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
-    }
-
-    fun compact(value: Boolean) {
-        if (compact == value) return
-        compact = value
-        showActions()
-        requestApplyInsets()
     }
 
     fun setPanelOpen(open: Boolean) {
@@ -162,6 +175,8 @@ internal class CallScreen(
         source = next; ending = false; previous = 0L; lastMode = -1
         end.isEnabled = true; speaker.isEnabled = true
         state.update(false, false, 0f, 0f, 0L, 0f, true)
+        state.update(next?.active == true, next?.connected == true, 0f, 0f, 0L, 0f, true)
+        if (next == null && !resumed) shell.target(4, true)
         caller.text = ""; assistant.text = ""
         awaitingReply = false; lastUserCaption = ""; lastUserFinal = false
         caller.visibility = GONE; assistant.visibility = GONE
@@ -190,8 +205,22 @@ internal class CallScreen(
     private fun still() = !animations
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        placement.resize(w, h)
+        layoutControls()
+        surface?.refreshPlacement(); fallback.invalidate()
+    }
+
+    private fun layoutControls() {
+        heading.layoutParams = (heading.layoutParams as LayoutParams).apply {
+            leftMargin = maxOf(dp(12), safeLeft)
+            rightMargin = maxOf(dp(12), safeRight)
+            topMargin = placement.topInset.toInt() + voiceContentTop
+        }
+        controls.setPadding(maxOf(dp(24), safeLeft), 0, maxOf(dp(24), safeRight), maxOf(dp(16), safeBottom))
+        val viewportHeight = height
+        val fraction = if (width > viewportHeight) .55f else .43f
         controls.layoutParams = (controls.layoutParams as LayoutParams).apply {
-            height = (h * if (w > h) .55f else .43f).toInt().coerceAtLeast(dp(190)).coerceAtMost(h)
+            height = (viewportHeight * fraction).toInt().coerceAtLeast(dp(190)).coerceAtMost(viewportHeight)
         }
     }
 
@@ -210,7 +239,7 @@ internal class CallScreen(
         transcript.update(current.connected, state.mode == 2, user, userFinal, reply, replyFinal, state.mode == 3)
     }
 
-    override fun energy(seconds: Float, mode: Int) = if (source == null || still()) 0f else state.level
+    override fun energy(seconds: Float, mode: Int) = if (source?.active != true || ending || still()) 0f else state.level
 
     private fun useFallback() {
         if (disposed || autoFlat) return
@@ -220,7 +249,7 @@ internal class CallScreen(
 
     private fun applyPose() {
         val reduced = still()
-        val mode = if (source == null) 1 else state.mode
+        val mode = if (source?.active != true || ending) 4 else if (source?.connected != true) 0 else state.mode
         shell.target(mode, reduced)
         fallback.visibility = if (flat) VISIBLE else INVISIBLE
         surface?.update(mode, reduced, light, !flat, quality == 0)
@@ -257,6 +286,7 @@ internal class CallScreen(
 
     fun pause() {
         resumed = false; previous = 0L
+        if (source?.active != true || ending) shell.target(4, true)
         scheduler.removeFrameCallback(this)
         surface?.pause(); fallback.pause()
     }
@@ -264,6 +294,7 @@ internal class CallScreen(
     fun dismiss(finished: () -> Unit) {
         if (ending || disposed) return
         ending = true; end.isEnabled = false; speaker.isEnabled = false
+        applyPose()
         val completion = Runnable { finishDismissal = null; finished() }
         finishDismissal = completion
         postDelayed(completion, if (still()) 0 else 1000)

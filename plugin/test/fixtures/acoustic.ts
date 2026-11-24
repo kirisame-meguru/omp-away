@@ -10,14 +10,24 @@ import nativePrompt from './acoustic-ask.md' with { type:'text' };
 export default function acoustic(pi:ExtensionAPI) {
   // This fixture must never open or compete with the paired production gateway.
   for(const key of ['OMP_AWAY_URL','OMP_AWAY_TOKEN_FILE','OMP_AWAY_STATE_DIR','OMP_AWAY_TUNNEL_PYTHON']) delete process.env[key];
-  let nativeFinished:(()=>void)|undefined;
+  let nativeFinished:((toolCallId:string)=>void)|undefined;
+  let resumptionFinished:(()=>void)|undefined;
   let nativeFailed:((category:'native-model-capacity'|'native-model-failed')=>void)|undefined;
+  const contextDeliveries=new Map<string,()=>void>();
+  pi.on('message_end',event=>{
+    const message=event.message;
+    if(message.role!=='custom'||message.customType!=='omp-away:acoustic-context')return;
+    const details=message.details;
+    if(details&&typeof details==='object'&&'id' in details&&typeof details.id==='string')contextDeliveries.get(details.id)?.();
+  });
   pi.on('agent_end',event=>{
     const failed=event.messages.find(message=>message.role==='assistant'&&message.stopReason==='error');
     if(failed?.role==='assistant')
       nativeFailed?.(failed.errorMessage?.includes('turn_rate_limit_exceeded')?'native-model-capacity':'native-model-failed');
+    if(event.messages.some(message=>message.role==='assistant'&&message.stopReason!=='error'&&
+      message.content.some(part=>part.type==='text'&&part.text.trim()==='synthetic-resumed')))resumptionFinished?.();
   });
-  pi.on('tool_execution_end',event=>{if(event.toolName==='ask'&&!event.isError)nativeFinished?.()});
+  pi.on('tool_execution_end',event=>{if(event.toolName==='ask')nativeFinished?.(event.toolCallId)});
   pi.registerCommand('acousticprobe',{description:'Synthetic native Ask through dev-phone audio',handler:async(_,host)=>{
     const trace=process.env.OMP_AWAY_VOICE_TRACE;
     if(!trace)throw Error('Use test/acoustic.py');
@@ -36,39 +46,40 @@ export default function acoustic(pi:ExtensionAPI) {
     function words(value:unknown,limit=32):value is string[]{return Array.isArray(value)&&value.length<=limit&&value.every(word=>typeof word==='string'&&/^[a-z']{1,32}$/.test(word))}
     const requestedWords=config.observedWords??[];
     if(!words(openingWords)||!openingWords.length||!words(openingAny)||!words(requestedWords,128))throw Error('Invalid acoustic observation words');
-    const observedWords=new Set([...openingWords,...openingAny,...requestedWords,'submit']);
+    const observedWords=new Set([...openingWords,...openingAny,...requestedWords]);
     const observe=(text:string)=>[...new Set((text.toLowerCase().match(/[\p{L}\p{N}']+/gu)??[]).filter(word=>observedWords.has(word)))];
     const prompt=config.form===undefined?nativePrompt:
-      `This is an authorized synthetic acoustic integration test in a disposable host. Use the native ask tool once with exactly this form, without extra questions or defaults:\n${config.form}\nThe driver answers through real phone microphone audio. Do not answer or submit the form yourself. Once the native tool returns, respond only with the selected value. Do nothing else.`;
+      `This is an authorized synthetic acoustic integration test in a disposable host. Use the native ask tool once with exactly this form, without extra questions or defaults:\n${config.form}\nThe driver discusses the question through real phone microphone audio. Do not answer or submit the form yourself. Native live takeover will withdraw this Ask; continue the discussion naturally without claiming a canonical selection. Do not invoke Ask again.`;
     const taskContext=config.taskContext?`Invented task facts for this disposable session only (not facts about the real repository):\n${config.taskContext}\nDo not invent progress, deployments, people, or facts absent from this context.\n\n`:'';
     const requestPrompt=taskContext+(config.prompt?`${prompt}\nSynthetic test context: ${config.prompt}`:prompt);
     void (async()=>{
     interface ResponseObservation {
       id:number;callerTurn:number;startedAt:number;finalAt:number;firstAudioAt:number;lastAudioAt:number;
-      words:string[];wordCount:number;readback:number;interrupted:boolean;submitPrompts:number;
-      category:'pending'|'answer'|'opening'|'readback'|'holding';
+      words:string[];wordCount:number;interrupted:boolean;
+      category:'pending'|'answer'|'opening';
     }
-    const state={messages:0,messageAt:0,readbacks:0,readbackAt:0,lastVoicedAt:0,micFrames:0,outFrames:0,marks:0,drains:0,
-      responseSeq:0,assistantFinals:0,callerTurns:0,lastCallerFinalAt:0,holdingAcks:0,duplicateSubmitPrompt:false,responses:[] as ResponseObservation[],
-      hotMicFrames:0,maxMicRms:0,submitted:0,delivery:'',values:{} as Record<string,unknown>,nativeEnded:false,ended:false,stop:false,errors:[] as string[]};
+    const state={mode:'native-live',messages:0,messageAt:0,lastVoicedAt:0,micFrames:0,outFrames:0,marks:0,drains:0,
+      responseSeq:0,assistantFinals:0,callerTurns:0,lastCallerFinalAt:0,responses:[] as ResponseObservation[],
+      hotMicFrames:0,maxMicRms:0,submitted:0,delivery:'',values:{} as Record<string,unknown>,
+      offers:0,takeoverAttempts:0,takeovers:0,withdrawals:0,nativeEnds:0,contextMatched:false,contextAckAt:0,firstAudioAt:0,
+      liveStarted:false,liveStops:0,closed:false,resumed:false,nativeEnded:false,ended:false,stop:false,errors:[] as string[]};
+    let originatingAsk:PendingAsk|undefined,expectedContext:string|undefined;
     let response:ResponseObservation|undefined;
-    let pendingDesktop:{at:number;readback:number;opening:boolean}|undefined;
     function beginResponse():ResponseObservation|undefined {
       if(response)return response;
       if(state.responses.length>=64){
         if(!state.errors.includes('assistant-observation-limit'))state.errors.push('assistant-observation-limit');
         return;
       }
-      const now=Date.now(),desktop=pendingDesktop;
-      pendingDesktop=undefined;
+      const now=Date.now();
       response={id:++state.responseSeq,callerTurn:state.callerTurns,startedAt:now,finalAt:0,firstAudioAt:0,lastAudioAt:0,
-        words:[],wordCount:0,readback:desktop&&now>=desktop.at?desktop.readback:0,interrupted:false,submitPrompts:0,
-        category:desktop?.opening?'opening':'pending'};
+        words:[],wordCount:0,interrupted:false,
+        category:state.responses.length===0?'opening':'pending'};
       state.responses.push(response);
       return response;
     }
-    nativeFinished=()=>{state.nativeEnded=true};
-    nativeFailed=category=>{if(!state.stop&&!state.nativeEnded&&!state.errors.includes(category))state.errors.push(category)};
+    nativeFinished=id=>{if(id===originatingAsk?.toolCallId){state.nativeEnded=true;state.nativeEnds++}};
+    nativeFailed=category=>{if(!state.errors.includes(category))state.errors.push(category)};
     let wire:SecureDesktopOptions|undefined, device:Socket<undefined>|undefined;
     let pending=Buffer.alloc(0), quiet=0, voiced=false;
     const connected=Promise.withResolvers<void>();
@@ -89,42 +100,51 @@ export default function acoustic(pi:ExtensionAPI) {
         }
       },
     }});
-    const monitor=Bun.serve({hostname:'127.0.0.1',port:19584,fetch(req){
-      if(req.method==='POST'&&new URL(req.url).pathname==='/stop')state.stop=true;
+    const monitor=Bun.serve({hostname:'127.0.0.1',port:19584,async fetch(req){
+      if(req.method==='POST'&&new URL(req.url).pathname==='/stop'&&!state.stop){
+        state.stop=true;
+        if(originatingAsk)await wire?.onMessage('fixture',{type:'hangup',requestId:originatingAsk.requestId});
+      }
       return Response.json(state);
     }});
     await Bun.write(trace+'.ready','ready');
     let unsubscribe:(()=>void)|undefined;
     let runtime:MobileRuntime|undefined;
-    const ctx:AskContext={cwd:host.cwd,sessionManager:host.sessionManager,modelRegistry:host.modelRegistry,
-      async runEphemeralTurn(options){
-        if(!host.runEphemeralTurn)throw Error('Host side turns unavailable');
-        return host.runEphemeralTurn(options);
-      }};
+    const ctx:AskContext={
+      cwd:host.cwd,sessionManager:host.sessionManager,
+      async startLive(options){
+        if(typeof host.startLive!=='function')throw Error('Native live unavailable');
+        if(!state.contextMatched||!state.contextAckAt)throw Error('Native live started before originating context acknowledgment');
+        const live=await host.startLive(options);state.liveStarted=true;
+        return {...live,async stop(){await live.stop();state.liveStops++}};
+      },
+      awayContext(content){
+        state.contextMatched=!!expectedContext&&content.split('\n').at(-2)===expectedContext;
+        if(!state.contextMatched)return Promise.reject(Error('Wrong originating question context'));
+        const {promise,resolve,reject}=Promise.withResolvers<void>();
+        const id=crypto.randomUUID();
+        const timer=setTimeout(()=>{contextDeliveries.delete(id);reject(Error('Context delivery timeout'))},20000);
+        contextDeliveries.set(id,()=>{clearTimeout(timer);contextDeliveries.delete(id);state.contextAckAt=Date.now();resolve()});
+        try{
+          pi.sendMessage({customType:'omp-away:acoustic-context',content,display:true,attribution:'agent',details:{id}},
+            host.isIdle()?{triggerTurn:false}:{deliverAs:'aside',triggerTurn:false});
+          state.messages++;state.messageAt=Date.now();
+        }catch(error){clearTimeout(timer);contextDeliveries.delete(id);reject(error)}
+        return promise;
+      },
+    };
     const runtimePromise=connected.promise.then(()=>connectRuntime({url:'https://example.invalid',desktopToken:'',stateDir:trace+'.state',confirmPair:async()=>false},
       code=>state.errors.push(code),{
         async voice(options){
-          const voice=await openVoice({...options,
-            onSpeechStarted(id,startedAt){
-              // Keep an unfinished response's ownership for its late final.
-              if(response&&!response.finalAt)response.interrupted=true;
-              else response=undefined;
-              pendingDesktop=undefined;state.callerTurns++;
-              options.onSpeechStarted(id,startedAt);
-            },
-            onInterrupt(){
-              if(response&&!response.finalAt)response.interrupted=true;
-              else response=undefined;
-              pendingDesktop=undefined;
-              options.onInterrupt();
-            },
-            onTranscript(role,text,id){
-              if(role==='user')state.lastCallerFinalAt=Date.now();
-              options.onTranscript(role,text,id);
-            },
+          return openVoice({...options,
             onCaption(role,text,final){
+              if(role==='user'&&final){
+                state.callerTurns++;state.lastCallerFinalAt=Date.now();
+                if(response&&!response.finalAt)response.interrupted=true;
+                else response=undefined;
+              }
               if(role==='assistant'){
-                // Native turn.done produces final=true; a partial caption is never completion.
+                // Observe native transcripts; these are not scripted readback proofs.
                 if(response?.finalAt)response=undefined;
                 const current=beginResponse();
                 if(current){
@@ -132,35 +152,13 @@ export default function acoustic(pi:ExtensionAPI) {
                   current.wordCount=words.length;current.words=observe(text.replaceAll('’',"'"));
                   if(final){
                     current.finalAt=Date.now();state.assistantFinals++;
-                    current.submitPrompts=text.match(/\bsubmit\s*\?/giu)?.length??0;
-                    let prompts=0;
-                    for(const observed of state.responses) if(observed.callerTurn===current.callerTurn)prompts+=observed.submitPrompts;
-                    if(prompts>1){
-                      state.duplicateSubmitPrompt=true;
-                      if(!state.errors.includes('duplicate-submit-prompt'))state.errors.push('duplicate-submit-prompt');
-                    }
-                    const holding=words.join(' ');
-                    if(holding==='okay'||holding==='ok'||holding==='got it'){
-                      current.category='holding';state.holdingAcks++;
-                      if(!state.errors.includes('standalone-holding-acknowledgement'))state.errors.push('standalone-holding-acknowledgement');
-                    }else if(current.readback)current.category='readback';
-                    else if(current.category!=='opening')current.category='answer';
+                    if(current.category!=='opening')current.category='answer';
                   }
                 }
               }
               options.onCaption?.(role,text,final);
             },
           });
-          return {...voice,async sendSpeakable(text,instruction=false){
-            state.messages++;state.messageAt=Date.now();
-            if(instruction){state.readbacks++;state.readbackAt=state.messageAt}
-            // A new desktop response must not inherit an interrupted response
-            // whose provider final never arrived.
-            if(response?.interrupted)response=undefined;
-            // Only this real desktop draft instruction can label a later response as a readback.
-            pendingDesktop={at:state.messageAt,readback:instruction?state.readbacks:0,opening:state.messages===1};
-            await voice.sendSpeakable(text,instruction);
-          }};
         },
         async gateway(options){wire=options;let prefs:Preferences={away:false,delayMs:null};options.onRouting?.(prefs);return {
           async routing(patch={}){prefs={...prefs,...patch};options.onRouting?.(prefs);return prefs},
@@ -175,6 +173,8 @@ export default function acoustic(pi:ExtensionAPI) {
             if(message.type==='ended')state.ended=true;
           },
           async sendPcm(_device,pcm){
+            state.firstAudioAt||=Date.now();
+            if(!state.contextAckAt&&!state.errors.includes('audio-before-context-ack'))state.errors.push('audio-before-context-ack');
             state.outFrames++;
             const samples=new DataView(pcm.buffer,pcm.byteOffset,pcm.byteLength);let energy=0;
             for(let i=0;i<pcm.length;i+=2)energy+=samples.getInt16(i,true)**2;
@@ -193,24 +193,52 @@ export default function acoustic(pi:ExtensionAPI) {
       runtime=await runtimePromise;wire!.onConnect!('fixture');
       unsubscribe=pi.events.on('omp-away:pending-ask',payload=>{
         const ask=payload as PendingAsk;
-        runtime!.offer({...ask,async submitConfirmed(id,values){
-          state.submitted++;state.values=values;
-          const result=await ask.submitConfirmed(id,values);state.delivery=result;return result;
-        }},ctx);
+        state.offers++;
+        if(originatingAsk){state.errors.push('unexpected-question');return}
+        originatingAsk=ask;
+        if(config.form!==undefined&&ask.html!==config.form){state.errors.push('wrong-native-form');return}
+        expectedContext=JSON.stringify({requestId:ask.requestId,...ask.context,html:ask.html});
+        runtime!.offer({...ask,
+          async takeOver(id){
+            state.takeoverAttempts++;
+            if(!ask.takeOver)throw Error('Native takeover unavailable');
+            const result=await ask.takeOver(id);if(result==='accepted')state.takeovers++;
+            return result;
+          },
+          async withdraw(id,reason){
+            state.withdrawals++;
+            if(!ask.withdraw)throw Error('Native withdrawal unavailable');
+            return ask.withdraw(id,reason);
+          },
+          async submitConfirmed(id,values,notes){
+            state.submitted++;state.values=values;
+            const result=await ask.submitConfirmed(id,values,notes);state.delivery=result;return result;
+          },
+        },ctx);
         void wire!.onMessage('fixture',{type:'join',requestId:ask.requestId,captions:true});
       });
       void pi.sendUserMessage(requestPrompt).catch(()=>state.errors.push('native-prompt-failed'));
       const deadline=Date.now()+durationSeconds*1000;
       while(!state.ended&&!state.stop&&!state.errors.length&&Date.now()<deadline)await Bun.sleep(25);
-      if(!state.ended)state.errors.push('conversation-incomplete');
+      if(!state.stop)state.errors.push('conversation-ended-without-requested-hangup');
     }catch(error){state.errors.push(error instanceof Error?error.name:'probe-error')}
     finally{
-      await runtime?.close();unsubscribe?.();
+      await runtime?.close();state.closed=true;unsubscribe?.();
+      if(state.stop&&!state.errors.length){
+        resumptionFinished=()=>{state.resumed=true};
+        void pi.sendUserMessage('Synthetic post-call resumption probe: respond only with synthetic-resumed. Do not call tools.').catch(()=>state.errors.push('resumption-failed'));
+        const deadline=Date.now()+30000;
+        while(!state.resumed&&!state.errors.length&&Date.now()<deadline)await Bun.sleep(25);
+        if(!state.resumed)state.errors.push('resumption-not-observed');
+      }
       const deadline=Date.now()+5000;
-      while((state.drains<state.marks||state.submitted===1&&!state.nativeEnded)&&Date.now()<deadline)await Bun.sleep(25);
-      nativeFinished=undefined;nativeFailed=undefined;
+      while(state.drains<state.marks&&Date.now()<deadline)await Bun.sleep(25);
+      nativeFinished=undefined;nativeFailed=undefined;resumptionFinished=undefined;
       device?.write(Buffer.from([3]));await Bun.write(trace+'.result',JSON.stringify(state));
-      server.stop();monitor.stop();process.exit(state.submitted===1&&state.nativeEnded&&!state.errors.length?0:1);
+      server.stop();monitor.stop();
+      process.exit(state.closed&&state.resumed&&state.liveStops===1&&state.takeovers===1&&state.nativeEnds===1&&
+        state.submitted===0&&state.contextMatched&&state.contextAckAt>0&&state.firstAudioAt>=state.contextAckAt&&
+        state.callerTurns>0&&state.assistantFinals>0&&state.hotMicFrames>0&&state.outFrames>0&&!state.errors.length?0:1);
     }
     })().catch(()=>Bun.write(trace+'.startup-error','probe-start-failed'));
   }});

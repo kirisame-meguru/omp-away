@@ -37,7 +37,7 @@ test("async display and excerpt use the form, not contextual title or capability
  expect(asyncForm.question).toBe("Target; Notes");
  expect(JSON.stringify(asyncForm.display)).not.toContain("Async routing title");
 });
-test("visual questions survive stricter voice budgets without enabling oversized voice calls",()=>{
+test("visual questions survive legacy voice budgets while native live owns context limits",()=>{
  const html='<form><label>Choose<select name="x"><option value="a">'+"A".repeat(4500)+'</option><option value="b">'+"B".repeat(4500)+'</option></select></label></form>';
  const form=prepare(html)!;
  expect(form.display?.fields[0].options?.map(option=>option.label.length)).toEqual([4500,4500]);
@@ -45,7 +45,9 @@ test("visual questions survive stricter voice budgets without enabling oversized
  try {
   expect(core.offer({requestId:"large",toolCallId:"large",html,async submitConfirmed(){throw Error("No submission")}}, {async runEphemeralTurn(){throw Error("No voice")}},"Example")).toBe(true);
   expect(core.list()).toMatchObject([{requestId:"large",question:"Choose"}]);
-  expect(core.join("large")).toBeUndefined();
+  expect(form.voiceSupported).toBe(false);
+  expect(core.voiceAvailable("large")).toBe(true);
+  expect(core.join("large")?.question.html).toBe(html);
  } finally {core.close()}
 });
 test("oversized metadata leaves an authoritative summary rather than dropping the request",()=>{

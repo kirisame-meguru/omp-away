@@ -145,9 +145,11 @@ class RadianceCallTest {
                 assertEquals(ScreenPreferences(context).blockScreenshots &&
                     android.provider.Settings.Secure.getInt(context.contentResolver, "window_ignore_secure", 0) == 0,
                     activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
-                val details = descendants(screen).filterIsInstance<Button>().singleOrNull { it.text.toString() == "Details" }
-                assertNotNull("Active calls must retain access to fixed question details", details)
-                details!!.performClick()
+                val questions = descendants(screen).filterIsInstance<Button>().singleOrNull { it.text.toString() == "Questions" }
+                assertNotNull("Active calls must retain access to questions", questions)
+                questions!!.performClick()
+                descendants(activity.window.decorView).filterIsInstance<Button>()
+                    .single { it.text.toString() == "View details" }.performClick()
                 assertTrue(texts(activity.window.decorView).contains("Choose the fixture option"))
                 assertTrue(texts(activity.window.decorView).contains("Fixture proposal"))
                 assertTrue(descendants(activity.window.decorView).any { it is QuestionDetailView })
@@ -176,7 +178,11 @@ class RadianceCallTest {
                 assertNull(app.callVisual)
                 assertFalse(call.active)
             }
-            await(3000) { texts(screen).contains("Your desktop, in reach.") }
+            await(3000) {
+                texts(activity.window.decorView).contains("Questions") &&
+                    (CallScreen::class.java.getDeclaredField("shell").apply { isAccessible = true }
+                        .get(screen) as com.example.radiance.ShellMotion).opacity == 0f
+            }
             instrumentation.runOnMainSync {
                 assertSame(screen, descendants(activity.window.decorView).filterIsInstance<CallScreen>().single())
                 assertSame(renderer, screen.getChildAt(0))

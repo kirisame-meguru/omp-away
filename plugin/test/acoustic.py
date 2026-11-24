@@ -1,4 +1,4 @@
-"""Run synthetic native Ask dialogues through a disposable phone app and physical audio.
+"""Run native-live discussion through a disposable phone app and physical audio.
 Requires pywinpty, sounddevice, soundfile and numpy; never installs or clears apps.
 Set ANDROID_SERIAL and select --mic/--speaker using --list-audio.
 Only ru.eleven.ompaway.integration and its instrumentation package are operated on.
@@ -46,7 +46,7 @@ def settings(parser, options):
         parser.error('Select --mic and --speaker explicitly, or set OMP_AWAY_ACOUSTIC_MIC and OMP_AWAY_ACOUSTIC_SPEAKER')
     devices = sd.query_devices()
     for index, direction in ((options.mic, 'input'), (options.speaker, 'output')):
-        if not 0 <= index < len(devices) or devices[index]['max_' + direction + '_channels'] < 1:
+        if index is None or not 0 <= index < len(devices) or devices[index]['max_' + direction + '_channels'] < 1:
             parser.error('Selected audio index does not support the requested direction; use --list-audio')
     options.mic_channels = min(2, devices[options.mic]['max_input_channels'])
     options.speaker_channels = min(2, devices[options.speaker]['max_output_channels'])
@@ -74,6 +74,8 @@ def load_scenarios(path):
     for scenario in scenarios:
         if not isinstance(scenario, dict):
             raise ValueError('Invalid scenario')
+        if scenario.get('mode') != 'native-live' or 'expected' in scenario:
+            raise ValueError('Use native-live discussion scenarios; canonical fixtures belong to direct DecisionCall tests')
         name = scenario.get('name')
         if not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}', name) or name in names:
             raise ValueError('Scenario names must be unique safe directory names')
@@ -90,23 +92,19 @@ def load_scenarios(path):
         duration = scenario.setdefault('durationSeconds', 180)
         if type(duration) is not int or not 60 <= duration <= 900:
             raise ValueError('Scenario duration must be between 60 and 900 seconds')
-        if type(scenario.get('bargeIn', False)) is not bool:
-            raise ValueError('Barge-in opt-in must be boolean')
-        expected = scenario.get('expected')
-        if not isinstance(expected, dict) or not 1 <= len(expected) <= 16 or any(not isinstance(key, str) or not 1 <= len(key) <= 128 or not isinstance(value, str) or len(value) > 1024 for key, value in expected.items()):
-            raise ValueError('Expected values must be a bounded synthetic string map')
+        final_words = scenario.get('finalWords')
+        if not isinstance(final_words, list) or not 1 <= len(final_words) <= 8:
+            raise ValueError('Require final native-live response word groups')
+        for group in final_words:
+            if not isinstance(group, list) or not 1 <= len(group) <= 8 or any(not isinstance(word, str) or not re.fullmatch(r"[a-z']{1,32}", word) for word in group):
+                raise ValueError('Invalid final response word group')
         steps = scenario.get('steps')
         if not isinstance(steps, list) or not 1 <= len(steps) <= 16:
             raise ValueError('Provide between 1 and 16 acoustic steps')
         for step in steps:
-            if not isinstance(step, dict) or not isinstance(step.get('say'), str) or not 1 <= len(step['say']) <= 1024 or step.get('after') not in ('opening', 'answer', 'readback', 'pause', 'during-readback'):
+            if not isinstance(step, dict) or not isinstance(step.get('say'), str) or not 1 <= len(step['say']) <= 1024 or step.get('after') not in ('opening', 'answer'):
                 raise ValueError('Invalid acoustic step')
-            seconds = step.get('seconds', 0)
-            if type(seconds) not in (int, float) or not 0 <= seconds <= 30:
-                raise ValueError('Pause must be between 0 and 30 seconds')
-            if step['after'] == 'during-readback' and (not scenario.get('bargeIn') or not .1 <= seconds <= 2):
-                raise ValueError('During-readback requires opt-in and a 0.1–2 second audible offset')
-            if set(step) - {'say', 'after', 'seconds', 'spokenWords'}:
+            if set(step) - {'say', 'after', 'spokenWords'}:
                 raise ValueError('Unknown acoustic step requirement')
             groups = step.get('spokenWords', [])
             if not isinstance(groups, list) or len(groups) > 8:
@@ -114,7 +112,7 @@ def load_scenarios(path):
             for group in groups:
                 if not isinstance(group, list) or not 1 <= len(group) <= 8 or any(not isinstance(word, str) or not re.fullmatch(r"[a-z']{1,32}", word) for word in group):
                     raise ValueError('Spoken word groups must be bounded lowercase synthetic words')
-        scenario['observedWords'] = sorted({word for step in steps for group in step.get('spokenWords', []) for word in group})
+        scenario['observedWords'] = sorted({word for groups in [final_words, *(step.get('spokenWords', []) for step in steps)] for group in groups for word in group})
         if len(scenario['observedWords']) > 128:
             raise ValueError('At most 128 synthetic observation words per scenario')
     return scenarios
@@ -154,7 +152,7 @@ def response_for_step(state, after, since=0, previous_caller=None):
     while start:
         current, previous = responses[start], responses[start - 1]
         if (previous['startedAt'] < since or current['callerTurn'] != previous['callerTurn']
-                or current['readback'] or current['category'] == 'opening'):
+                or current.get('readback', 0) or current['category'] == 'opening'):
             break
         start -= 1
     fragments = responses[start:]
@@ -172,9 +170,34 @@ def response_for_step(state, after, since=0, previous_caller=None):
         'lastAudioAt': max(part['lastAudioAt'] for part in fragments),
         'words': list(dict.fromkeys(word for part in fragments for word in part['words'])),
         'wordCount': sum(part['wordCount'] for part in fragments),
-        'submitPrompts': sum(part['submitPrompts'] for part in fragments),
+        'submitPrompts': sum(part.get('submitPrompts', 0) for part in fragments),
         'interrupted': any(part['interrupted'] for part in fragments),
     }
+
+def native_live_passed(scenario, played, state, final_reply, instrumentation, failure):
+    """Native conversation invariants, never canonical answer acceptance."""
+    if failure or len(played) != len(scenario['steps']) or not played or not final_reply:
+        return False
+    return (
+        state.get('mode') == 'native-live'
+        and all(item['submittedBefore'] == 0 for item in played)
+        and state.get('offers') == state.get('takeoverAttempts') == state.get('takeovers') == state.get('nativeEnds') == 1
+        and state.get('withdrawals') == state.get('submitted') == 0
+        and state.get('messages') == 1 and state.get('contextMatched') is True
+        and 0 < state.get('contextAckAt', 0) <= state.get('firstAudioAt', 0)
+        and state.get('liveStarted') and state.get('nativeEnded')
+        and state.get('liveStops') == 1 and state.get('closed') and state.get('ended') and state.get('resumed')
+        and state.get('callerTurns', 0) >= len(played) and state.get('assistantFinals', 0) >= len(played) + 1
+        and state.get('hotMicFrames', 0) > 0 and state.get('micFrames', 0) > 0 and state.get('outFrames', 0) > 0
+        and state.get('drains') == state.get('marks') and state.get('marks', 0) > 0
+        and final_reply['finalAt'] >= played[-1]['startedAt']
+        and final_reply['callerTurn'] > played[-1]['callerBefore']
+        and 0 < final_reply['firstAudioAt'] <= final_reply['lastAudioAt']
+        and not final_reply['interrupted']
+        and all(set(group) & set(final_reply['words']) for group in scenario['finalWords'])
+        and not state.get('errors') and 'OK (1 test)' in instrumentation
+    )
+
 
 
 def run(scenario, directory, audio, options):
@@ -209,6 +232,7 @@ def run(scenario, directory, audio, options):
     state = {}
     failure = None
     instrumentation = ''
+    final_reply = None
     reverse_owned = False
     try:
         deadline = time.monotonic() + 30
@@ -230,21 +254,15 @@ def run(scenario, directory, audio, options):
                 'ru.eleven.ompaway.CallAudioTest#isolatedDesktopSpeechReachesHardwareWithMicrophoneRunning',
                 '-e', 'desktopAudioPort', '19583', '-e', 'speakerMode', 'on', '-e', 'captions', 'on',
                 RUNNER], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            previous_response = previous_finals = previous_readbacks = previous_caller = 0
+            previous_response = previous_finals = previous_caller = 0
             previous_playback_started = 0
             for step in scenario['steps']:
                 deadline = time.monotonic() + (90 if 'taskContext' in scenario else 55)
-                pause_until = time.monotonic() + step.get('seconds', 0)
-                audible_since = None
                 while True:
                     state = monitor()
-                    if state.get('duplicateSubmitPrompt'):
-                        raise RuntimeError('duplicate-submit-prompt')
                     native_failure = next((error for error in state['errors'] if error in ('native-model-capacity', 'native-model-failed')), None)
                     if native_failure:
                         raise RuntimeError(native_failure)
-                    if state['holdingAcks']:
-                        raise RuntimeError('standalone-holding-acknowledgement')
                     if state['submitted'] or state['ended'] or state['errors']:
                         raise RuntimeError('call-ended-before-dialogue-finished')
                     now = time.time()
@@ -253,58 +271,59 @@ def run(scenario, directory, audio, options):
                                                  previous_caller if played else None)
                     fresh = bool(response and response['id'] > previous_response
                                  and response['startedAt'] >= previous_playback_started)
-                    complete = bool(fresh and response['finalAt'] and not response['interrupted']
-                                    and response['wordCount'] >= (2 if step['after'] == 'readback' else 3)
-                                    and state['assistantFinals'] > previous_finals and response['category'] != 'holding')
-                    new_readback = bool(fresh and response['readback'] == state['readbacks'] > previous_readbacks
-                                        and response['startedAt'] >= state['readbackAt'])
+                    complete = bool(response and fresh and response['finalAt'] and not response['interrupted']
+                                    and response['wordCount'] >= 3 and state['assistantFinals'] > previous_finals)
                     heard = bool(response and response['firstAudioAt'] and response['lastAudioAt']
                                  and last_loud[0] >= response['firstAudioAt'] / 1000 - .1)
-                    if step['after'] == 'during-readback':
-                        # Actual bridge audio plus fresh physical playback; never a silence-only delay.
-                        audible = new_readback and heard and not response['interrupted'] and now - last_loud[0] < .2
-                        if audible:
-                            if audible_since is None:
-                                audible_since = time.monotonic()
-                        else:
-                            audible_since = None
-                        ready = audible_since is not None and time.monotonic() - audible_since >= step['seconds']
-                    elif step['after'] == 'pause':
-                        ready = time.monotonic() >= pause_until
-                    elif step['after'] == 'readback':
-                        ready = complete and new_readback and response['category'] == 'readback' and 'submit' in response['words']
-                    elif step['after'] == 'opening':
+                    if step['after'] == 'opening':
                         words = set(response['words']) if response else set()
-                        ready = complete and response['category'] == 'opening' and set(scenario['openingWords']) <= words
+                        ready = complete and response is not None and response['category'] == 'opening' and set(scenario['openingWords']) <= words
                         ready = ready and (not scenario['openingAny'] or bool(set(scenario['openingAny']) & words))
                     else:
-                        # A realtime final, not a desktop append or a consultation, ends an answer.
-                        ready = complete and response['category'] == 'answer'
+                        ready = complete and response is not None and response['category'] == 'answer'
                     observed = set(response['words']) if response else set()
                     ready = ready and all(set(group) & observed for group in step.get('spokenWords', []))
-                    if ready and (step['after'] == 'during-readback' or quiet and heard):
+                    if ready and quiet and heard:
                         break
                     if time.monotonic() > deadline or instrument.poll() is not None:
                         raise RuntimeError('expected-complete-spoken-turn-not-heard')
                     time.sleep(.05)
                 previous_response = state['responseSeq']
                 previous_finals = state['assistantFinals']
-                previous_readbacks = state['readbacks']
                 previous_caller = state['callerTurns']
                 previous_playback_started = round(time.time() * 1000)
                 playback = {'say': step['say'], 'startedAt': previous_playback_started, 'finishedAt': None, 'after': step['after'],
                             'submittedBefore': state['submitted'], 'responseAfter': previous_response,
                             'assistantFinals': state['assistantFinals'], 'spokenWords': response['words'] if response else [],
-                            'readbacks': state['readbacks'], 'assistantVoicedAt': state['lastVoicedAt'],
+                            'callerBefore': previous_caller, 'assistantVoicedAt': state['lastVoicedAt'],
                             'speakerLoudAt': round(last_loud[0] * 1000)}
                 played.append(playback)
                 sd.play(audio[step['say']], RATE, device=options.speaker, blocking=True)
                 playback['finishedAt'] = round(time.time() * 1000)
-            deadline = time.monotonic() + 35
+            deadline = time.monotonic() + 55
+            while True:
+                state = monitor()
+                if state['errors'] or state['submitted'] or state['ended']:
+                    raise RuntimeError('native-conversation-ended-before-final-reply')
+                reply = response_for_step(state, 'answer', previous_playback_started, previous_caller)
+                now = time.time()
+                if (reply and reply['finalAt'] and not reply['interrupted'] and reply['wordCount'] >= 3
+                        and reply['id'] > previous_response and state['assistantFinals'] > previous_finals
+                        and reply['callerTurn'] > previous_caller and reply['firstAudioAt'] and reply['lastAudioAt']
+                        and last_loud[0] >= reply['firstAudioAt'] / 1000 - .1
+                        and now - state['lastVoicedAt'] / 1000 >= .8 and now - last_loud[0] >= .8
+                        and all(set(group) & set(reply['words']) for group in scenario['finalWords'])):
+                    final_reply = reply
+                    break
+                if time.monotonic() > deadline or instrument.poll() is not None:
+                    raise RuntimeError('final-native-spoken-reply-not-heard')
+                time.sleep(.05)
+            monitor(stop=True)
+            deadline = time.monotonic() + 40
             while not Path(str(trace) + '.result').exists() and time.monotonic() < deadline:
                 time.sleep(.1)
             if not Path(str(trace) + '.result').exists():
-                raise RuntimeError('native-submission-not-completed')
+                raise RuntimeError('native-teardown-or-resumption-not-completed')
     except Exception as error:
         failure = str(error) if isinstance(error, RuntimeError) else type(error).__name__
     finally:
@@ -345,10 +364,7 @@ def run(scenario, directory, audio, options):
         state = json.loads(result.read_text())
     if state.get('messages') == 0:
         failure = next((error for error in state.get('errors', []) if error in ('native-model-capacity', 'native-model-failed')), failure)
-    passed = (not failure and len(played) == len(scenario['steps']) and all(item['submittedBefore'] == 0 for item in played)
-              and state.get('holdingAcks') == 0 and state.get('submitted') == 1 and state.get('delivery') == 'accepted'
-              and state.get('nativeEnded') and state.get('values') == scenario['expected'] and not state.get('errors')
-              and 'OK (1 test)' in instrumentation)
+    passed = native_live_passed(scenario, played, state, final_reply, instrumentation, failure)
     latency = []
     for response in state.get('responses', []):
         candidates = [(index, item) for index, item in enumerate(played)
@@ -361,7 +377,8 @@ def run(scenario, directory, audio, options):
                         'firstAudioAt': first_audio, 'lastAudioAt': response['lastAudioAt'] or None,
                         'assistantFinalAt': response['finalAt'] or None, 'audioLatencyMs': delay,
                         'overlappedCallerPlayback': delay < 0 if delay is not None else None})
-    report = {'scenario': scenario['name'], 'passed': bool(passed), 'failure': failure, 'played': played, 'state': state,
+    report = {'scenario': scenario['name'], 'mode': 'native-live', 'passed': bool(passed), 'failure': failure,
+              'played': played, 'finalReply': final_reply, 'state': state,
               'responseLatency': latency, 'latencyBasis': 'observed desktop-to-phone PCM minus synthetic speaker playback completion; not handset ASR or end-to-end network latency',
               'instrumentation': instrumentation, 'peakRms': peak[0], 'transcripts': [str(p) for p in Path(str(trace) + '.state/calls').glob('*.jsonl')]}
     (directory / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
@@ -372,9 +389,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('scenario', nargs='*', help='Scenario names; defaults to direct')
     parser.add_argument('--all', action='store_true')
-    parser.add_argument('--scenarios', type=Path, default=ROOT / 'test/acoustic.json', help='Bounded synthetic scenario JSON')
+    parser.add_argument('--scenarios', type=Path, default=ROOT / 'test/acoustic.json', help='Native-live discussion scenarios; not canonical scripted acceptance')
     parser.add_argument('--list-audio', action='store_true', help='Discover audio indices without operating on a phone')
-    parser.add_argument('--include-barge-in', action='store_true', help='Opt in to physical interruption during audible readback')
     parser.add_argument('--mic', type=int, default=os.environ.get('OMP_AWAY_ACOUSTIC_MIC'), help='Explicit sounddevice input index')
     parser.add_argument('--speaker', type=int, default=os.environ.get('OMP_AWAY_ACOUSTIC_SPEAKER'), help='Explicit sounddevice output index')
     args = parser.parse_args()
@@ -386,11 +402,9 @@ def main():
     except (OSError, ValueError):
         parser.error('Invalid bounded synthetic scenario file')
     names = args.scenario or ['direct']
-    selected = [s for s in scenarios if not s.get('bargeIn') or args.include_barge_in] if args.all else [s for s in scenarios if s['name'] in names]
+    selected = scenarios if args.all else [s for s in scenarios if s['name'] in names]
     if not selected or not args.all and set(names) - {s['name'] for s in selected}:
         parser.error('Unknown scenario')
-    if any(s.get('bargeIn') for s in selected) and not args.include_barge_in:
-        parser.error('Barge-in scenarios require --include-barge-in and physical overlap-capable audio')
     try:
         settings(parser, args)
     except (OSError, subprocess.SubprocessError, sd.PortAudioError):

@@ -28,6 +28,14 @@ class RadianceHomeTest {
                         it.contains("animation", true) || it.contains("Animate voice")
                 })
                 assertEquals("Idle must not invent microphone energy", 0f, scene!!.energy(0f, 1), 0f)
+                val shell = CallScreen::class.java.getDeclaredField("shell").apply { isAccessible = true }
+                    .get(scene) as com.example.radiance.ShellMotion
+                assertEquals("No lens before an explicit voice action", 0f, shell.opacity, 0f)
+                assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, scene.layoutParams.height)
+                assertEquals(scene.height, scene.getChildAt(0).height)
+                val panel = InboxActivity::class.java.getDeclaredField("panel").apply { isAccessible = true }.get(activity) as View
+                val margin = (panel.layoutParams as android.widget.FrameLayout.LayoutParams).topMargin
+                assertEquals(RadianceUi.dp(activity, 12), margin)
             }
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
             val renderer = scene.getChildAt(0)
@@ -208,6 +216,15 @@ class RadianceHomeTest {
         try {
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
             val native = scene.getChildAt(0)
+            // Visual-only source: exercises renderer clocks without opening a microphone or channel.
+            instrumentation.runOnMainSync {
+                scene.bind(object : CallVisualSource {
+                    override val active = true
+                    override val connected = true
+                    override fun microphoneLevel(nowMillis: Long) = 0f
+                    override fun playbackLevel() = 0f
+                })
+            }
             click("Settings")
             for (quality in listOf("2D", "GPU")) {
                 click(quality)
@@ -256,6 +273,9 @@ class RadianceHomeTest {
             instrumentation.runOnMainSync {
                 val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
                 assertEquals(0f, scene.energy(0f, 1), 0f)
+                val shell = CallScreen::class.java.getDeclaredField("shell").apply { isAccessible = true }
+                    .get(scene) as com.example.radiance.ShellMotion
+                assertEquals("An invitation alone must not show the voice lens", 0f, shell.opacity, 0f)
                 assertNull(app.callVisual)
                 assertFalse(texts(activity.window.decorView).any { it.contains("Private invitation question") || it.contains("Private project") })
                 for (label in listOf("Answer call", "Decline")) {

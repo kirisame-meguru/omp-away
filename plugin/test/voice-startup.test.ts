@@ -14,36 +14,38 @@ async function startup(version: string, scenario = 'valid') {
 }
 
 for (const version of ['19.1.0', '19.1.1', '20.0.0', '99.0.0-dev']) {
-	test(`voice opens and closes with compatible host APIs on ${version}`, async () => {
-		const result = await startup(version);
+	test(`native live uses capabilities rather than host version ${version}`,async()=>{
+		const result=await startup(version);
 		expect(result.error).toBeUndefined();
-		expect(result).toMatchObject({ peers: 1, answers: 1, pcm: 960, closedPeers: 1, closedTransports: 1, ended: 1 });
-		expect(result.contextMessages).toBeGreaterThanOrEqual(2);
+		expect(result).toMatchObject({peers:1,answers:1,pcm:1920,closedPeers:1,closedTransports:1,ended:1,takeovers:1,audio:1});
+		expect(result.order).toEqual(['peer','takeover','context','live','answer']);
+		expect(result.contexts).toHaveLength(1);
+		expect(result.contexts[0]).toContain('Coffee');
+		expect(result.contexts[0]).toContain('Choose a drink');
+		expect(result.captions).toEqual([['user','Coffee',true]]);
 	});
 }
-test('voice setup does not publish question context before the consumer can receive the opening', async () => {
-	const result = await startup('19.1.1');
-	expect(result.error).toBeUndefined();
-	expect(result.earlyContextMessages).toBe(0);
-	expect(result.contextMessages).toBeGreaterThanOrEqual(2);
-});
-for (const scenario of ['missing-session', 'missing-session-api', 'missing-auth', 'missing-access', 'missing-rotation']) {
-	test(`voice rejects ${scenario} before opening media resources`, async () => {
-		const result = await startup('19.1.1', scenario);
-		expect(result.error).toBe('The current desktop session cannot authenticate Codex voice');
-		expect(result).toMatchObject({ peers: 0, closedPeers: 0, closedTransports: 0, ended: 0 });
+for(const scenario of ['missing-live','noncallable-live','missing-context','noncallable-context']) {
+	test(`native live rejects ${scenario} before opening resources`,async()=>{
+		const result=await startup('19.1.1',scenario);
+		expect(result.error).toBe('This host does not expose native remote live mode');
+		expect(result).toMatchObject({peers:0,closedPeers:0,closedTransports:0,ended:0,takeovers:0});
 	});
 }
-test('a compatible updated host still reports signaling failure and releases media resources', async () => {
-	const result = await startup('19.1.1', 'signaling-failed');
-	expect(result.error).toBe('Codex voice signaling failed; check the desktop Codex login and network');
-	expect(result).toMatchObject({ peers: 1, answers: 0, pcm: 0, closedPeers: 1, closedTransports: 1, ended: 1 });
+test.each([
+	['takeover-failed','takeover failed',0],
+	['context-failed','context failed',0],
+	['signaling-failed','signaling failed',0],
+	['peer-answer-failed','peer answer failed',1],
+])('native live releases resources on %s',async(scenario,message,closedTransports)=>{
+	const result=await startup('19.1.1',scenario);
+	expect(result.error).toBe(message);
+	expect(result).toMatchObject({peers:1,answers:0,pcm:0,closedPeers:1,closedTransports,ended:1});
+	if(scenario==='takeover-failed') expect(result.contexts).toEqual([]);
+	if(scenario==='context-failed') expect(result.order).not.toContain('live');
 });
-test('task context precedes the opening, refreshes only on changes, and stops with the call', async () => {
-	const result = await startup('19.1.1', 'context-refresh');
-	expect(result.error).toBeUndefined();
-	expect(result.contextChecks).toEqual({
-		initialGrounded:true,updatedGrounded:true,unchangedNotResent:true,refreshCommentaryOnly:true,stopped:true,
-	});
-	expect(result).toMatchObject({closedPeers:1,closedTransports:1,ended:1});
+test('a session returned after cancellation is stopped without answering the peer',async()=>{
+	const result=await startup('19.1.1','abort-during-start');
+	expect(result.error).toBeDefined();
+	expect(result).toMatchObject({peers:1,answers:0,closedPeers:1,closedTransports:1,ended:1});
 });

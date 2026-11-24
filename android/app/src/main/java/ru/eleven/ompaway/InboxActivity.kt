@@ -63,6 +63,18 @@ class InboxActivity : Activity() {
         super.onCreate(savedInstanceState)
         screenPreferences = ScreenPreferences(this)
         screenPreferences.apply(window)
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
+        else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+        @Suppress("DEPRECATION")
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
         page = Page.values().firstOrNull { it.name == savedInstanceState?.getString("page") } ?: Page.REQUESTS
         selectedId = savedInstanceState?.getString("selectedId")
         settingsReturn = Page.values().firstOrNull { it.name == savedInstanceState?.getString("settingsReturn") } ?: Page.REQUESTS
@@ -90,20 +102,21 @@ class InboxActivity : Activity() {
         panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
         panelHeader.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
         panel = RadianceUi.column(this).apply {
-            background = RadianceUi.surface(this@InboxActivity)
+            background = RadianceUi.surface(this@InboxActivity, 0x99181824.toInt())
             visibility = View.GONE
             addView(panelHeader, LinearLayout.LayoutParams(-1, -2))
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         val overlay = FrameLayout(this).apply {
             addView(panel, FrameLayout.LayoutParams(-1, -1).apply {
-                setMargins(dp(12), dp(128), dp(12), dp(12))
+                setMargins(dp(12), dp(12), dp(12), dp(12))
             })
         }
         setContentView(FrameLayout(this).apply {
             addView(callScreen, FrameLayout.LayoutParams(-1, -1))
             addView(overlay, FrameLayout.LayoutParams(-1, -1))
         })
+        callScreen.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updatePanelInset() }
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.setSystemBarsAppearance(0,
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
@@ -208,10 +221,13 @@ class InboxActivity : Activity() {
         panel.visibility = if (open) View.VISIBLE else View.GONE
         panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
         callScreen.setPanelOpen(open)
-        callScreen.compact(open)
-        val height = if (open) dp(128) else ViewGroup.LayoutParams.MATCH_PARENT
-        if (callScreen.layoutParams.height != height)
-            callScreen.layoutParams = (callScreen.layoutParams as FrameLayout.LayoutParams).apply { this.height = height }
+        updatePanelInset()
+    }
+
+    private fun updatePanelInset() {
+        val top = if (app.callId != null) callScreen.voiceContentTop else dp(12)
+        val params = panel.layoutParams as FrameLayout.LayoutParams
+        if (params.topMargin != top) panel.layoutParams = params.apply { topMargin = top }
     }
 
     private fun navigateBack() {
@@ -610,7 +626,9 @@ class InboxActivity : Activity() {
 
     private fun card(content: () -> Unit) {
         val parent = contentTarget
-        val card = RadianceUi.column(this, card = true)
+        val card = RadianceUi.column(this, card = true).apply {
+            background = RadianceUi.surface(this@InboxActivity, 0xb3242433.toInt(), 22)
+        }
         parent.addView(card, RadianceUi.rowParams(this))
         contentTarget = card
         try { content() } finally { contentTarget = parent }

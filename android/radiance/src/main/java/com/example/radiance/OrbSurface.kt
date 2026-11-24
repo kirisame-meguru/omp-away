@@ -17,6 +17,7 @@ class OrbSurface(
     private val slow: () -> Unit,
     private val shell: ShellMotion,
     private val energySource: EnergySource,
+    private val placement: LensPlacement = LensPlacement(),
 ) : SurfaceView(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
@@ -91,6 +92,7 @@ class OrbSurface(
             override fun onResized(width: Int, height: Int) {
                 view.viewport = Viewport(0, 0, width, height)
                 instance.setParameter("viewport", width.toFloat(), height.toFloat())
+                placement.resize(width, height)
                 requestFrame()
             }
         }
@@ -115,6 +117,8 @@ class OrbSurface(
         } else requestFrame()
     }
 
+    fun refreshPlacement() { requestFrame() }
+
     fun resume() { resumed = true; resetMeasurement(); requestFrame() }
     fun pause() { resumed = false; scheduler.removeFrameCallback(this); scheduled = false; previous = 0L }
     private fun resetMeasurement() { policy.reset(); windowStart = 0L; frames = 0; previous = 0L }
@@ -129,7 +133,8 @@ class OrbSurface(
         previous = frameTimeNanos
         if (!still) elapsed += dt
         if (!still) shell.advance(dt)
-        instance.setParameter("shellPose", shell.width, shell.height, shell.lift, shell.opacity)
+        instance.setParameter("shellPose", shell.width * placement.scale, shell.height * placement.scale,
+            placement.lift(shell), shell.opacity)
         instance.setParameter("shellShape", shell.shape)
         instance.setParameter("time", elapsed)
         instance.setParameter("energy", energySource.energy(elapsed, mode))

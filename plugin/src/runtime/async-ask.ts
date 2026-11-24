@@ -1,8 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AnswerNote, PendingAsk, Values } from "../index";
 import type { Admin } from "./index";
 import { isRoute } from "../secure-channel/framing";
+import type { AskContext } from "./routing";
 
 // Structural v1 contract: neither installed plugin imports or depends on the other.
 type DeliveryState = "submitted" | "queued" | "recorded" | "unconfirmed" | "failed";
@@ -45,7 +46,7 @@ export function connectAsyncQuestions(
 	events: Pick<ExtensionAPI["events"], "on" | "emit">,
 	sessionId: string,
 	admin: Pick<Admin, "offer" | "end">,
-	ctx: ExtensionContext,
+	ctx: AskContext,
 	report: (code: string) => void,
 ): AsyncAskConnection {
 	let live = true, generation = 0, binding: Binding | undefined;

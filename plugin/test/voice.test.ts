@@ -499,3 +499,43 @@ test('reconnect preserves existing traces and excludes private event names',asyn
 		expect(await readFile(path,'utf8')).toBe(old); expect(old).not.toContain('PRIVATE'); expect(await readdir(dir)).toHaveLength(2);
 	} finally {await rm(dir,{recursive:true,force:true})}
 });
+
+test.each(['fresh','early','earlier-final','unscoped-final','earlier-partial','unacknowledged','unrelated-answer','no-fresh-capture','duplicate-ack','missing-range'])
+('legacy VoiceSession repairs an echo onset only with complete readback timing: %s',async scenario=>{
+	vi.useFakeTimers();let now=100;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now);
+	const sent:LiveClientMessage[]=[],starts:number[]=[],callers:string[]=[],failures:Error[]=[];
+	const session=new VoiceSession({
+		onSpeechStarted(_id,at){if(at!==undefined)starts.push(at)},
+		onTranscript(role,text){if(role==='user')callers.push(text)},onAudio(){},onInterrupt(){},
+	},async message=>{sent.push(message)},error=>{failures.push(error)});
+	const capture=(count:number,frame=silence)=>{for(let i=0;i<count;i++){now+=20;session.input(frame);vi.advanceTimersByTime(20)}};
+	const event=async(payload:unknown)=>{
+		const parsed=parseLiveServerEvent(payload);if(!parsed)throw Error('Invalid test event');await session.event(parsed);
+	};
+	try {
+		const oldOnset=now+20;capture(3,speech);capture(40);
+		await session.sendSpeakable('Blue. Submit?',true);
+		let through=0;
+		if(scenario!=='unacknowledged')for(const message of sent)if(message.type==='session.context.append'){
+			const start=through;through+=100;await event({type:'session.context.appended',start_ms:start,end_ms:through});
+		}
+		if(scenario==='duplicate-ack')await event({type:'session.context.appended',start_ms:through-100,end_ms:through});
+		now+=500;
+		await event({type:'turn.done',turn:{role:'assistant',transcript:scenario==='unrelated-answer'?'Let me check.':'Blue. Submit?',
+			...(scenario==='missing-range'?{}:{start_ms:400,end_ms:800})}});
+		now+=200;const freshOnset=now+20;
+		if(scenario!=='no-fresh-capture')capture(3,speech);
+		const start=scenario==='early'?500:1000,end=scenario==='early'?700:1200;
+		await event({type:'input_transcript.added',item:{text:'Yes.'},start_ms:start,end_ms:end});
+		if(scenario==='earlier-partial')await event({type:'input_transcript.added',item:{text:'Yes.'},start_ms:500,end_ms:end});
+		await event({type:'turn.done',turn:{role:'user',transcript:'Yes.',
+			...(scenario==='unscoped-final'?{}:{start_ms:scenario==='earlier-final'?500:start,end_ms:end})}});
+		if(['earlier-final','unscoped-final','earlier-partial'].includes(scenario)){
+			expect(failures).toHaveLength(1);expect(callers).toEqual([]);
+		}else{
+			capture(75);expect(failures).toEqual([]);expect(callers).toEqual(['Yes.']);
+			expect(starts).toEqual([scenario==='fresh'?freshOnset:oldOnset]);
+		}
+	}finally{session.stop();clock.mockRestore();vi.useRealTimers()}
+});

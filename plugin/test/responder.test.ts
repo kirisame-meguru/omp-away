@@ -19,7 +19,7 @@ function questions(source: string) {
 	return [...fieldQuestions(parseHtmlForm(source)).values()];
 }
 function setup(source = html) {
-	const writes: [number, string][] = [];
+	const writes: [number, string | undefined][] = [];
 	const r = createResponder(async (id, value) => { writes.push([id, value]); return true; });
 	const tagged = r.prepare("A", source);
 	const titles = questions(tagged);

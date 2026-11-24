@@ -25,6 +25,64 @@ class PairSecurityTest {
         }
     }
 
+    @Test fun touchFormsDecodeNestedSpansNullsAndFiniteDecimalConstraints() {
+        val envelope = bytesJson("""{
+            "type":"form","requestId":"question","form":{
+                "sections":[{"blocks":[
+                    {"kind":"field","field":{"kind":"choice","name":"choice","options":[
+                        {"value":"a","label":[{"text":"Alpha","style":"strong"}],"checked":true}
+                    ]}},
+                    {"kind":"field","field":{"kind":"text","name":"number","type":"number",
+                        "min":0.25,"max":1.5,"value":"0.5"}},
+                    {"kind":"table","rows":[[[{"text":"Cell","style":"em"}]]],"headerRows":1}
+                ]}],"description":null
+            }
+        }""".toByteArray(Charsets.UTF_8))
+        val form = envelope.getJSONObject("form")
+        val blocks = form.getJSONArray("sections").getJSONObject(0).getJSONArray("blocks")
+        assertEquals("Alpha", blocks.getJSONObject(0).getJSONObject("field").getJSONArray("options")
+            .getJSONObject(0).getJSONArray("label").getJSONObject(0).getString("text"))
+        val number = blocks.getJSONObject(1).getJSONObject("field")
+        assertEquals(0.25, number.getDouble("min"), 0.0)
+        assertEquals(1.5, number.getDouble("max"), 0.0)
+        assertEquals("Cell", blocks.getJSONObject(2).getJSONArray("rows").getJSONArray(0)
+            .getJSONArray(0).getJSONObject(0).getString("text"))
+        assertEquals(1L, blocks.getJSONObject(2).get("headerRows"))
+        assertTrue(form.has("description"))
+        assertSame(org.json.JSONObject.NULL, form.get("description"))
+        val unavailable = parseJson("""{"type":"form","requestId":"question","form":null}""")
+        unavailable.fields("type", "requestId", "form")
+        assertSame(org.json.JSONObject.NULL, unavailable.get("form"))
+        assertEquals(0.01, parseJson("""{"value":1e-2}""").getDouble("value"), 0.0)
+    }
+
+    @Test fun jsonBoundsRejectDuplicateNullsNonfiniteNumbersAndExcessiveNesting() {
+        for (json in listOf(
+            """{"form":null,"form":null}""", """{"form":null,"form":{}}""",
+            """{"value":1e999}""", """{"value":-1e999}""",
+            """{"value":NaN}""", """{"value":Infinity}""",
+            """{"value":9223372036854775808}""",
+            """{"value":""" + "[".repeat(33) + "0" + "]".repeat(33) + "}"
+        )) assertTrue("Must reject malformed or unbounded JSON", runCatching { parseJson(json) }.isFailure)
+        assertTrue(runCatching { bytesJson(byteArrayOf(0x7b, 0x22, 0xc3.toByte(), 0x28, 0x22, 0x3a, 0x30, 0x7d)) }.isFailure)
+        assertTrue(runCatching { bytesJson(ByteArray(65537)) }.isFailure)
+        assertTrue(runCatching { parseJson(" ".repeat(65537)) }.isFailure)
+    }
+
+    @Test fun fractionalJsonSupportDoesNotRelaxLegacyIntegerFields() {
+        assertEquals(Long.MAX_VALUE, parseJson("""{"value":9223372036854775807}""").get("value"))
+        assertEquals(Long.MIN_VALUE, parseJson("""{"value":-9223372036854775808}""").get("value"))
+        val pin = base64url(ByteArray(32))
+        val invitation = """{"v":1,"url":"https://relay.example","ticket":"ticket","desktopPin":"$pin","nonce":"$pin","secret":"$pin"}"""
+        for (version in listOf("1.0", "1e0", "null"))
+            assertTrue(runCatching { Invitation.parse(invitation.replace("\"v\":1", "\"v\":$version")) }.isFailure)
+        val id = UUID.randomUUID().toString()
+        val inbox = """{"type":"inbox","items":[{"requestId":"$id","project":"Project","question":"Question","createdAt":9223372036854775807}]}"""
+        assertEquals(Long.MAX_VALUE, decodeInboxSnapshot(parseJson(inbox)).single().createdAt)
+        for (createdAt in listOf("1.5", "1.0", "1e0", "null", "-1"))
+            assertTrue(runCatching { decodeInboxSnapshot(parseJson(inbox.replace("9223372036854775807", createdAt))) }.isFailure)
+    }
+
     @Test fun sealedRouteSurvivesReloadButNotTamperingOrReplacement() {
         val base = InstrumentationRegistry.getInstrumentation().targetContext
         val testPrefs = "away.test.${UUID.randomUUID()}"
