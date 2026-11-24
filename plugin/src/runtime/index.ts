@@ -68,6 +68,11 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		ctx.ui.setWidget("omp-away-pairing-qr",undefined);
 	}
 	function cancelEnrollment() {++nextPair; expires=0; clearQr(); enrollment.cancel()}
+	function cancelPairing() {
+		if (!current()) return;
+		cancelEnrollment();
+		notify("Away pairing cancelled; no new device approved.");
+	}
 	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,
 		onRouting(next) {
 			if (!current()) return;
@@ -97,6 +102,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				if (!idle() || !enrollment.decide(decision[1]==="approve",decision[2])) notify("No matching idle local comparison.","warning");
 				return;
 			}
+			if (args==="pair cancel") {cancelPairing();return}
 			if (args==="pair" || args==="pair clipboard") {
 				if (!idle() || pairing) {notify("Pair only from the idle desktop composer.","warning");return}
 				cancelEnrollment();const epoch=nextPair;pairing=true;
@@ -108,7 +114,9 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 						if (!current() || !idle() || epoch!==nextPair) return;
 					} else {
 						let availableRows=()=>0;
-						const qr=new PairingQr(payload,()=>availableRows());
+						const qr=new PairingQr(payload,()=>availableRows(),()=>{
+							if (epoch===nextPair) cancelPairing();
+						});
 						ctx.ui.setWidget("omp-away-pairing-qr",tui=>{
 							availableRows=()=>tui.terminal.rows;
 							return qr;
@@ -135,7 +143,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
 			if (args!=="" && args!=="on" && args!=="off" && args!=="status" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
-				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair [clipboard]]", "warning");return;
+				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair [clipboard|cancel]]", "warning");return;
 			}
 			// Preserve this session's command order; the broker serializes patches
 			// across all sessions and broadcasts the committed state back to us.

@@ -117,6 +117,7 @@ Wait for **Away: local guest ready** and **Away: secure mobile gateway ready**. 
 | `/away status` | Inspect the current routing settings |
 | `/away pair` | Display a temporary pairing QR from an idle desktop |
 | `/away pair clipboard` | Copy pairing data instead of displaying a QR |
+| `/away pair cancel` | Cancel pending pairing and remove the QR |
 
 For routing scope, multi-session behavior, and upgrade notes, see [routing and call behavior](plugin/DEBUG.md#routing-and-call-behavior).
 
