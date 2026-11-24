@@ -111,14 +111,18 @@ export default function away(pi: ExtensionAPI): void {
 				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
 				if (!reason.trim() || Buffer.byteLength(reason) > 16384) throw Error("Invalid call result");
 				call.submitting = true;
+				const epoch = generation;
 				try {
+					if (await call.responder.withdraw(id) !== "accepted") return "stale";
+					await call.native.promise;
+					if (!ready || generation !== epoch || !owns(call.ctx)) return "stale";
+					// Native Ask cancellation aborts its turn. Resume only after it has
+					// settled, using the host's teardown-safe continuation queue.
 					pi.sendMessage({
 						customType: "omp-away:call-result", display: true, attribution: "agent",
 						content: JSON.stringify({ question: requestId, voiceDiscussion: reason }),
-					}, { deliverAs: "aside" });
-					if (await call.responder.withdraw(id) !== "accepted") return "stale";
-					await call.native.promise;
-					return ready ? "accepted" : "stale";
+					}, { deliverAs: "nextTurn", triggerTurn: true });
+					return "accepted";
 				} finally { call.submitting = false; }
 			},
 			async submitConfirmed(id, values) {
