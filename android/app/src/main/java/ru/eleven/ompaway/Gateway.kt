@@ -83,6 +83,11 @@ class Gateway : Application() {
     internal val submitting = mutableSetOf<String>()
     internal var answerReceipt: String? = null
         private set
+    internal fun takeAnswerReceipt(): String? {
+        val receipt = answerReceipt
+        answerReceipt = null
+        return receipt
+    }
     private val loadingForms = mutableSetOf<String>()
     private val awaitingReceipts = mutableSetOf<String>()
 

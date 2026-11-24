@@ -2,7 +2,6 @@ package ru.eleven.ompaway
 
 import android.Manifest
 import android.app.Activity
-import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -29,10 +28,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.EditText
 import android.widget.ImageButton
-import com.google.zxing.integration.android.IntentIntegrator
-import com.journeyapps.barcodescanner.CaptureActivity
 import java.text.DateFormat
 import java.util.Date
 
@@ -42,10 +38,7 @@ class InboxActivity : Activity() {
     private lateinit var refresh: InboxRefreshLayout
     private lateinit var column: LinearLayout
     private var selectedId: String? = null
-    private var incomingPair: String? = null
     private var notice: String? = null
-    private var shownEmoji: String? = null
-    private var verificationReturn = Page.PAIRING
     private var resumed = false
     private var transcriptViews: CallTranscriptViews? = null
     private val detailViews = mutableMapOf<String, QuestionDetailView>()
@@ -58,18 +51,20 @@ class InboxActivity : Activity() {
     private lateinit var panel: LinearLayout
     private lateinit var panelHangup: Button
     private lateinit var screenPreferences: ScreenPreferences
-    private lateinit var panelBack: Button
+    private lateinit var panelBack: ImageButton
     private lateinit var panelTitle: TextView
     private lateinit var panelSettings: ImageButton
     private lateinit var contentTarget: LinearLayout
     private lateinit var panelToolbar: LinearLayout
     private lateinit var panelLensSlot: View
+    private lateinit var pairingView: PairingView
+    private lateinit var receiptToast: ReceiptToast
     private var page = Page.REQUESTS
     private var settingsReturn = Page.REQUESTS
     private var renderedPage: Page? = null
     private var renderedId: String? = null
 
-    private enum class Page { NONE, REQUESTS, PAIRING, DETAILS, SETTINGS, RELAY, VERIFY }
+    private enum class Page { NONE, REQUESTS, DETAILS, SETTINGS }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,9 +85,6 @@ class InboxActivity : Activity() {
         page = Page.values().firstOrNull { it.name == savedInstanceState?.getString("page") } ?: Page.REQUESTS
         selectedId = savedInstanceState?.getString("selectedId")
         settingsReturn = Page.values().firstOrNull { it.name == savedInstanceState?.getString("settingsReturn") } ?: Page.REQUESTS
-        verificationReturn = Page.values().firstOrNull {
-            it.name == savedInstanceState?.getString("verificationReturn") && it != Page.NONE && it != Page.VERIFY
-        } ?: Page.PAIRING
         answerRequested = savedInstanceState?.getString("answerRequested")?.takeIf(::validId)
         permissionAnswer = savedInstanceState?.getString("permissionAnswer")?.takeIf(::validId)
         scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
@@ -125,20 +117,32 @@ class InboxActivity : Activity() {
             }
         }
         callScreen = CallScreen(this, null, app::setSpeakerEnabled, app::hangup, ::openInbox, ::showSettings)
+        pairingView = PairingView(this, app, ::scan)
+        receiptToast = ReceiptToast(this)
         val panelHeader = RadianceUi.column(this).apply {
             setPadding(dp(12), dp(8), dp(12), dp(12))
         }
         panelToolbar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        panelBack = RadianceUi.button(this, "Back") { navigateBack() }
-        panelToolbar.addView(panelBack, LinearLayout.LayoutParams(-2, -2))
+        panelBack = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_arrow_back)
+            imageTintList = ColorStateList.valueOf(RadianceUi.cream)
+            contentDescription = "Back"
+            tooltipText = "Back"
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = RippleDrawable(ColorStateList.valueOf(0x33f4f1eb), null,
+                RadianceUi.surface(this@InboxActivity))
+            setOnClickListener { if (resumed) navigateBack() }
+        }
+        panelToolbar.addView(panelBack, LinearLayout.LayoutParams(dp(48), dp(48)))
         panelLensSlot = View(this).apply {
             minimumWidth = dp(48)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        panelToolbar.addView(panelLensSlot, LinearLayout.LayoutParams(0, dp(56), 1f))
         panelTitle = RadianceUi.text(this, "Questions", 24, heading = true).apply {
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
+        panelToolbar.addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        panelToolbar.addView(panelLensSlot, LinearLayout.LayoutParams(dp(56), dp(56)))
         panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
         panelToolbar.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
         panelHeader.addView(panelToolbar, LinearLayout.LayoutParams(-1, -2))
@@ -152,11 +156,7 @@ class InboxActivity : Activity() {
                 RadianceUi.surface(this@InboxActivity))
             setOnClickListener { if (resumed) showSettings() }
         }
-        panelHeader.addView(LinearLayout(this).apply {
-            gravity = Gravity.TOP
-            addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(panelSettings, LinearLayout.LayoutParams(dp(48), dp(48)))
-        }, LinearLayout.LayoutParams(-1, -2))
+        panelToolbar.addView(panelSettings, LinearLayout.LayoutParams(dp(48), dp(48)))
         panel = RadianceUi.column(this).apply {
             background = RadianceUi.surface(this@InboxActivity)
             visibility = View.GONE
@@ -175,6 +175,7 @@ class InboxActivity : Activity() {
             addView(refresh, FrameLayout.LayoutParams(-1, -1))
             (callScreen.voiceOverlay.parent as? ViewGroup)?.removeView(callScreen.voiceOverlay)
             addView(callScreen.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
+            addView(receiptToast, FrameLayout.LayoutParams(-1, -1))
         })
         overlay.viewTreeObserver.addOnGlobalLayoutListener {
             if (panelLensSlot.visibility == View.VISIBLE) callScreen.placePanelLens(panelLensSlot)
@@ -185,20 +186,24 @@ class InboxActivity : Activity() {
             overlay.setOnApplyWindowInsetsListener { view, insets ->
                 val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
                 refresh.setTopInset(safe.top)
-                view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+                receiptToast.setPadding(safe.left + dp(24), safe.top + dp(16), safe.right + dp(24), safe.bottom + dp(24))
+                insets
             }
         } else {
             overlay.fitsSystemWindows = true
             overlay.setOnApplyWindowInsetsListener { view, insets ->
                 @Suppress("DEPRECATION")
                 refresh.setTopInset(insets.systemWindowInsetTop)
+                receiptToast.setPadding(dp(24), insets.systemWindowInsetTop + dp(16), dp(24), insets.systemWindowInsetBottom + dp(24))
                 view.onApplyWindowInsets(insets)
             }
         }
         if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(
             OnBackInvokedDispatcher.PRIORITY_DEFAULT
         ) {
-            if (page != Page.NONE && page != Page.REQUESTS) navigateBack()
+            if (pairingView.cancelScan()) Unit
+            else if (page != Page.NONE && page != Page.REQUESTS) navigateBack()
             else if (isTaskRoot) moveTaskToBack(true) else finish()
         }
         // Recreation restores an already-authorized action, rather than replaying the launch intent.
@@ -246,16 +251,18 @@ class InboxActivity : Activity() {
         if (app.callId == null) { callScreen.bind(null); callSource = null }
         callScreen.resume()
         app.foreground(::render, ::renderVoice)
-        incomingPair?.let { incomingPair = null; app.pair(it) }
+        pairingView.setActive(page == Page.REQUESTS)
         continueAnswer()
         if (scanRequested) {
             scanRequested = false
-            if (page == Page.PAIRING) scan()
+            if (page == Page.REQUESTS) scan()
         }
     }
     override fun onPause() {
         resumed = false
         refresh.pause()
+        pairingView.setActive(false)
+        receiptToast.dismiss()
         saveDrafts()
         callScreen.pause()
         app.background()
@@ -272,7 +279,6 @@ class InboxActivity : Activity() {
         outState.putString("page", page.name)
         outState.putString("selectedId", selectedId)
         outState.putString("settingsReturn", settingsReturn.name)
-        outState.putString("verificationReturn", verificationReturn.name)
         outState.putString("answerRequested", answerRequested)
         outState.putString("permissionAnswer", permissionAnswer)
         super.onSaveInstanceState(outState)
@@ -290,23 +296,16 @@ class InboxActivity : Activity() {
         render()
     }
 
-    private fun openPairing() { page = Page.PAIRING; render() }
 
     private fun showInboxPanel(open: Boolean) {
         panel.visibility = if (open) View.VISIBLE else View.GONE
         panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
-        panelLensSlot.visibility = if (app.callId != null) View.VISIBLE else View.INVISIBLE
+        panelLensSlot.visibility = if (app.callId != null) View.VISIBLE else View.GONE
         callScreen.setPanelOpen(open)
     }
 
     private fun navigateBack() {
         page = when (page) {
-            Page.VERIFY -> {
-                shownEmoji?.let { app.confirm(it, false) }
-                shownEmoji = null
-                verificationReturn
-            }
-            Page.RELAY -> Page.PAIRING
             Page.DETAILS -> if (app.callId != null) Page.NONE else Page.REQUESTS
             Page.SETTINGS -> settingsReturn
             else -> Page.REQUESTS
@@ -319,6 +318,7 @@ class InboxActivity : Activity() {
     @android.annotation.SuppressLint("GestureBackNavigation")
     @Deprecated("Platform back callback")
     override fun onBackPressed() {
+        if (pairingView.cancelScan()) return
         if (page != Page.NONE && page != Page.REQUESTS) navigateBack() else super.onBackPressed()
     }
 
@@ -406,37 +406,29 @@ class InboxActivity : Activity() {
             }
             if (page == Page.NONE) page = Page.REQUESTS
         }
-        val code = app.verifyEmoji
-        if (code != null && shownEmoji != code) {
-            if (page != Page.VERIFY) verificationReturn = if (page == Page.NONE) Page.PAIRING else page
-            shownEmoji = code
-            page = Page.VERIFY
-            renderedPage = null
-        } else if (code == null && page == Page.VERIFY) {
-            shownEmoji = null
-            page = if (app.paired) Page.REQUESTS else Page.PAIRING
-        }
         showInboxPanel(page != Page.NONE)
+        pairingView.setActive(page == Page.REQUESTS)
+        app.takeAnswerReceipt()?.let { receiptToast.show(it, screenPreferences.animations) }
         refresh.isEnabled = page == Page.REQUESTS && app.canRefresh
         refresh.update(resumed && page == Page.REQUESTS && app.paired && !app.needsRelayOrigin && app.idle,
             app.inboxConnection, app.status, screenPreferences.animations)
         panelSettings.visibility = if (page == Page.REQUESTS) View.VISIBLE else View.GONE
         if (page == Page.NONE) { renderedPage = null; return }
-        panelBack.text = if (page == Page.SETTINGS) "Done" else "Back"
         panelBack.visibility = if (page == Page.REQUESTS) View.GONE else View.VISIBLE
-        panelToolbar.visibility = if (panelBack.visibility == View.VISIBLE || panelHangup.visibility == View.VISIBLE)
-            View.VISIBLE else View.GONE
+        panelToolbar.visibility = View.VISIBLE
         panelTitle.text = when (page) {
             Page.REQUESTS -> "Questions"
-            Page.PAIRING -> "Pair desktop"
             Page.DETAILS -> "Question details"
             Page.SETTINGS -> "Settings"
-            Page.RELAY -> "Restore relay"
-            Page.VERIFY -> "Verify desktop"
             Page.NONE -> ""
         }
         // Keep controls, focused input and scroll position stable while gateway state changes.
-        if (renderedPage == page && (page == Page.SETTINGS || page == Page.RELAY || page == Page.VERIFY)) return
+        if (renderedPage == page && page == Page.SETTINGS) return
+        if (renderedPage == Page.REQUESTS && page == Page.REQUESTS &&
+            pairingView.parent != null && (!app.paired || app.needsRelayOrigin)) {
+            pairingView.bind()
+            return
+        }
         val y = if (renderedPage == page && renderedId == selectedId) scroll.scrollY else 0
         renderedPage = page; renderedId = selectedId
         val focused = currentFocus
@@ -446,9 +438,6 @@ class InboxActivity : Activity() {
         formViews.keys.retainAll(app.store.state.pending.keys)
         when (page) {
             Page.SETTINGS -> renderSettings()
-            Page.PAIRING -> renderPairing()
-            Page.RELAY -> renderRelay()
-            Page.VERIFY -> renderVerification()
             Page.DETAILS -> renderDetails()
             Page.REQUESTS -> renderRequests()
             Page.NONE -> Unit
@@ -458,18 +447,25 @@ class InboxActivity : Activity() {
     }
 
     private fun renderRequests() {
-        if (app.answerReceipt != null || notice != null || app.pushWarning != null || !app.paired ||
-            app.needsRelayOrigin || !Invites.allowed(this) || app.callId != null) card {
-            app.answerReceipt?.let { text(it, 16).accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
+        if (!app.paired || app.needsRelayOrigin) {
+            (pairingView.parent as? ViewGroup)?.removeView(pairingView)
+            contentTarget.addView(pairingView, RadianceUi.rowParams(this))
+            pairingView.bind()
+            pairingView.setActive(true)
+        }
+        if (notice != null || app.pushWarning != null || !Invites.allowed(this) || app.callId != null) card {
             notice?.let { text(it, 14) }
             app.pushWarning?.let { text(it, 14) }
-            if (!app.paired) button("Pair desktop", primary = true) { openPairing() }
-            else if (app.needsRelayOrigin) button("Restore relay address", primary = true) { page = Page.RELAY; render() }
             if (!Invites.allowed(this)) notificationSettings()
             if (app.callId != null) button("Return to voice") { page = Page.NONE; render() }
         }
         val state = app.store.state
-        if (state.pending.isEmpty()) card { text("No pending questions.", 16) }
+        if (state.pending.isEmpty() && app.paired && !app.needsRelayOrigin) {
+            text("No pending questions.", 16).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(16), dp(32), dp(16), dp(32))
+            }
+        }
         val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == app.callId }.thenByDescending { it.createdAt })
         for (item in rows) card {
             requestHeading(item)
@@ -586,63 +582,6 @@ class InboxActivity : Activity() {
         if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
     }
 
-    private fun renderPairing() {
-        card {
-            text(app.status, 16)
-            notice?.let { text(it, 14) }
-            if (!app.paired) {
-                text("Use the one-time code shown on your own desktop. Compare every emoji on both screens.", 16)
-                if (!app.pairing) {
-                    button("Scan pairing QR", primary = true) { scan() }
-                    button("Pair from clipboard") {
-                        val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
-                        val raw = if (clip != null && clip.itemCount == 1) clip.getItemAt(0).text?.toString() else null
-                        if (raw == null) { notice = "Copy the desktop pairing JSON first."; render() }
-                        else { notice = null; app.pair(raw) }
-                    }
-                } else button("Cancel pairing") { app.retry() }
-            } else if (app.needsRelayOrigin) {
-                text("Your pairing keys are retained.", 16)
-                button("Restore relay address", primary = true) { page = Page.RELAY; render() }
-            } else button("Reconnect") { notice = null; app.retry() }
-        }
-        button("All questions") { page = Page.REQUESTS; render() }
-        button("Settings") { showSettings() }
-    }
-
-    private fun renderRelay() {
-        card {
-            text("Trusted relay address", 18, bold = true)
-            text("Use the same trusted HTTPS relay as your paired desktop. Your saved relay credential is sent there. Never enter an unfamiliar address.", 16)
-            val input = EditText(this).apply {
-                hint = "https://relay.example"
-                setTextColor(RadianceUi.cream); setHintTextColor(RadianceUi.muted)
-                backgroundTintList = android.content.res.ColorStateList.valueOf(RadianceUi.muted)
-                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-                contentDescription = "Trusted HTTPS relay address"
-                minHeight = dp(56)
-            }
-            contentTarget.addView(input, LinearLayout.LayoutParams(-1, -2))
-            button("Restore", primary = true) {
-                page = Page.PAIRING
-                app.migrateRelayOrigin(input.text.toString())
-                render()
-            }
-            button("Cancel") { page = Page.PAIRING; render() }
-        }
-    }
-
-    private fun renderVerification() {
-        val code = shownEmoji ?: return
-        card {
-            text("Compare all 12 emoji, in order, with the code on the desktop.", 16)
-            text(code, 30).apply { contentDescription = "Verification code: $code" }
-            text("Only approve if they match exactly.", 16)
-            button("Codes match", primary = true) { app.confirm(code, true) }
-            button("Do not match") { app.confirm(code, false) }
-        }
-    }
 
     private fun notificationSettings() {
         if (!Invites.allowed(this)) text("Notifications are off. Pending questions still appear on the home screen.", 14)
@@ -662,25 +601,14 @@ class InboxActivity : Activity() {
     }
 
     private fun scan() {
-        notice = null
+        if (!resumed || page != Page.REQUESTS) return
         if (!granted(Manifest.permission.CAMERA)) {
-            notice = "Camera access is needed to scan. You can also pair from the clipboard."
+            pairingView.message("Camera access is needed to scan. You can also pair from the clipboard.")
             if (askedAndDenied(Manifest.permission.CAMERA)) appSettings()
             else ask(Manifest.permission.CAMERA, CAMERA)
             return
         }
-        IntentIntegrator(this).setCaptureActivity(PairScanActivity::class.java)
-            .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setPrompt("Scan the pairing code on your desktop")
-            .setBeepEnabled(false).setBarcodeImageEnabled(false).setOrientationLocked(false).initiateScan()
-    }
-    @Deprecated("Platform Activity result")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
-        if (result == null) { super.onActivityResult(requestCode, resultCode, data); return }
-        val raw = result.contents
-        if (raw != null && raw.length <= 8192) {
-            if (resumed) app.pair(raw) else incomingPair = raw
-        } else notice = "No pairing code scanned. Try again or pair from the clipboard."
+        pairingView.startScan()
     }
 
     private fun granted(permission: String) = checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
@@ -692,19 +620,20 @@ class InboxActivity : Activity() {
     private fun appSettings() { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        notice = if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) null
-            else when (requestCode) {
-                MIC -> "Microphone unavailable. You can still answer by touch."
-                CAMERA -> "Camera permission denied. Scan again to retry, or pair from the clipboard."
-                else -> "Questions remain on the home screen."
-            }
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        if (requestCode == CAMERA) {
+            pairingView.message(if (granted) null else "Camera permission denied. Scan again to retry, or pair from the clipboard.")
+        } else {
+            notice = if (granted) null else if (requestCode == MIC)
+                "Microphone unavailable. You can still answer by touch." else "Questions remain on the home screen."
+        }
         if (requestCode == MIC) {
             val id = permissionAnswer; permissionAnswer = null
-            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) answerRequested = id
+            if (granted) answerRequested = id
             continueAnswer()
         }
-        if (requestCode == CAMERA && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            if (resumed && page == Page.PAIRING) scan() else scanRequested = true
+        if (requestCode == CAMERA && granted) {
+            if (resumed && page == Page.REQUESTS) scan() else scanRequested = true
         }
         if (resumed) render()
     }
@@ -738,36 +667,3 @@ class InboxActivity : Activity() {
     private companion object { const val MIC = 1; const val NOTIFICATIONS = 2; const val CAMERA = 3 }
 }
 
-class PairScanActivity : CaptureActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        ScreenPreferences(this).apply(window)
-        super.onCreate(savedInstanceState)
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            background = RadianceUi.surface(this@PairScanActivity)
-            val padding = RadianceUi.dp(this@PairScanActivity, 12)
-            setPadding(padding, padding, padding, padding)
-            addView(RadianceUi.text(this@PairScanActivity, "away", 24, heading = true),
-                LinearLayout.LayoutParams(0, -2, 1f))
-            addView(RadianceUi.button(this@PairScanActivity, "Back") {
-                setResult(Activity.RESULT_CANCELED); finish()
-            })
-        }
-        val navigation = FrameLayout(this).apply {
-            addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
-                val margin = RadianceUi.dp(this@PairScanActivity, 16)
-                setMargins(margin, margin, margin, 0)
-            })
-        }
-        findViewById<FrameLayout>(android.R.id.content).addView(navigation, FrameLayout.LayoutParams(-1, -1))
-        if (Build.VERSION.SDK_INT >= 30) navigation.setOnApplyWindowInsetsListener { view, insets ->
-            val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
-            insets
-        } else navigation.fitsSystemWindows = true
-    }
-    override fun onResume() {
-        super.onResume()
-        ScreenPreferences(this).apply(window)
-    }
-}

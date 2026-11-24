@@ -21,7 +21,6 @@
         </activity>
         <activity-alias android:name="${answerActivity}" android:targetActivity=".InboxActivity" android:exported="false" />
         <activity android:name=".IncomingCallActivity" android:exported="false" android:excludeFromRecents="true" />
-        <activity android:name=".PairScanActivity" android:exported="false" android:theme="@style/zxing_CaptureTheme" />
         <service android:name=".InviteService" android:exported="false">
             <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
         </service>

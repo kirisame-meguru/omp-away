@@ -133,7 +133,7 @@ internal class QuestionFormView(
             (titleInContent || descriptionKey != titleKey)) addView(label(description), metadataIndex)
         if (childCount == 0) throw JSONException("Empty touch form")
         message.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-        addView(message); addView(send, LayoutParams(-1, -2))
+        addView(message); addView(send, RadianceUi.rowParams(context))
     }
 
     fun availability(enabled: Boolean, busy: Boolean, text: String?) {
@@ -261,7 +261,7 @@ internal class QuestionFormView(
                 var edit: EditText? = null
                 fun openEditor(): EditText = edit ?: editor(true).apply {
                     hint = "Optional note"; contentDescription = "Note for ${control.text}"; minLines = 2
-                    setText(saved); row.addView(this, LayoutParams(-1, -2)); edit = this
+                    setText(saved); row.addView(this, RadianceUi.rowParams(context)); edit = this
                 }
                 val toggle = Button(context).apply {
                     text = "Add note for ${control.text}"
@@ -273,7 +273,7 @@ internal class QuestionFormView(
                     }
                 }
                 inputs.add(toggle)
-                row.addView(toggle, LayoutParams(-1, -2))
+                row.addView(toggle, RadianceUi.rowParams(context))
                 if (saved.isNotEmpty()) {
                     openEditor()
                     toggle.text = "Hide note for ${control.text}"
