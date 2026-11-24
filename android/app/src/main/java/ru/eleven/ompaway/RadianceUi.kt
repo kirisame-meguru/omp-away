@@ -76,14 +76,14 @@ internal object RadianceUi {
         button.setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8))
         button.backgroundTintList = null
         val background = surface(context, if (quiet) android.graphics.Color.TRANSPARENT else controlColor, 8)
-        if (quiet || primary) background.setStroke(0, border)
+        if (primary) background.setStroke(0, border)
         if (primary) background.setColor(primaryFill)
         button.background = RippleDrawable(ColorStateList.valueOf(0x33f4f1eb), background, null)
     }
 
     fun button(context: Context, label: String, destructive: Boolean = false, primary: Boolean = false, action: () -> Unit) = Button(context).apply {
         text = label
-        styleButton(this, quiet = !primary, destructive = destructive, primary = primary)
+        styleButton(this, destructive = destructive, primary = primary)
         setOnClickListener { action() }
     }
 

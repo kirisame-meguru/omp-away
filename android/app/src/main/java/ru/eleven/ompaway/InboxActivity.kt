@@ -11,6 +11,9 @@ import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ImageSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -523,20 +526,32 @@ class InboxActivity : Activity() {
     private fun voiceButton(item: Pending) {
         if (app.forms[item.id]?.optBoolean("voice", true) == false) return
         val control = RadianceUi.button(this, "Answer by voice") { if (resumed) answer(item.id) }
-        val microphone = getDrawable(android.R.drawable.ic_btn_speak_now)?.mutate()?.apply {
-            setBounds(0, 0, dp(20), dp(20))
-        }
-        control.setCompoundDrawablesRelative(microphone, null, null, null)
-        control.compoundDrawableTintList = RadianceUi.textColors
-        control.compoundDrawablePadding = dp(8)
-        control.contentDescription = "Answer by voice: ${if (app.verifiedInbox) item.question else "Pending question"}"
         control.isEnabled = app.verifiedInbox && app.idle && item.id !in app.submitting
+        getDrawable(android.R.drawable.ic_btn_speak_now)?.mutate()?.let { microphone ->
+            microphone.setBounds(0, 0, dp(20), dp(20))
+            microphone.setTint(if (control.isEnabled) RadianceUi.cream else RadianceUi.disabled)
+            // Inline with the label so Gravity.CENTER centers the entire group.
+            control.text = SpannableString("\uFFFC  Answer by voice").apply {
+                setSpan(ImageSpan(microphone, ImageSpan.ALIGN_CENTER), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        control.contentDescription = "Answer by voice: ${if (app.verifiedInbox) item.question else "Pending question"}"
         contentTarget.addView(control, RadianceUi.rowParams(this))
     }
 
     private fun requestHeading(item: Pending) {
-        text(if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project.ifBlank { "Desktop request" }
-            else "Desktop request · Pending sync", 14, bold = true)
+        val title = if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project
+            else "Desktop request · Pending sync"
+        // Desktop titles can carry Nerd Font/private-use icons absent on Android.
+        val label = buildString(title.length) {
+            var offset = 0
+            while (offset < title.length) {
+                val point = title.codePointAt(offset)
+                if (Character.getType(point) != Character.PRIVATE_USE.toInt()) appendCodePoint(point)
+                offset += Character.charCount(point)
+            }
+        }.trim().ifBlank { "Desktop request" }
+        text(label, 14, bold = true)
         text(DateFormat.getDateTimeInstance().format(Date(item.createdAt)) +
             if (item.id in app.store.state.silenced) " · Silenced" else "", 14)
     }

@@ -264,16 +264,20 @@ internal class QuestionFormView(
                     setText(saved); row.addView(this, LayoutParams(-1, -2)); edit = this
                 }
                 val toggle = Button(context).apply {
-                    text = "Note: ${control.text}"
-                    RadianceUi.styleButton(this, quiet = true)
+                    text = "Add note for ${control.text}"
+                    RadianceUi.styleButton(this)
                     setOnClickListener {
                         if (edit == null) openEditor()
                         else edit?.visibility = if (edit?.visibility == GONE) VISIBLE else GONE
+                        text = if (edit?.visibility == VISIBLE) "Hide note for ${control.text}" else "Add note for ${control.text}"
                     }
                 }
                 inputs.add(toggle)
                 row.addView(toggle, LayoutParams(-1, -2))
-                if (saved.isNotEmpty()) openEditor()
+                if (saved.isNotEmpty()) {
+                    openEditor()
+                    toggle.text = "Hide note for ${control.text}"
+                }
                 addView(row, LayoutParams(-1, -2)); noteRows.add(control to row)
                 noteReaders.add {
                     val text = edit?.text?.toString() ?: saved
