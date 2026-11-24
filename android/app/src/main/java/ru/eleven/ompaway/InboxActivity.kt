@@ -13,6 +13,7 @@ import android.provider.Settings
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ImageSpan
+import android.text.style.TypefaceSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -34,6 +35,7 @@ import java.util.Date
 
 class InboxActivity : Activity() {
     private val app get() = application as Gateway
+    private val titleIconFont by lazy(LazyThreadSafetyMode.NONE) { resources.getFont(R.font.title_symbols) }
     private lateinit var scroll: ScrollView
     private lateinit var refresh: InboxRefreshLayout
     private lateinit var column: LinearLayout
@@ -538,16 +540,20 @@ class InboxActivity : Activity() {
     private fun requestHeading(item: Pending) {
         val title = if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project
             else "Desktop request · Pending sync"
-        // Desktop titles can carry Nerd Font/private-use icons absent on Android.
-        val label = buildString(title.length) {
-            var offset = 0
-            while (offset < title.length) {
-                val point = title.codePointAt(offset)
-                if (Character.getType(point) != Character.PRIVATE_USE.toInt()) appendCodePoint(point)
-                offset += Character.charCount(point)
+        val label = title.trim().ifBlank { "Desktop request" }
+        var decorated: SpannableString? = null
+        var offset = 0
+        while (offset < label.length) {
+            val point = label.codePointAt(offset)
+            val end = offset + Character.charCount(point)
+            if (Character.getType(point) == Character.PRIVATE_USE.toInt()) {
+                val spans = decorated ?: SpannableString(label).also { decorated = it }
+                spans.setSpan(TypefaceSpan(titleIconFont), offset, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
-        }.trim().ifBlank { "Desktop request" }
-        text(label, 14, bold = true)
+            offset = end
+        }
+        // Only desktop icon glyphs use the bundled font; normal text and color emoji keep Android fallback.
+        text(label, 14, bold = true).also { heading -> decorated?.let { heading.text = it } }
         text(DateFormat.getDateTimeInstance().format(Date(item.createdAt)) +
             if (item.id in app.store.state.silenced) " · Silenced" else "", 14)
     }
