@@ -1,6 +1,7 @@
 material {
     name : RefractiveSpectralLens,
     shadingModel : unlit,
+    blending : transparent,
     requires : [ uv0 ],
     parameters : [
         { type : float2, name : viewport, precision : high },
@@ -8,7 +9,8 @@ material {
         { type : float, name : energy, precision : high },
         { type : float, name : backdrop, precision : high },
         { type : float4, name : shellPose, precision : high },
-        { type : float, name : shellShape, precision : high }
+        { type : float, name : shellShape, precision : high },
+        { type : float, name : layer, precision : high }
     ]
 }
 fragment {
@@ -113,13 +115,13 @@ fragment {
         radiance += vec3(0.65,0.75,0.80)*quiet*envelope*(1.0-level)*0.65;
         return radiance;
     }
-    vec3 shade(vec2 p, float worldPixel) {
+    vec4 shade(vec2 p, float worldPixel) {
+        if (materialParams.shellPose.w<=0.0) return vec4(0.0);
         float pixel = worldPixel/min(materialParams.shellPose.x,materialParams.shellPose.y);
         float power = radialPower(p);
         float shell = pow(power,1.0/SHAPE);
         float coverage = 1.0-smoothstep(1.0-pixel,1.0+pixel,shell);
-        vec3 outside = background(lensToWorld(p),worldPixel);
-        if (coverage<=0.0 || materialParams.shellPose.w<=0.0) return outside;
+        if (coverage<=0.0) return vec4(0.0);
         float z = DEPTH*sqrt(max(0.0001,1.0-min(power,0.9999)));
         vec3 front = vec3(p,z);
         vec3 normal = surfaceNormal(p,z);
@@ -162,20 +164,33 @@ fragment {
         float lower = 1.0-smoothstep(-0.05,0.30,p.y);
         glass += vec3(0.55,0.60,0.62)*rim*lower*(0.35+0.65*fresnel);
         // RGB subpixel energy is filtered analytically; edge width follows physical pixels.
-        return mix(outside,clamp(glass,0.0,1.0),coverage*materialParams.shellPose.w);
+        return vec4(clamp(glass,0.0,1.0),coverage*materialParams.shellPose.w);
     }
     void material(inout MaterialInputs material) {
         prepareMaterial(material);
         vec2 uv = getUV0();
         vec2 size = materialParams.viewport;
         float radius = min(size.x,size.y)*0.40;
-        vec2 p = (uv-vec2(0.5,0.33))*size/radius;
-        p.y = -p.y;
-        p = (p-vec2(0.0,materialParams.shellPose.z))/materialParams.shellPose.xy;
+        vec2 world = (uv-vec2(0.5,0.33))*size/radius;
+        world.y = -world.y;
         float pixel = 1.0/radius;
-        vec3 color = shade(p,pixel);
-        color *= 1.0-0.92*smoothstep(0.53,0.72,uv.y);
+        float scrim = 1.0-0.92*smoothstep(0.53,0.72,uv.y);
         float dither = fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(0.06711056,0.00583715))))-0.5;
+        // Scene-only frames are static; no lens or wave evaluation behind the UI.
+        if (materialParams.layer>0.5 && materialParams.layer<1.5) {
+            material.baseColor = vec4(clamp(background(world,pixel)*scrim+dither/255.0,0.0,1.0),1.0);
+            return;
+        }
+        vec2 p = (world-vec2(0.0,materialParams.shellPose.z))/materialParams.shellPose.xy;
+        vec4 lens = shade(p,pixel);
+        if (materialParams.layer>1.5) {
+            // Transparent outside the analytic lens. Filament transparent blending expects
+            // premultiplied alpha, including antialiasing and the retracting shell's opacity.
+            vec3 color = clamp(lens.rgb*scrim+dither/255.0,0.0,1.0);
+            material.baseColor = vec4(color*lens.a,lens.a);
+            return;
+        }
+        vec3 color = mix(background(world,pixel),lens.rgb,lens.a)*scrim;
         color = clamp(color+dither/255.0,0.0,1.0);
         // Native post-processing is off; the material outputs display-referred colour.
         material.baseColor = vec4(color,1.0);

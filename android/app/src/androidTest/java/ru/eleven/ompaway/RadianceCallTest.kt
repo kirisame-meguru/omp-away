@@ -130,6 +130,10 @@ class RadianceCallTest {
                 screen = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
                 renderer = screen.getChildAt(0)
                 check(app.callId == null)
+                val panel = InboxActivity::class.java.getDeclaredField("panel").apply { isAccessible = true }.get(activity) as ViewGroup
+                val idlePanelMargin = (panel.layoutParams as android.widget.FrameLayout.LayoutParams).topMargin
+                val panelHeader = panel.getChildAt(0)
+                val headerTop = panelHeader.top
                 app.store.state.pending[call.id] = Pending(call.id, "Fixture", "Choose the fixture option", 1L)
                 app.store.state.proposals[call.id] = "Fixture proposal"
                 app.store.state.details[call.id] = QuestionDisplay(1, "Long request context ".repeat(300), listOf(
@@ -148,6 +152,12 @@ class RadianceCallTest {
                 val questions = descendants(screen).filterIsInstance<Button>().singleOrNull { it.text.toString() == "Questions" }
                 assertNotNull("Active calls must retain access to questions", questions)
                 questions!!.performClick()
+                assertEquals("Voice must not reserve space above the question header", idlePanelMargin,
+                    (panel.layoutParams as android.widget.FrameLayout.LayoutParams).topMargin)
+                assertSame(panelHeader, panel.getChildAt(0))
+                assertEquals(headerTop, panelHeader.top)
+                val root = screen.parent as ViewGroup
+                assertSame("Foreground lens must be above the actual question panel", screen.voiceOverlay, root.getChildAt(root.childCount - 1))
                 descendants(activity.window.decorView).filterIsInstance<Button>()
                     .single { it.text.toString() == "View details" }.performClick()
                 assertTrue(texts(activity.window.decorView).contains("Choose the fixture option"))

@@ -69,7 +69,7 @@ class RadianceHomeTest {
             click("2D")
             await { preferences.quality == 2 }
             instrumentation.runOnMainSync {
-                assertTrue(descendants(scene).filterIsInstance<com.example.radiance.OrbFallback>().single().visibility == View.VISIBLE)
+                assertTrue(descendants(scene.voiceOverlay).filterIsInstance<com.example.radiance.OrbFallback>().single().visibility == View.VISIBLE)
                 assertSame(native, scene.getChildAt(0))
             }
             click("GPU")
@@ -229,8 +229,8 @@ class RadianceHomeTest {
             for (quality in listOf("2D", "GPU")) {
                 click(quality)
                 val renderer = if (quality == "2D")
-                    descendants(scene).filterIsInstance<com.example.radiance.OrbFallback>().single()
-                else descendants(scene).filterIsInstance<com.example.radiance.OrbSurface>().single()
+                    descendants(scene.voiceOverlay).filterIsInstance<com.example.radiance.OrbFallback>().single()
+                else descendants(scene.voiceOverlay).filterIsInstance<com.example.radiance.OrbSurface>().single()
                 val clock = renderer.javaClass.getDeclaredField("elapsed").apply { isAccessible = true }
                 fun time(): Float {
                     var result = 0f

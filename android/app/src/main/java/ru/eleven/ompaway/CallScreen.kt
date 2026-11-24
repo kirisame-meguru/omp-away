@@ -17,6 +17,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.example.radiance.EnergySource
 import com.example.radiance.LensPlacement
+import com.example.radiance.OrbLayer
 import com.example.radiance.OrbFallback
 import com.example.radiance.OrbSurface
 import com.example.radiance.ShellMotion
@@ -32,18 +33,30 @@ internal class CallScreen(
 ) : FrameLayout(context), EnergySource, Choreographer.FrameCallback {
     private val shell = ShellMotion()
     private val placement = LensPlacement(topAnchored = true, density = resources.displayMetrics.density)
+    private val backgroundShell = ShellMotion().apply { target(4, true) }
     private val state = CallVisualState()
     private val scheduler = Choreographer.getInstance()
     private val preferences = ScreenPreferences(context)
-    private val fallback = OrbFallback(context, shell, this, placement)
+    private val backgroundFallback = OrbFallback(context, backgroundShell, this, layer = OrbLayer.SCENE)
+    private val fallback = OrbFallback(context, shell, this, placement, OrbLayer.LENS)
     private var autoFlat = false
     private var quality = preferences.quality
     private var light = preferences.lightBackdrop
     private var animations = preferences.animations
-    private val surface = try {
-        OrbSurface(context, null, { useFallback() }, shell, this, placement)
+    private val backgroundSurface = try {
+        OrbSurface(context, null, {}, backgroundShell, this, layer = OrbLayer.SCENE)
     } catch (_: RuntimeException) { null } catch (_: LinkageError) { null }
-    private val flat get() = surface == null || quality == 2 || (quality == 0 && autoFlat)
+    private val surface = try {
+        OrbSurface(context, null, { useFallback() }, shell, this, placement, OrbLayer.LENS)
+    } catch (_: RuntimeException) { null } catch (_: LinkageError) { null }
+    private val flat get() = surface == null || backgroundSurface == null || quality == 2 || (quality == 0 && autoFlat)
+    internal val voiceOverlay = FrameLayout(context).apply {
+        tag = "away.voice.foreground"
+        isClickable = false; isFocusable = false
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        surface?.let { addView(it, LayoutParams(-1, -1)) }
+        addView(fallback, LayoutParams(-1, -1))
+    }
     private val title = label("Your desktop, in reach.", 30f)
     private val callNotice = label("Voice captions · Not a submitted answer", 12f)
     private val caller = label("", 16f)
@@ -70,14 +83,13 @@ internal class CallScreen(
     private var safeLeft = 0
     private var safeRight = 0
     private var safeBottom = 0
-    internal val voiceContentTop get() = (placement.restingBottom - placement.topInset).toInt() + dp(12)
 
     init {
         shell.target(4, true)
         setBackgroundColor(Color.BLACK)
-        surface?.let { addView(it, LayoutParams(-1, -1)) }
-        addView(fallback, LayoutParams(-1, -1))
-        fallback.visibility = if (flat) VISIBLE else INVISIBLE
+        backgroundSurface?.let { addView(it, LayoutParams(-1, -1)) }
+        addView(backgroundFallback, LayoutParams(-1, -1))
+        backgroundFallback.visibility = if (flat) VISIBLE else INVISIBLE
         heading.apply {
             gravity = Gravity.CENTER_VERTICAL
             background = RadianceUi.surface(context, 0xd9181824.toInt(), 24)
@@ -126,6 +138,7 @@ internal class CallScreen(
         callActions.addView(end, LinearLayout.LayoutParams(0, -2, 1f))
         controls.addView(callActions, LinearLayout.LayoutParams(-1, -2))
         addView(controls, LayoutParams(-1, -2, Gravity.BOTTOM))
+        addView(voiceOverlay, LayoutParams(-1, -1))
         setOnApplyWindowInsetsListener { _, insets ->
             val top: Int
             if (Build.VERSION.SDK_INT >= 30) {
@@ -214,7 +227,7 @@ internal class CallScreen(
         heading.layoutParams = (heading.layoutParams as LayoutParams).apply {
             leftMargin = maxOf(dp(12), safeLeft)
             rightMargin = maxOf(dp(12), safeRight)
-            topMargin = placement.topInset.toInt() + voiceContentTop
+            topMargin = placement.topInset.toInt() + dp(8)
         }
         controls.setPadding(maxOf(dp(24), safeLeft), 0, maxOf(dp(24), safeRight), maxOf(dp(16), safeBottom))
         val viewportHeight = height
@@ -252,6 +265,9 @@ internal class CallScreen(
         val mode = if (source?.active != true || ending) 4 else if (source?.connected != true) 0 else state.mode
         shell.target(mode, reduced)
         fallback.visibility = if (flat) VISIBLE else INVISIBLE
+        backgroundFallback.visibility = if (flat) VISIBLE else INVISIBLE
+        backgroundSurface?.update(4, true, light, !flat, false)
+        backgroundFallback.update(false, light, 4)
         surface?.update(mode, reduced, light, !flat, quality == 0)
         fallback.update(!reduced && flat, light, mode)
     }
@@ -281,6 +297,7 @@ internal class CallScreen(
         resumed = true; previous = 0L
         refreshAppearance()
         scheduler.postFrameCallback(this)
+        backgroundSurface?.resume(); backgroundFallback.resume()
         surface?.resume(); fallback.resume()
     }
 
@@ -288,6 +305,7 @@ internal class CallScreen(
         resumed = false; previous = 0L
         if (source?.active != true || ending) shell.target(4, true)
         scheduler.removeFrameCallback(this)
+        backgroundSurface?.pause(); backgroundFallback.pause()
         surface?.pause(); fallback.pause()
     }
 
@@ -305,5 +323,6 @@ internal class CallScreen(
         pause(); disposed = true
         finishDismissal?.let { removeCallbacks(it) }; finishDismissal = null
         surface?.dispose()
+        backgroundSurface?.dispose()
     }
 }

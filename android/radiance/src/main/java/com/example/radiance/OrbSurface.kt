@@ -18,6 +18,7 @@ class OrbSurface(
     private val shell: ShellMotion,
     private val energySource: EnergySource,
     private val placement: LensPlacement = LensPlacement(),
+    val layer: OrbLayer = OrbLayer.COMPOSITE,
 ) : SurfaceView(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
@@ -56,6 +57,15 @@ class OrbSurface(
         instance = material.createInstance()
         instance.setParameter("viewport", 1f, 1f)
         instance.setParameter("backdrop", 1f)
+        instance.setParameter("layer", layer.materialValue)
+        if (layer == OrbLayer.LENS) {
+            // UiHelper creates a translucent, on-top SurfaceView and matching swap chain.
+            helper.isOpaque = false
+            view.blendMode = com.google.android.filament.View.BlendMode.TRANSLUCENT
+            renderer.clearOptions = Renderer.ClearOptions().apply { clear = true }
+        }
+        isClickable = false; isFocusable = false
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         val vertexData = ByteBuffer.allocateDirect(80).order(ByteOrder.nativeOrder())
         for (value in floatArrayOf(-1f,-1f,0f,0f,0f, 1f,-1f,0f,1f,0f, -1f,1f,0f,0f,1f, 1f,1f,0f,1f,1f)) vertexData.putFloat(value)
         vertexData.flip()
@@ -81,7 +91,7 @@ class OrbSurface(
         helper.renderCallback = object : UiHelper.RendererCallback {
             override fun onNativeWindowChanged(surface: Surface) {
                 swapChain?.let { engine.destroySwapChain(it) }
-                swapChain = engine.createSwapChain(surface)
+                swapChain = engine.createSwapChain(surface, helper.swapChainFlags)
                 requestFrame()
             }
             override fun onDetachedFromSurface() {
@@ -131,13 +141,12 @@ class OrbSurface(
         if (disposed || !resumed || !enabled) return
         val dt = if (previous == 0L) 0f else ((frameTimeNanos - previous) / 1e9f).coerceIn(0f, .1f)
         previous = frameTimeNanos
-        if (!still) elapsed += dt
-        if (!still) shell.advance(dt)
+        if (!still && layer != OrbLayer.SCENE) { elapsed += dt; shell.advance(dt) }
         instance.setParameter("shellPose", shell.width * placement.scale, shell.height * placement.scale,
             placement.lift(shell), shell.opacity)
         instance.setParameter("shellShape", shell.shape)
         instance.setParameter("time", elapsed)
-        instance.setParameter("energy", energySource.energy(elapsed, mode))
+        instance.setParameter("energy", if (layer == OrbLayer.SCENE) 0f else energySource.energy(elapsed, mode))
         val chain = swapChain
         var submitted = false
         if (chain != null && helper.isReadyToRender && renderer.beginFrame(chain, frameTimeNanos)) {
@@ -146,7 +155,7 @@ class OrbSurface(
             submitted = true
             frames++
         }
-        if (submitted && (still || (!shell.moving && shell.opacity == 0f))) {
+        if (submitted && (layer == OrbLayer.SCENE || still || (!shell.moving && shell.opacity == 0f))) {
             resetMeasurement()
             report?.invoke(if (still) "Still frame · native lens study" else "Retracted · native lens study")
             return

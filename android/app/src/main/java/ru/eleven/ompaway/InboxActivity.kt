@@ -115,8 +115,9 @@ class InboxActivity : Activity() {
         setContentView(FrameLayout(this).apply {
             addView(callScreen, FrameLayout.LayoutParams(-1, -1))
             addView(overlay, FrameLayout.LayoutParams(-1, -1))
+            (callScreen.voiceOverlay.parent as? ViewGroup)?.removeView(callScreen.voiceOverlay)
+            addView(callScreen.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
         })
-        callScreen.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updatePanelInset() }
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.setSystemBarsAppearance(0,
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
@@ -221,13 +222,6 @@ class InboxActivity : Activity() {
         panel.visibility = if (open) View.VISIBLE else View.GONE
         panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
         callScreen.setPanelOpen(open)
-        updatePanelInset()
-    }
-
-    private fun updatePanelInset() {
-        val top = if (app.callId != null) callScreen.voiceContentTop else dp(12)
-        val params = panel.layoutParams as FrameLayout.LayoutParams
-        if (params.topMargin != top) panel.layoutParams = params.apply { topMargin = top }
     }
 
     private fun navigateBack() {
