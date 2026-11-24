@@ -120,7 +120,7 @@ class InboxActivity : Activity() {
         pairingView = PairingView(this, app, ::scan)
         receiptToast = ReceiptToast(this)
         val panelHeader = RadianceUi.column(this).apply {
-            setPadding(dp(12), dp(8), dp(12), dp(12))
+            setPadding(dp(12), dp(8), dp(12), 0)
         }
         panelToolbar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         panelBack = ImageButton(this).apply {

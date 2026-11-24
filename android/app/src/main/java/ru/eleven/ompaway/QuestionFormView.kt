@@ -8,7 +8,6 @@ import android.text.InputType
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.view.View
-import android.widget.Button
 import android.widget.CheckBox
 import android.widget.CompoundButton
 import android.widget.EditText
@@ -249,38 +248,25 @@ internal class QuestionFormView(
                 else -> null
             }
         }
-        val noteRows = mutableListOf<Pair<CompoundButton, LinearLayout>>()
+        val noteRows = mutableListOf<Pair<CompoundButton, EditText>>()
         if (schema.optBoolean("optionNotes")) {
             fun note(control: CompoundButton, value: () -> String) {
-                val row = LinearLayout(context).apply { orientation = VERTICAL }
                 var saved = ""
                 if (noteDraft != null) for (i in 0 until noteDraft.length()) {
                     val prior = noteDraft.getJSONObject(i)
                     if (prior.optString("name") == name && prior.optString("value") == value()) saved = prior.optString("text")
                 }
-                var edit: EditText? = null
-                fun openEditor(): EditText = edit ?: editor(true).apply {
-                    hint = "Optional note"; contentDescription = "Note for ${control.text}"; minLines = 2
-                    setText(saved); row.addView(this, RadianceUi.rowParams(context)); edit = this
+                val edit = editor(true).apply {
+                    hint = if (multi) "Notes for ${control.text}" else "Notes"
+                    contentDescription = "Notes for ${control.text}"
+                    minLines = 1
+                    minHeight = dp(48)
+                    gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                    setText(saved)
                 }
-                val toggle = Button(context).apply {
-                    text = "Add note for ${control.text}"
-                    RadianceUi.styleButton(this)
-                    setOnClickListener {
-                        if (edit == null) openEditor()
-                        else edit?.visibility = if (edit?.visibility == GONE) VISIBLE else GONE
-                        text = if (edit?.visibility == VISIBLE) "Hide note for ${control.text}" else "Add note for ${control.text}"
-                    }
-                }
-                inputs.add(toggle)
-                row.addView(toggle, RadianceUi.rowParams(context))
-                if (saved.isNotEmpty()) {
-                    openEditor()
-                    toggle.text = "Hide note for ${control.text}"
-                }
-                addView(row, LayoutParams(-1, -2)); noteRows.add(control to row)
+                addView(edit, RadianceUi.rowParams(context)); noteRows.add(control to edit)
                 noteReaders.add {
-                    val text = edit?.text?.toString() ?: saved
+                    val text = edit.text.toString()
                     if (control.isChecked && text.isNotBlank() && value().isNotBlank())
                         JSONObject().put("name", name).put("value", value()).put("text", text)
                     else null
