@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -21,6 +22,7 @@ export interface PendingAsk {
 	context?: QuestionContext;
 	submitConfirmed(requestId: string, values: Values): Promise<Delivery>;
 	withdraw?(requestId: string, reason: string): Promise<Delivery>;
+	takeOver?(requestId: string): Promise<Delivery>;
 }
 
 interface Call {
@@ -74,8 +76,25 @@ export default function away(pi: ExtensionAPI): void {
 	let activeId: string | undefined;
 	const approvals = new Set<string>();
 	const calls = new Map<string, Call>();
+	const contextDeliveries = new Map<string, { done(): void; cancel(): void }>();
 	const owns = (ctx: ExtensionContext) => ctx.agent.kind === "main" && session === ctx.sessionManager.getSessionId();
-	const voiceContext = (ctx: ExtensionContext) => Object.assign(Object.create(ctx) as ExtensionContext, { awaySdk: pi.pi, awaySchema: pi.arktype });
+	const voiceContext = (ctx: ExtensionContext) => Object.assign(Object.create(ctx) as ExtensionContext, {
+		awayContext: (content: string) => new Promise<void>((resolve, reject) => {
+			const id = crypto.randomUUID();
+			const finish = (error?: Error) => {
+				clearTimeout(timer); contextDeliveries.delete(id);
+				if (error) reject(error); else resolve();
+			};
+			const timer = setTimeout(() => finish(Error("Call context was not delivered")), 20_000).unref();
+			contextDeliveries.set(id, { done: () => finish(), cancel: () => finish(Error("Session changed")) });
+			try {
+				pi.sendMessage({
+					customType: "omp-away:call", display: true, attribution: "agent", content,
+					details: { awayContextId: id },
+				}, ctx.isIdle() ? { triggerTurn: false } : { deliverAs: "aside", triggerTurn: false });
+			} catch (error) { finish(error instanceof Error ? error : Error("Call context unavailable")); }
+		}),
+	});
 
 	function finish(key: string, data?: unknown) {
 		const call = calls.get(key);
@@ -93,6 +112,7 @@ export default function away(pi: ExtensionAPI): void {
 		generation++;
 		session = undefined;
 		ready = false;
+		for (const delivery of contextDeliveries.values()) delivery.cancel();
 		asyncQuestions?.close(); asyncQuestions = undefined;
 		approvals.clear();
 		discard();
@@ -107,6 +127,19 @@ export default function away(pi: ExtensionAPI): void {
 		const requestId = call.id;
 		const pending: PendingAsk = {
 			requestId, toolCallId, html: call.html,
+			async takeOver(id) {
+				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
+				call.submitting = true;
+				const epoch = generation;
+				try {
+					if (await call.responder.withdraw(id) !== "accepted") return "stale";
+					await call.native.promise;
+					const deadline = Date.now() + 5000;
+					while (!call.ctx.isIdle() && ready && generation === epoch && Date.now() < deadline) await delay(10);
+					if (!call.ctx.isIdle()) return "stale";
+					return ready && generation === epoch && owns(call.ctx) ? "accepted" : "stale";
+				} finally { call.submitting = false; }
+			},
 			async withdraw(id, reason) {
 				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
 				if (!reason.trim() || Buffer.byteLength(reason) > 16384) throw Error("Invalid call result");
@@ -241,6 +274,12 @@ export default function away(pi: ExtensionAPI): void {
 			if (!admin) { ctx.ui.notify("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide.", "error"); return; }
 			await admin.command(args);
 		},
+	});
+	pi.on("message_end", (event, ctx) => {
+		const message = event.message;
+		if (!owns(ctx) || message.role !== "custom" || message.customType !== "omp-away:call" || !record(message.details)) return;
+		const id = message.details.awayContextId;
+		if (typeof id === "string") contextDeliveries.get(id)?.done();
 	});
 	pi.on("agent_start", (_, ctx) => { if (owns(ctx)) admin?.cancelEnrollment(); });
 	pi.on("session_start", (_, ctx) => start(ctx));

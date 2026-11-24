@@ -1,12 +1,8 @@
-import type { AgentSession, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
-import { LiveSessionController, resolveLiveVoice, nativeInstructions } from './native-live.generated.mjs';
+import type { ExtensionContext, ExtensionLiveSession } from '@oh-my-pi/pi-coding-agent';
 import type { QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
 
-export type VoiceContext=ExtensionContext & {
-	awaySdk?:Pick<ExtensionAPI['pi'],'createAgentSession'|'SessionManager'|'settings'>;
-	awaySchema?:ExtensionAPI['arktype'];
-};
+export type VoiceContext=ExtensionContext & {awayContext?:(content:string)=>Promise<void>};
 export interface VoiceOptions {
 	ctx: VoiceContext;
 	call: QuestionCall;
@@ -22,16 +18,9 @@ export interface VoiceCall {
 export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 	const {ctx,call}=options;
 	call.signal.throwIfAborted();
-	if (!ctx.model) throw Error('No active model for the voice conversation');
-	if (!ctx.awaySdk || !ctx.awaySchema) throw Error('The host SDK is unavailable for the voice conversation');
-	const schema=ctx.awaySchema;
-	const {createAgentSession,SessionManager,settings}=ctx.awaySdk;
-	const manager=SessionManager.inMemory(ctx.cwd);
-	const snapshot=manager.captureState();
-	manager.restoreState({...snapshot,entries:structuredClone(ctx.sessionManager.getBranch())});
-	const context='<omp-away-plugin>\nThe user has answered your call about this pending question. Discuss it naturally. When the discussion resolves the question, withdraw it using withdraw_question, including the useful outcome for the originating conversation. Do not invent a form submission or require a scripted confirmation.\n'+JSON.stringify({requestId:call.question.requestId,...call.question.context,html:call.question.html})+'\n</omp-away-plugin>';
-	manager.appendCustomMessageEntry('omp-away:call',context,false);
-	let session:AgentSession|undefined,live:LiveSessionController|undefined,peer:MediaPeer|undefined;
+	if (!ctx.startLive || !ctx.awayContext) throw Error('This host does not expose native remote live mode');
+	const context='<omp-away-plugin>\nThe user has answered your call. Continue this conversation in native live mode using the handset for audio. Discuss the pending question naturally; do not invent a form submission or require a scripted confirmation.\n'+JSON.stringify({requestId:call.question.requestId,...call.question.context,html:call.question.html})+'\n</omp-away-plugin>';
+	let live:ExtensionLiveSession|undefined,peer:MediaPeer|undefined;
 	let closed=false,muted=false,cleanup:Promise<void>|undefined;
 	let output=Promise.resolve(),queued=0;
 	const ended=Promise.withResolvers<never>();
@@ -42,8 +31,7 @@ export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 		closed=true;clearTimeout(timer);call.signal.removeEventListener('abort',abort);
 		ended.reject(reason??Error('Voice call ended'));
 		cleanup=Promise.resolve().then(async()=>{
-			await Promise.allSettled([live?.stop(),peer?.close(),session?.abort()]);
-			await session?.dispose();
+			await Promise.allSettled([live?.stop(),peer?.close()]);
 		});
 		try {options.onEnd(reason)} catch {}
 		return cleanup;
@@ -51,25 +39,6 @@ export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 	const timer=setTimeout(()=>{void close(Error('Voice setup timed out'))},60000).unref();
 	call.signal.addEventListener('abort',abort,{once:true});
 	async function start() {
-		const created=await createAgentSession({
-			cwd:ctx.cwd,model:ctx.model,modelRegistry:ctx.modelRegistry,settings,
-			credentialSourceSessionId:ctx.sessionManager.getSessionId(),
-			sessionManager:manager,systemPrompt:ctx.getSystemPrompt(),
-			bindProcessState:false,disableExtensionDiscovery:true,
-			agentId:`Away-${crypto.randomUUID()}`,enableIrc:false,
-			customTools:[{
-				name:'withdraw_question',label:'Withdraw question',
-				loadMode:'essential',approval:'read',
-				description:'Withdraw the question being discussed. Include the conversation outcome and any user decisions in reason.',
-				parameters:schema({reason:'string'}),
-				async execute(_id,args) {
-					const result=await call.withdraw(args.reason);
-					return {content:[{type:'text' as const,text:result==='accepted'?'Question withdrawn.':'Question is no longer available.'}],details:{result}};
-				},
-			}],
-		});
-		session=created.session;
-		if(closed) {await session.dispose();return}
 		peer=spawnPeer(pcm=>{
 			if(closed) return;
 			if(++queued>250) {void close(Error('Phone audio transport stalled'));return}
@@ -77,21 +46,20 @@ export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 		},()=>{void close(Error('Media peer unavailable'))});
 		const sdpOffer=await peer.offer;
 		if(closed) return;
-		live=new LiveSessionController({
-			session,sdpOffer,voice:resolveLiveVoice(session.settings),
-			instructions:nativeInstructions+'\n'+context.replaceAll('{{','{ {'),
-			extractAssistantText:message=>message.content.flatMap(part=>part.type==='text'?[part.text]:[]).join('\n'),
-			callbacks:{
-				onPhase:phase=>{muted=phase==='muted'},
-				onLevels(){},
-				onTranscript:transcript=>{if(!closed&&transcript) options.onCaption?.(transcript.role,transcript.text,transcript.final)},
-				onTerminal:reason=>{void close(reason)},
-			},
-		});
-		await live.start();
+		// Release a native Ask before live delegation needs the same agent loop.
+		// The phone call retains its route until the native live controller stops.
+		await call.takeOver();
 		if(closed) return;
-		if(!live.sdpAnswer) throw Error('Missing live SDP answer');
-		await peer.answer(live.sdpAnswer);
+		await ctx.awayContext!(context);
+		if(closed) return;
+		live=await ctx.startLive!({
+			sdpOffer,
+			onPhase:phase=>{muted=phase==='muted'},
+			onTranscript:transcript=>{if(!closed) options.onCaption?.(transcript.role,transcript.text,transcript.final)},
+			onEnd:reason=>{void close(reason)},
+		});
+		if(closed) {await live.stop();return}
+		await peer.answer(live.sdpAnswer,context);
 		clearTimeout(timer);
 	}
 	try {await Promise.race([start(),ended.promise]);call.signal.throwIfAborted();if(closed) throw Error('Voice call ended')}

@@ -12,6 +12,7 @@ export interface Clock { now():number; after(ms:number, callback:()=>void):()=>v
 export interface QuestionCall {
 	signal:AbortSignal;
 	question:PendingAsk;
+	takeOver():Promise<void>;
 	withdraw(reason:string):Promise<"accepted"|"stale">;
 	close():void;
 }
@@ -36,7 +37,7 @@ export class DecisionCoordinator {
 	readonly #opt:Options;
 	readonly #clock:Clock;
 	#prefs:Preferences;
-	#active?:{entry:Entry;call:QuestionCall};
+	#active?:{entry:Entry;call:QuestionCall;takingOver:boolean;retired:boolean};
 	#closed=false;
 	constructor(opt:Options) {
 		this.#opt=opt;this.#clock=opt.clock??realtime;
@@ -74,21 +75,35 @@ export class DecisionCoordinator {
 	}
 	list():InboxItem[] {return Array.from(this.#pending.values(),e=>({...e.item}))}
 	display(id:string) {return this.#pending.get(id)?.form.display}
-	voiceAvailable(id:string) {return typeof this.#pending.get(id)?.ask.withdraw==="function"}
+	voiceAvailable(id:string) {return this.#pending.has(id)}
 	silence(id:string):boolean {
 		const e=this.#pending.get(id);if(!e) return false;
 		e.silenced=true;e.cancelTimer?.();e.cancelTimer=undefined;return true;
 	}
 	join(id:string):QuestionCall|undefined {
 		const entry=this.#pending.get(id);
-		if(this.#closed||this.#active||!entry||!entry.ask.withdraw||entry.withdrawing) return;
+		if(this.#closed||this.#active||!entry||entry.withdrawing) return;
 		this.silence(id);
 		const life=new AbortController();
 		const call:QuestionCall={
 			signal:life.signal,question:entry.ask,
-			close:()=>{if(this.#active?.call===call) this.#active=undefined;life.abort()},
+			close:()=>{
+				const active=this.#active;
+				if(active?.call===call) this.#active=undefined;
+				life.abort();
+				if(active?.call===call&&active.retired) this.end(id);
+			},
+			takeOver:async()=>{
+				if(!entry.ask.takeOver) return;
+				const active=this.#active;
+				if(active?.call!==call||active.takingOver||life.signal.aborted) throw Error("Question is no longer available");
+				active.takingOver=true;
+				try {
+					if(await entry.ask.takeOver(id)!=="accepted"||life.signal.aborted) throw Error("Question takeover failed");
+				} catch(error) {call.close();throw error}
+			},
 			withdraw:async reason=>{
-				if(life.signal.aborted||this.#pending.get(id)!==entry||entry.withdrawing) return "stale";
+				if(!entry.ask.withdraw||life.signal.aborted||this.#pending.get(id)!==entry||entry.withdrawing) return "stale";
 				if(!reason.trim()||Buffer.byteLength(reason)>16384) throw Error("Invalid withdrawal reason");
 				entry.withdrawing=true;
 				const result=await entry.ask.withdraw!(id,reason);
@@ -96,12 +111,16 @@ export class DecisionCoordinator {
 				return result;
 			},
 		};
-		this.#active={entry,call};return call;
+		this.#active={entry,call,takingOver:false,retired:false};return call;
 	}
 	end(id:string):void {
 		if(this.#closed) return;
 		this.#seen.add(id);
 		const entry=this.#pending.get(id);if(!entry) return;
+		if(this.#active?.entry===entry&&this.#active.takingOver) {
+			this.#active.retired=true;
+			return;
+		}
 		this.#pending.delete(id);entry.cancelTimer?.();
 		if(this.#active?.entry===entry) this.#active.call.close();
 		this.#opt.retired?.(id);this.#opt.changed?.();

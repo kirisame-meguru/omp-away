@@ -78,7 +78,7 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 				ctx:entry.ctx,call:question,
 				onCaption:captions?(role,text,final)=>{if(current(call)&&call.streaming) control(device,{type:"transcript",requestId:id,role,text,final})}:undefined,
 				onAudio:pcm=>{if(current(call)&&call.streaming) return gateway!.sendPcm(device,pcm)},
-				onEnd:()=>fail(call),
+				onEnd:reason=>{if(reason) fail(call);else call.question.close()},
 			});
 			if(!current(call)) {closeVoice(voice);return}
 			call.voice=voice;
