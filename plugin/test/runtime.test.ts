@@ -409,7 +409,7 @@ test("shared routing commands are idempotent patches and status follows remote u
 			const ctx={ui:{notify:(text:string)=>notices[i].push(text),setWidget(){}}} as unknown as ExtensionContext;
 			admins.push((await openAdmin(ctx,()=>true,()=>true,{env,copy:async()=>{},async connect(options){
 				if(options.onRouting) {subscribers.push(options.onRouting);options.onRouting(current)}
-				return {offer(){},end(){},async close(){},async pair(){throw Error("not pairing")},
+				return {offer(){},end(){},async endCall(){return false},async close(){},async pair(){throw Error("not pairing")},
 					async configure(patch) {
 						current={...current,...patch};
 						for(const subscriber of subscribers) subscriber(current);
@@ -444,7 +444,7 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 		await writeFile(tokenFile,Buffer.alloc(32,7).toString("base64url"),{mode:0o600});
 		const admin=await openAdmin(ctx,()=>true,()=>idle,{env,copy:async payload=>{copied.push(payload)},async connect(options){
 			confirm=options.confirmPair;
-			return {offer(){},end(){},async close(){},async configure(){},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
+			return {offer(){},end(){},async endCall(){return false},async close(){},async configure(){},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
 		}});
 		try {
 			idle=false;await admin!.command("pair");expect(pairs).toBe(0);expect(await confirm("phone","🐶".repeat(12))).toBe(false);
@@ -470,7 +470,7 @@ test("recoverable mobile conditions and command guidance warn, while protocol fa
 			copy:async()=>{},
 			async connect(_options,onReport) {
 				report=onReport;
-				return {offer(){},end(){},async configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
+				return {offer(){},end(){},async endCall(){return false},async configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
 			},
 		});
 		try {
@@ -503,4 +503,24 @@ test("unset gateway keeps fixture local; partial, relative or missing credential
 		}
 		expect(network).toBe(0);
 	} finally {await rm(dir,{recursive:true,force:true})}
+});
+
+test("assistant end-call stops only its matching live call exactly once without submitting",async()=>{
+	const f=await fixture();try {
+		f.wire.onConnect!("phone");f.offer("A");f.offer("B");await f.join("phone","A");
+		expect(f.contexts[0]).toContain("away_end_call");
+		expect(f.contexts[0]).toContain('\"requestId\":\"A\"');
+		expect(await f.runtime.endCall("B")).toBe(false);
+		expect(f.closedLive).toBe(0);
+		expect(await f.runtime.endCall("A")).toBe(true);
+		expect(f.closedLive).toBe(1);expect(f.closedPeers).toBe(1);
+		expect(f.controls.filter(c=>c.message.type==="ended"&&c.message.requestId==="A")).toHaveLength(1);
+		expect(await f.runtime.endCall("A")).toBe(false);
+		await f.join("phone","B");
+		expect(await f.runtime.endCall("A")).toBe(false);
+		expect(f.voices[1].call.signal.aborted).toBe(false);
+		expect(await f.runtime.endCall("B")).toBe(true);
+		expect(f.closedLive).toBe(2);expect(f.closedPeers).toBe(2);
+		expect(f.submitted).toEqual([]);
+	}finally{await f.runtime.close()}
 });

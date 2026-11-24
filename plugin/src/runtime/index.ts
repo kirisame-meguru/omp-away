@@ -16,7 +16,7 @@ const runtimeWarnings: Readonly<Record<string,string>> = {
 	"invite-unavailable": "Push notifications could not be sent; open the phone inbox or use the desktop",
 };
 
-export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"close"> {
+export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"close"> {
 	readonly comparisonCode?: string;
 	command(args:string):Promise<void>;
 	cancelEnrollment():void;
@@ -81,7 +81,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	notify("Away: secure mobile gateway ready");
 	return {
 		get comparisonCode() { return enrollment.comparisonCode },
-		offer:runtime.offer,end:runtime.end,cancelEnrollment,
+		offer:runtime.offer,end:runtime.end,endCall:runtime.endCall,cancelEnrollment,
 		async command(raw) {
 			if (!current()) return;
 			const args=raw.trim(), decision=/^(approve|deny) ([a-f0-9]{12})$/.exec(args);

@@ -22,7 +22,7 @@ export async function openVoice(options:VoiceOptions,peerFactory:typeof spawnPee
 	const {ctx,call}=options;
 	call.signal.throwIfAborted();
 	if (typeof ctx.startLive !== 'function' || typeof ctx.awayContext !== 'function') throw Error('This host does not expose native remote live mode');
-	const context='<omp-away-plugin>\nThe user has answered your call. Continue this conversation in native live mode using the handset for audio. Discuss the pending question naturally; do not invent a form submission or require a scripted confirmation.\n'+JSON.stringify({requestId:call.question.requestId,...call.question.context,html:call.question.html})+'\n</omp-away-plugin>';
+	const context='<omp-away-plugin>\nThe user has answered your call. Continue this conversation in native live mode using the handset for audio. Discuss the pending question naturally; do not invent a form submission or require a scripted confirmation.\nCall completion: the call stays open until explicitly ended. When the user asks to hang up, the coding agent must use away_end_call with the requestId below. When the purpose is resolved, the realtime voice must first deliver the result or a brief closing response, then delegate a request to end this Away call to the coding agent, which must invoke away_end_call. Do not leave a completed call listening indefinitely. Do not end merely on a pause or while awaiting an answer. Ending a call does not submit a form.\n'+JSON.stringify({requestId:call.question.requestId,...call.question.context,html:call.question.html})+'\n</omp-away-plugin>';
 	let live:ExtensionLiveSession|undefined,peer:MediaPeer|undefined;
 	let closed=false,muted=false,cleanup:Promise<void>|undefined;
 	let output=Promise.resolve(),queued=0;

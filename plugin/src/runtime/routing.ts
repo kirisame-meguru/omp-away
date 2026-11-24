@@ -8,6 +8,7 @@ export type AskContext = VoiceContext;
 export interface MobileRuntime {
 	offer(ask:PendingAsk,ctx:AskContext):void;
 	end(requestId:string):void;
+	endCall(requestId:string):Promise<boolean>;
 	configure(patch:Partial<Preferences>):Promise<void>;
 	pair():Promise<string>;
 	close():Promise<void>;
@@ -136,6 +137,13 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 			if(!core.offer(ask,ctx,path.basename(ctx.cwd),session)) requests.delete(ask.requestId);
 		},
 		end:id=>core.end(id),
+		async endCall(id) {
+			const call=active;
+			if(closed||!call||call.id!==id) return false;
+			call.question.close();
+			await Promise.all(closing);
+			return true;
+		},
 		async configure(patch){if(closed) throw Error("runtime-closed");await gateway!.routing(patch)},
 		pair:()=>gateway!.pair(),
 		async close(){

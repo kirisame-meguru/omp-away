@@ -1,6 +1,8 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { setImmediate as tick } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { type as arktype } from "@oh-my-pi/omptype";
+import type { ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import * as registry from "@oh-my-pi/pi-coding-agent/config/registry";
 import away, { type PendingAsk } from "../src";
@@ -22,6 +24,7 @@ test("async offers work without native Collab, survive agent end and cannot outl
 	let submitted = 0, closed = 0;
 	spyOn(runtime, "openAdmin").mockResolvedValue({
 		offer(ask) { offered.push(ask); }, end(id) { ended.push(id); },
+		async endCall() { return false; },
 		async close() { closed++; }, async command() {}, cancelEnrollment() {},
 	});
 	const events = new EventBus();
@@ -45,7 +48,7 @@ test("async offers work without native Collab, survive agent end and cannot outl
 	const off = events.on("omp-async-ask:connect:v1", request => {
 		if (request && typeof request === "object" && "accept" in request && typeof request.accept === "function") request.accept(source);
 	});
-	const api = { events, registerCommand() {}, on(name: string, handler: Handler) { handlers.set(name, handler); } } as unknown as ExtensionAPI;
+	const api = { events, arktype, registerTool() {}, registerCommand() {}, on(name: string, handler: Handler) { handlers.set(name, handler); } } as unknown as ExtensionAPI;
 	away(api);
 	try {
 		await handlers.get("session_start")!({}, ctx);
@@ -91,7 +94,7 @@ test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("nativ
 	const events=new EventBus();
 	const ctx={cwd:"/example/project",agent:{kind:"main"},mode:"tui",isIdle:()=>true,
 		sessionManager:{getSessionId:()=>"owner",getSessionName:()=>"Native review"},ui:{notify(){}}} as unknown as ExtensionContext;
-	const api={events,pi:{settings:{}},registerCommand(){},getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
+	const api={events,arktype,registerTool(){},pi:{settings:{}},registerCommand(){},getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
 		on(name:string,handler:Handler){handlers.set(name,handler)}} as unknown as ExtensionAPI;
 	away(api);
 	try {
@@ -114,5 +117,41 @@ test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("nativ
 		if (reason==="agent-end") await handlers.get("agent_end")!({},ctx);
 		if (reason==="shutdown") await handlers.get("session_shutdown")!({},ctx);
 		expect(invalidations).toEqual([["phone",detail.requestId]]);
+	} finally {await handlers.get("session_shutdown")!({},ctx)}
+});
+
+test("assistant hangup is explicit, session-owned and cancellation-safe",async()=>{
+	spyOn(registry,"lookup").mockReturnValue(undefined);
+	spyOn(runtime,"gatewayConfigured").mockReturnValue(true);
+	const ended:string[]=[];
+	spyOn(runtime,"openAdmin").mockResolvedValue({
+		offer(){},end(){},async endCall(id){ended.push(id);return id==="active"},
+		async close(){},async command(){},cancelEnrollment(){},
+	});
+	const handlers=new Map<string,(event:unknown,ctx:ExtensionContext)=>unknown>();
+	let tool!:ToolDefinition;
+	const api={events:new EventBus(),arktype,registerCommand(){},
+		registerTool(value:ToolDefinition){tool=value},
+		on(name:string,handler:(event:unknown,ctx:ExtensionContext)=>unknown){handlers.set(name,handler)},
+	} as unknown as ExtensionAPI;
+	const ctx={agent:{kind:"main"},mode:"tui",isIdle:()=>false,
+		sessionManager:{getSessionId:()=>"owner"},ui:{notify(){}}} as unknown as ExtensionContext;
+	away(api);
+	try {
+		await handlers.get("session_start")!({},ctx);
+		expect(tool.name).toBe("away_end_call");expect(tool.loadMode).toBe("essential");
+		const invoke=(id:string,context=ctx,signal?:AbortSignal)=>tool.execute("end",{requestId:id},signal,undefined,context);
+		expect((await invoke("active",{...ctx,agent:{...ctx.agent,kind:"sub"}})).details).toEqual({ended:false});
+		expect((await invoke("active",{...ctx,sessionManager:{...ctx.sessionManager,getSessionId:()=>"other"}})).details).toEqual({ended:false});
+		await expect(invoke("active",ctx,AbortSignal.abort())).rejects.toThrow();
+		expect(ended).toEqual([]);
+		await handlers.get("agent_end")!({},ctx);
+		expect(ended).toEqual([]); // A completed backend turn is not proof the voice has finished speaking.
+		expect((await invoke("active")).details).toEqual({ended:true});
+		expect((await invoke("stale")).details).toEqual({ended:false});
+		expect(ended).toEqual(["active","stale"]);
+		await handlers.get("session_shutdown")!({},ctx);
+		expect((await invoke("active")).details).toEqual({ended:false});
+		expect(ended).toEqual(["active","stale"]);
 	} finally {await handlers.get("session_shutdown")!({},ctx)}
 });

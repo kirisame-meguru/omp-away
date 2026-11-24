@@ -268,6 +268,24 @@ export default function away(pi: ExtensionAPI): void {
 		}
 	}
 
+	const endCallParameters = pi.arktype({ requestId: "string" });
+	pi.registerTool<typeof endCallParameters>({
+		name: "away_end_call",
+		label: "End Away call",
+		description: "End this session's Away voice call once its purpose is resolved or the user asks to hang up. Use the requestId from the omp-away-plugin call context. This stops handset audio and native live mode; it does not submit an answer. Do not leave a completed call open. Do not call while awaiting the user's answer or continuing the conversation.",
+		parameters: endCallParameters,
+		loadMode: "essential",
+		approval: "write",
+		async execute(_id, params, signal, _update, ctx) {
+			signal?.throwIfAborted();
+			const ended = owns(ctx) && !!admin && await admin.endCall(params.requestId);
+			return {
+				content: [{ type: "text", text: ended ? "Away call ended." : "No matching active Away call in this session." }],
+				details: { ended },
+			};
+		},
+	});
+
 	pi.registerCommand("away", {
 		description: "Enable Away for all connected sessions; /away off disables immediate ringing",
 		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode),

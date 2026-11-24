@@ -92,7 +92,11 @@ The broker owns `routing.json`, persists changes before broadcasting, and serial
 
 **One-time shared-routing upgrade:** update the plugin in all Away-enabled desktops, close those desktops, allow the existing broker to shut down after ten idle seconds, then reopen them. Do this only when their work can be safely paused; do not kill an active production broker to force an upgrade. Pairing and saved preferences are preserved. An older broker is detected explicitly and the new plugin refuses to pretend a local-only change is global. Legacy clients are not sent unknown routing events; they must also reload the updated plugin to participate. Routine mode changes after this upgrade need no restart. No Android or public-relay upgrade is needed.
 
-Pair **before** starting the native Ask. A newly enrolled device does not inherit open requests. The paired inbox reconciles on connect; **Not now** suppresses ringing for that request; **Hang up** or disconnect ends the call but leaves the Ask pending. Only joining opens desktop Codex voice.
+Pair **before** starting the native Ask. A newly enrolled device does not inherit open requests. The paired inbox reconciles on connect; **Not now** suppresses ringing for that request. Joining enters native live mode and releases the originating Ask for conversation. Ending voice does not submit a canonical form answer.
+
+The assistant can end a resolved call with `away_end_call`, using its call-context `requestId`. The action is restricted to the owning main session and matching active call; stale IDs cannot end a later call. It stops native live and the media peer and sends the phone an ended control. The realtime voice is instructed to deliver its closing response before delegating this action. Backend `agent_end`, silence and individual caption finals do not automatically hang up: those can precede result narration or a follow-up question. Reload the desktop plugin to expose this new tool; no phone or broker update is required.
+
+### Legacy scripted voice path (not native-live)
 
 Speaker output uses the service's ordered `session.output_audio.delta` stream (24 kHz mono PCM16), normalized by the plugin-owned adapter in its pinned SDK bundle. It is never mixed with independently timed WebRTC RTP output. WebRTC still carries the microphone. Legacy `rtp.*` trace labels refer to the desktop PCM playback buffer, not proof of the audio's transport or physical presentation.
 
