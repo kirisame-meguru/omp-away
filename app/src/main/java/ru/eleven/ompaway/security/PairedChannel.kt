@@ -24,6 +24,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import org.json.JSONArray
 
 data class InboxItem(val requestId: String, val project: String, val question: String, val createdAt: Long)
 
@@ -33,6 +34,8 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         fun onVerify(emoji: String) {}
         fun onReady() {}
         fun onInbox(items: List<InboxItem>) {}
+        fun onForm(requestId: String, form: JSONObject?) {}
+        fun onAnswer(requestId: String, status: String, message: String) {}
         fun onJoined(requestId: String) {}
         fun onEnded(requestId: String) {}
         fun onPcm(pcm: ByteArray) {}
@@ -245,6 +248,16 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                     InboxItem(id, get("project") as String, get("question") as String, (get("createdAt") as Long).also { require(it >= 0) })
                 } })
             }
+            "form" -> {
+                msg.fields("type", "requestId", "form")
+                listener.onForm(msg.text("requestId"), if (msg.isNull("form")) null else msg.getJSONObject("form"))
+            }
+            "answer" -> {
+                msg.fields("type", "requestId", "status", "message")
+                val status = msg.text("status")
+                when (status) { "accepted", "invalid", "stale", "busy", "uncertain" -> Unit; else -> error("Invalid answer status") }
+                listener.onAnswer(msg.text("requestId"), status, msg.getString("message"))
+            }
             "joined" -> {
                 msg.fields("type", "requestId"); val v = checkNotNull(s.voice); check(!v.joined && v.id == msg.text("requestId"))
                 v.joined = true; if (!v.stopping) { recording = v; listener.onJoined(v.id) }
@@ -286,6 +299,17 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         post { current(s) { if (s === ready) block(s) } }
     }
     fun list() = action { sendJson(it, JSONObject().put("type", "list")) }
+    fun form(requestId: String) = action { command(it, "form", requestId) }
+    fun answer(requestId: String, values: JSONObject, notes: JSONArray): Boolean {
+        val s = ready ?: return false
+        // One immutable wire snapshot; no re-serialization or JSON round trip on the worker.
+        val bytes = JSONObject().put("type", "answer").put("requestId", requestId)
+            .put("values", values).put("notes", notes).toString().toByteArray()
+        if (bytes.size > 60_000) return false
+        val packet = frame(1, bytes)
+        post { current(s) { if (s === ready) checkNotNull(s.tls).send(packet) } }
+        return true
+    }
     fun join(requestId: String) = action { s ->
         if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId, captions = true) }
     }

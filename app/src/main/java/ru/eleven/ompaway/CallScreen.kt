@@ -27,7 +27,7 @@ internal class CallScreen(
     private var source: CallVisualSource?,
     private val changeSpeaker: (Boolean) -> Unit,
     private val hangup: () -> Unit,
-    private val openInbox: () -> Unit = {},
+    private val showQuestions: () -> Unit = {},
     private val openSettings: () -> Unit = {},
 ) : FrameLayout(context), EnergySource, Choreographer.FrameCallback {
     private val shell = ShellMotion()
@@ -55,8 +55,6 @@ internal class CallScreen(
     private val controls = LinearLayout(context)
     private val content = LinearLayout(context)
     private val callActions = LinearLayout(context)
-    private val homeActions = LinearLayout(context)
-    private val homeAction = Button(context)
     private var speakerEnabled = false
     private var animateOverride = preferences.animateOverride
     private var resumed = false
@@ -65,6 +63,11 @@ internal class CallScreen(
     private var previous = 0L
     private var lastMode = -1
     private var finishDismissal: Runnable? = null
+    private var compact = source == null
+    private var awaitingReply = false
+    private var lastUserCaption = ""
+    private var lastUserFinal = false
+    private val heading = LinearLayout(context)
 
     init {
         shell.target(if (source == null) 1 else 4, true)
@@ -72,12 +75,11 @@ internal class CallScreen(
         surface?.let { addView(it, LayoutParams(-1, -1)) }
         addView(fallback, LayoutParams(-1, -1))
         fallback.visibility = if (flat) VISIBLE else INVISIBLE
-        val heading = LinearLayout(context).apply {
+        heading.apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(24), dp(12), dp(16), 0)
         }
         heading.addView(label("away", 26f), LinearLayout.LayoutParams(0, -2, 1f))
-        heading.addView(label("R A D I A N C E", 11f).apply { setTextColor(0xffc5bfcc.toInt()) })
         heading.addView(Button(context).apply {
             styleButton(this); text = "Settings"
             setOnClickListener { if (resumed) openSettings() }
@@ -98,13 +100,10 @@ internal class CallScreen(
         val captions = ScrollView(context).apply { isFillViewport = true; addView(content) }
         controls.addView(captions, LinearLayout.LayoutParams(-1, 0, 1f))
         callActions.gravity = Gravity.CENTER
-        homeActions.gravity = Gravity.CENTER
-        for (row in arrayOf(callActions, homeActions)) {
-            row.background = GradientDrawable().apply {
-                setColor(0xcc1c1c2b.toInt()); cornerRadius = dp(26).toFloat()
-            }
-            row.setPadding(dp(6), dp(4), dp(6), dp(4))
+        callActions.background = GradientDrawable().apply {
+            setColor(0xcc1c1c2b.toInt()); cornerRadius = dp(26).toFloat()
         }
+        callActions.setPadding(dp(6), dp(4), dp(6), dp(4))
         styleButton(speaker)
         speaker.setOnClickListener { if (resumed && !ending) changeSpeaker(!speakerEnabled) }
         styleButton(end)
@@ -112,15 +111,11 @@ internal class CallScreen(
         end.setOnClickListener { if (resumed && !ending) hangup() }
         callActions.addView(speaker, LinearLayout.LayoutParams(0, -2, 1f))
         callActions.addView(end, LinearLayout.LayoutParams(0, -2, 1f))
-        controls.addView(callActions, LinearLayout.LayoutParams(-1, -2))
-        styleButton(homeAction)
-        homeAction.setOnClickListener { if (resumed) openInbox() }
-        homeActions.addView(homeAction, LinearLayout.LayoutParams(0, -2, 1f))
-        homeActions.addView(Button(context).apply {
-            styleButton(this); text = "Inbox"
-            setOnClickListener { if (resumed) openInbox() }
+        callActions.addView(Button(context).apply {
+            styleButton(this); text = "Questions"
+            setOnClickListener { if (resumed) showQuestions() }
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        controls.addView(homeActions, LinearLayout.LayoutParams(-1, -2))
+        controls.addView(callActions, LinearLayout.LayoutParams(-1, -2))
         styleButton(motion)
         motion.setOnClickListener {
             preferences.animateOverride = !animateOverride
@@ -133,7 +128,7 @@ internal class CallScreen(
         addView(controls, LayoutParams(-1, -2, Gravity.BOTTOM))
         if (Build.VERSION.SDK_INT >= 30) setOnApplyWindowInsetsListener { _, insets ->
             val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            setPadding(safe.left, safe.top, safe.right, if (compact) 0 else safe.bottom)
             insets
         } else fitsSystemWindows = true
         showActions()
@@ -150,9 +145,18 @@ internal class CallScreen(
     }
 
     private fun showActions() {
-        callActions.visibility = if (source == null) GONE else VISIBLE
-        homeActions.visibility = if (source == null) VISIBLE else GONE
-        content.gravity = Gravity.CENTER_HORIZONTAL or if (source == null) Gravity.BOTTOM else Gravity.TOP
+        callActions.visibility = if (source == null || compact) GONE else VISIBLE
+        heading.visibility = if (compact) GONE else VISIBLE
+        controls.visibility = if (compact) GONE else VISIBLE
+        content.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
+    }
+
+    fun compact(value: Boolean) {
+        if (compact == value) return
+        compact = value
+        showActions()
+        applyPose()
+        requestApplyInsets()
     }
 
     fun bind(next: CallVisualSource?) {
@@ -162,6 +166,7 @@ internal class CallScreen(
         end.isEnabled = true; speaker.isEnabled = true
         state.update(false, false, 0f, 0f, 0L, 0f, true)
         caller.text = ""; assistant.text = ""
+        awaitingReply = false; lastUserCaption = ""; lastUserFinal = false
         caller.visibility = GONE; assistant.visibility = GONE
         showActions()
         applyPose()
@@ -169,16 +174,6 @@ internal class CallScreen(
             scheduler.removeFrameCallback(this)
             scheduler.postFrameCallback(this)
         }
-    }
-
-    fun home(paired: Boolean, pending: Int, status: String) {
-        if (source != null) return
-        title.text = if (!paired) "Your desktop, in reach." else if (pending > 0) "Your desktop is calling." else "Ready when you are."
-        caller.visibility = GONE
-        assistant.visibility = VISIBLE
-        assistant.gravity = Gravity.CENTER
-        assistant.text = if (!paired) "Pair your desktop to answer requests by voice." else status
-        homeAction.text = if (!paired) "Pair desktop" else "Requests · $pending"
     }
 
     fun refreshAppearance() {
@@ -217,6 +212,10 @@ internal class CallScreen(
 
     fun captions(user: String, userFinal: Boolean, reply: String, replyFinal: Boolean) {
         val current = source ?: return
+        if (userFinal && user.isNotBlank() && (user != lastUserCaption || !lastUserFinal)) {
+            lastUserCaption = user; awaitingReply = true
+        }
+        lastUserFinal = userFinal
         assistant.gravity = Gravity.START
         transcript.update(current.connected, state.mode == 2, user, userFinal, reply, replyFinal)
     }
@@ -248,11 +247,15 @@ internal class CallScreen(
         val dt = if (previous == 0L) 0f else ((frameTimeNanos - previous) / 1e9f).coerceIn(0f, .1f)
         previous = frameTimeNanos
         val current = source
-        if (current != null) state.update(!ending && current.active, current.connected, current.microphoneLevel(now),
-            current.playbackLevel(), now, dt, still())
+        if (current != null) {
+            val playback = current.playbackLevel()
+            if (playback > 0f) awaitingReply = false
+            state.update(!ending && current.active, current.connected, current.microphoneLevel(now),
+                playback, now, dt, still(), awaitingReply)
+        }
         if (current != null && lastMode != state.mode) {
             lastMode = state.mode
-            title.text = when (state.mode) { 0 -> "Connecting audio…"; 1 -> "Listening…"; 2 -> "Speaking…"; else -> "Call ended" }
+            title.text = when (state.mode) { 0 -> "Connecting audio…"; 1 -> "Listening…"; 2 -> "Speaking…"; 3 -> "Thinking…"; else -> "Call ended" }
         }
         applyPose()
         if (current != null) scheduler.postFrameCallbackDelayed(this, if (still()) 80L else 0L)

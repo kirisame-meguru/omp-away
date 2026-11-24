@@ -8,7 +8,7 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <application android:name=".Gateway" android:label="${appLabel}" android:icon="@drawable/ic_invite" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/private_data" android:usesCleartextTraffic="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
-        <activity android:name=".InboxActivity" android:exported="true" android:launchMode="singleTop">
+        <activity android:name=".InboxActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

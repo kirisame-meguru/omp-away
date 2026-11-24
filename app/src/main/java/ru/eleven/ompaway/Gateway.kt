@@ -9,6 +9,8 @@ import com.google.firebase.messaging.FirebaseMessaging
 import ru.eleven.ompaway.security.InboxItem
 import ru.eleven.ompaway.security.PairedChannel
 import java.util.concurrent.FutureTask
+import org.json.JSONObject
+import org.json.JSONArray
 
 class Gateway : Application() {
     internal lateinit var store: InboxStore
@@ -50,6 +52,40 @@ class Gateway : Application() {
         private set
     internal val paired get() = current().channel.isPaired()
     private val sentSilences = mutableSetOf<String>()
+    internal val forms = mutableMapOf<String, JSONObject>()
+    internal val drafts = mutableMapOf<String, JSONObject>()
+    internal val noteDrafts = mutableMapOf<String, JSONArray>()
+    internal val formMessages = mutableMapOf<String, String>()
+    internal val submitting = mutableSetOf<String>()
+    private val loadingForms = mutableSetOf<String>()
+
+    internal fun loadForm(id: String) {
+        if (!verifiedInbox || id !in store.state.pending || id in forms || id in formMessages || !loadingForms.add(id)) return
+        val s = current()
+        s.channel.form(id)
+        main.postDelayed({
+            if (session === s && loadingForms.remove(id)) {
+                formMessages[id] = "Question did not arrive. Reconnect to refresh."; changed()
+            }
+        }, 30_000)
+    }
+
+    internal fun answer(id: String, values: JSONObject, notes: JSONArray) {
+        if (observer == null || !verifiedInbox || !idle || id !in forms || id !in store.state.pending || id in submitting) return
+        submitting.add(id); formMessages[id] = "Submitting…"
+        drafts[id] = values; noteDrafts[id] = notes
+        val s = current()
+        if (!s.channel.answer(id, values, notes)) {
+            submitting.remove(id)
+            formMessages[id] = "Answer was not sent. Check the connection or shorten your text."; changed(); return
+        }
+        main.postDelayed({
+            if (session === s && id in submitting && formMessages[id] == "Submitting…") {
+                formMessages[id] = "Submission not confirmed. Check the desktop before retrying."; changed()
+            }
+        }, 30_000)
+        changed()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -228,6 +264,9 @@ class Gateway : Application() {
         val old = session; session = null
         endingId = null
         verifiedInbox = false; verifyEmoji = null; pairing = false; sentSilences.clear()
+        forms.clear(); loadingForms.clear()
+        formMessages.keys.retainAll(submitting)
+        for (id in submitting) formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
         old?.channel?.close()
     }
 
@@ -248,7 +287,9 @@ class Gateway : Application() {
 
         override fun onInbox(items: List<InboxItem>) = ui {
             val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt) })
+            for (id in removed) { forms.remove(id); drafts.remove(id); noteDrafts.remove(id); loadingForms.remove(id); formMessages.remove(id) }
             for (id in removed) Invites.cancel(this@Gateway, id)
+            submitting.removeAll(removed)
             verifiedInbox = true; sentSilences.removeAll(removed)
             val toSilence = store.state.silenced.filter { sentSilences.add(it) }
             toSilence.forEach { channel.silence(it) }
@@ -258,6 +299,23 @@ class Gateway : Application() {
                 // A list response following the silence command fences its delivery on this ordered socket.
                 if (toSilence.isNotEmpty()) channel.list() else finishSync(false)
             }
+            changed()
+        }
+
+        override fun onForm(requestId: String, form: JSONObject?) = ui {
+            loadingForms.remove(requestId)
+            if (requestId !in store.state.pending) return@ui
+            if (form != null) forms[requestId] = form
+            else formMessages[requestId] = "This form is unavailable on this desktop version or is no longer pending."
+            changed()
+        }
+
+        override fun onAnswer(requestId: String, status: String, message: String) = ui {
+            // Only definite validation/busy failures may be retried.
+            if (status == "invalid" || status == "busy") submitting.remove(requestId)
+            formMessages[requestId] = message
+            this@Gateway.status = message
+            if (status == "accepted") { forms.remove(requestId); drafts.remove(requestId); noteDrafts.remove(requestId); channel.list() }
             changed()
         }
 
@@ -301,6 +359,9 @@ class Gateway : Application() {
             ui {
                 endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
                 endingId = null
+                forms.clear(); loadingForms.clear()
+                formMessages.keys.retainAll(submitting)
+                for (id in submitting) formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
                 if (!status.startsWith("Desktop connection error")) status = "Disconnected. Showing cached inbox."
                 changed()
             }

@@ -9,7 +9,7 @@ internal class CallVisualState {
         private set
     private var lastOutput = Long.MIN_VALUE
     fun update(active: Boolean, connected: Boolean, microphone: Float, playback: Float,
-               nowMillis: Long, dtSeconds: Float, still: Boolean) {
+               nowMillis: Long, dtSeconds: Float, still: Boolean, awaitingReply: Boolean = false) {
         val input = if (microphone.isFinite()) microphone.coerceIn(0f, 1f) else 0f
         val output = if (playback.isFinite()) playback.coerceIn(0f, 1f) else 0f
         if (!active || !connected) {
@@ -20,7 +20,7 @@ internal class CallVisualState {
         }
         if (output > 0f) lastOutput = nowMillis
         val speaking = lastOutput != Long.MIN_VALUE && nowMillis - lastOutput in 0..280
-        mode = if (speaking) 2 else 1
+        mode = if (speaking) 2 else if (awaitingReply && input < .02f) 3 else 1
         if (still) { level = 0f; return }
         val target = if (speaking) output else input
         val dt = if (dtSeconds.isFinite()) dtSeconds.coerceIn(0f, .1f) else 0f
