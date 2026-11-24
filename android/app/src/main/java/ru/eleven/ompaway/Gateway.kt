@@ -57,12 +57,16 @@ class Gateway : Application() {
         private set
     internal var status = "Offline"
         private set
+    internal enum class InboxConnection { CONNECTING, REFRESHING, CONNECTED, DISCONNECTED }
+    internal var inboxConnection = InboxConnection.DISCONNECTED
+        private set
     internal var refreshing = false
         private set
     internal val canRefresh get() = observer != null && paired && !needsRelayOrigin && idle &&
         requestedJoin == null && submitting.isEmpty() && !pairing
     private val refreshTimeout = Runnable {
         finishRefresh()
+        inboxConnection = InboxConnection.DISCONNECTED
         status = "Refresh timed out. Pull down to try again."
         changed()
     }
@@ -184,6 +188,7 @@ class Gateway : Application() {
         val s = current()
         if (!s.channel.isPaired()) return
         s.connecting = true
+        inboxConnection = InboxConnection.CONNECTING
         status = "Connecting to desktop…"
         s.channel.connect(); changed()
     }
@@ -196,6 +201,7 @@ class Gateway : Application() {
         if (!canRefresh || refreshing) return
         if (!verifiedInbox) retry()
         refreshing = true
+        if (verifiedInbox) inboxConnection = InboxConnection.REFRESHING
         main.postDelayed(refreshTimeout, 30_000)
         if (verifiedInbox) current().channel.list()
         changed()
@@ -372,6 +378,7 @@ class Gateway : Application() {
 
     private fun retire() {
         finishRefresh()
+        inboxConnection = InboxConnection.DISCONNECTED
         val old = session; session = null
         endingId = null
         verifiedInbox = false; verifyEmoji = null; pairing = false; sentSilences.clear()
@@ -393,6 +400,7 @@ class Gateway : Application() {
         submitting.removeAll(removed)
         for (id in removed) Invites.cancel(this, id)
         verifiedInbox = true; sentSilences.removeAll(removed)
+        inboxConnection = InboxConnection.CONNECTED
         val toSilence = store.state.silenced.filter { sentSilences.add(it) }
         toSilence.forEach { channel.silence(it) }
         if (callId?.let { it !in store.state.pending } == true) endCall("Request closed on desktop.")
@@ -428,6 +436,7 @@ class Gateway : Application() {
 
         override fun onReady() = ui {
             pairing = false; verifyEmoji = null; connecting = false; verifiedInbox = false
+            inboxConnection = InboxConnection.REFRESHING
             status = "Refreshing inbox…"; changed()
         }
 
@@ -501,6 +510,7 @@ class Gateway : Application() {
                 changed(); return@ui
             }
             finishRefresh()
+            inboxConnection = InboxConnection.DISCONNECTED
             requestedJoin = null
             verifiedInbox = false; store.state.invalidateDetails()
             invalidateForms()
@@ -518,6 +528,7 @@ class Gateway : Application() {
             val media = stream; stream = null; media?.invalidate()
             ui {
                 finishRefresh()
+                inboxConnection = InboxConnection.DISCONNECTED
                 endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
                 store.state.invalidateDetails()
                 invalidateForms()

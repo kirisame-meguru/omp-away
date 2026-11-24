@@ -44,7 +44,7 @@ class RadianceHomeTest {
                 assertFalse(descendants(activity.window.decorView).filterIsInstance<android.widget.Button>()
                     .any { it.isShown && it.text.toString() in listOf("Settings", "Refresh questions", "Reconnect") })
                 val refresh = descendants(activity.window.decorView)
-                    .filterIsInstance<androidx.swiperefreshlayout.widget.SwipeRefreshLayout>().single()
+                    .filterIsInstance<InboxRefreshLayout>().single()
                 assertFalse("Unpaired inbox must not refresh", refresh.isEnabled)
             }
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
