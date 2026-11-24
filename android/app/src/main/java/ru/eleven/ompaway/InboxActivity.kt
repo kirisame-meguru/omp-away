@@ -171,7 +171,6 @@ class InboxActivity : Activity() {
                 setMargins(dp(12), dp(12), dp(12), dp(12))
             })
         }
-        refresh.panel = panel
         refresh.setContent(overlay)
         setContentView(FrameLayout(this).apply {
             addView(callScreen, FrameLayout.LayoutParams(-1, -1))

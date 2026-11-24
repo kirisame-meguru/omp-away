@@ -13,7 +13,7 @@ import kotlin.math.min
 
 /** One indicator owns both connection feedback and the whole-panel refresh gesture. */
 internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
-    var panel: View? = null
+    private var content: View? = null
     var canScrollUp: () -> Boolean = { false }
     var onRefresh: (() -> Boolean)? = null
     private val indicator = InboxStatusIndicator(context)
@@ -70,7 +70,10 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
         indicator.setOnClickListener { requestRefresh() }
     }
 
-    fun setContent(content: View) { addView(content, 0, LayoutParams(-1, -1)) }
+    fun setContent(content: View) {
+        this.content = content
+        addView(content, 0, LayoutParams(-1, -1))
+    }
     fun setTopInset(inset: Int) { topInset = inset; place(offset) }
 
     fun update(show: Boolean, state: Gateway.InboxConnection, description: String, allowAnimations: Boolean) {
@@ -192,7 +195,8 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
 
     private fun place(value: Float) {
         offset = value
-        panel?.translationY = value
+        // Move the inset container with its card, keeping their drawing bounds aligned.
+        content?.translationY = value
         // Reveal only once the card has made room; never slide a clipped capsule
         // through the display edge or the status bar.
         indicator.translationY = topInset + indicatorTopPadding + (value - revealStart).coerceAtLeast(0f) * .5f
