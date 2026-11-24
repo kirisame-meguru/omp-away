@@ -72,6 +72,7 @@ class Broker:
         self.clients = set()
         self.pending = {}
         self.active = {}
+        self.touch = {}
         self.pair_owner = None
         self.pair_pending = False
         self.sequence = 0
@@ -102,7 +103,7 @@ class Broker:
         self.sequence = self.sequence % 0xffffffff + 1
         while self.sequence in self.pending:
             self.sequence = self.sequence % 0xffffffff + 1
-        call_control = command['op'] == 'pcm' or command['op'] == 'control' and command['message']['type'] != 'inbox'
+        call_control = command['op'] == 'pcm' or command['op'] == 'control' and command['message']['type'] not in ('inbox', 'form', 'answer')
         authority = self.active.get(command.get('deviceId')) if client is not None and call_control else None
         self.pending[self.sequence] = (client, local, command['op'], authority)
         if client is not None:
@@ -189,6 +190,12 @@ class Broker:
                     merged = self.inbox(device, (client, message['items']))
                     client.inboxes[device] = message['items']
                     cmd = {**cmd, 'message': merged}
+                elif op == 'control' and isinstance(message, dict) and message.get('type') in ('form', 'answer'):
+                    key = (device, phone.ref, message.get('requestId'), message['type'])
+                    if self.touch.get(key) is not client:
+                        raise ProtocolError('unowned answer')
+                    phone.outgoing(message)
+                    del self.touch[key]
                 else:
                     active = self.active.get(device)
                     if active is None or active[0] is not client:
@@ -234,6 +241,16 @@ class Broker:
                 request = message.get('requestId')
                 active = self.active.get(device)
                 client = active[0] if message['type'] != 'join' and active and active[1] == request else self.owner(device, request)
+                if message['type'] in ('form', 'answer'):
+                    key = (device, msg['ref'], request, message['type'])
+                    if client is None or len(self.touch) >= MAX_CLIENTS * MAX_PENDING:
+                        reply = ({'type': 'form', 'requestId': request, 'form': None} if message['type'] == 'form' else
+                                 {'type': 'answer', 'requestId': request, 'status': 'stale', 'message': 'Request unavailable.'})
+                        await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': msg['ref'], 'message': reply})
+                        return
+                    if key in self.touch:
+                        return
+                    self.touch[key] = client
                 if message['type'] == 'join':
                     if client is None:
                         await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': msg['ref'], 'message': {'type': 'error', 'code': 'request-unavailable'}})
@@ -246,6 +263,7 @@ class Broker:
                 return
         elif event == 'lost':
             self.active.pop(msg['deviceId'], None)
+            self.touch = {key: owner for key, owner in self.touch.items() if key[0] != msg['deviceId']}
             for client in self.clients:
                 client.inboxes.pop(msg['deviceId'], None)
         for client in tuple(self.clients):
@@ -262,6 +280,7 @@ class Broker:
         if client not in self.clients:
             return
         self.clients.remove(client)
+        self.touch = {key: owner for key, owner in self.touch.items() if owner is not client}
         client.writer.close()
         if self.stopping:
             return

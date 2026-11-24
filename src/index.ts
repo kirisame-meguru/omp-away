@@ -8,6 +8,7 @@ import { awayHelp, awaySuggestions } from "./runtime/commands";
 import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
 
 export type Values = Record<string, string | number | boolean | string[]>;
+export interface AnswerNote { name: string; question: string; option: string; value: string; text: string }
 export interface QuestionContext { title: string; blockedWork: string }
 type Delivery = "accepted" | "stale";
 
@@ -19,7 +20,8 @@ export interface PendingAsk {
 	deduplicationKey?: string;
 	createdAt?: number;
 	context?: QuestionContext;
-	submitConfirmed(requestId: string, values: Values): Promise<Delivery>;
+	supportsOptionNotes?: boolean;
+	submitConfirmed(requestId: string, values: Values, notes?: AnswerNote[]): Promise<Delivery>;
 }
 
 interface Call {
@@ -32,6 +34,7 @@ interface Call {
 	native: PromiseWithResolvers<unknown>;
 	offered: boolean;
 	submitting: boolean;
+	touchAnswer?: { values: Values; notes: AnswerNote[]; notesApplied: boolean };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -104,16 +107,17 @@ export default function away(pi: ExtensionAPI): void {
 		logger.info("Away native bridge", { stage:"offered", mobile:mobileConfigured });
 		const requestId = call.id;
 		const pending: PendingAsk = {
-			requestId, toolCallId, html: call.html,
-			async submitConfirmed(id, values) {
+			requestId, toolCallId, html: call.html, supportsOptionNotes: true,
+			async submitConfirmed(id, values, notes = []) {
 				if (id !== requestId || activeId !== toolCallId || calls.get(toolCallId) !== call || !ready || approvals.size || call.submitting) return "stale";
 				call.submitting = true;
 				logger.info("Away native bridge", { stage:"submit-started" });
 				try {
 					const snapshot = structuredClone(values);
+					call.touchAnswer = { values: snapshot, notes: structuredClone(notes), notesApplied: notes.length === 0 };
 					if (await call.responder.submitConfirmed(id, snapshot) !== "accepted") return "stale";
 					const actual = await call.native.promise;
-					const matched=actual !== undefined && Bun.deepEquals(actual, snapshot);
+					const matched=actual !== undefined && Bun.deepEquals(actual, snapshot) && call.touchAnswer.notesApplied;
 					logger.info("Away native bridge", { stage:"native-result", matched });
 					return matched ? "accepted" : "stale";
 				} finally { call.submitting = false; }
@@ -270,7 +274,23 @@ export default function away(pi: ExtensionAPI): void {
 	pi.on("tool_approval_resolved", event => {
 		if (event.sessionId === session) approvals.delete(event.toolCallId);
 	});
+	pi.on("tool_result", (event, ctx) => {
+		if (!owns(ctx) || event.toolName !== "ask" || event.isError) return;
+		const call = calls.get(event.toolCallId), answer = call?.touchAnswer;
+		if (!call?.submitting || !answer?.notes.length || answer.notesApplied ||
+			!Bun.deepEquals(nativeValues(event), answer.values) || !record(event.details)) return;
+		const first = event.content[0];
+		if (first?.type !== "text") return;
+		answer.notesApplied = true;
+		return {
+			content: [{ ...first, text: first.text + "\nOption notes:\n" + JSON.stringify(answer.notes) }, ...event.content.slice(1)],
+			details: { ...event.details, notes: answer.notes },
+		};
+	});
 	pi.on("tool_execution_end", (event, ctx) => {
-		if (owns(ctx) && event.toolName === "ask") finish(event.toolCallId, !event.isError && activeId === event.toolCallId ? nativeValues(event.result) : undefined);
+		if (!owns(ctx) || event.toolName !== "ask") return;
+		const notes = calls.get(event.toolCallId)?.touchAnswer?.notes;
+		const notesMatch = !notes?.length || record(event.result) && record(event.result.details) && Bun.deepEquals(event.result.details.notes, notes);
+		finish(event.toolCallId, !event.isError && activeId === event.toolCallId && notesMatch ? nativeValues(event.result) : undefined);
 	});
 }

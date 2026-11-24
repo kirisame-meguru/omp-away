@@ -111,6 +111,20 @@ class Phone:
             return True
         if not route(rid):
             raise ProtocolError('invalid request')
+        if kind == 'form' and fields(msg, 'type', 'requestId'):
+            return True
+        if kind == 'answer' and (fields(msg, 'type', 'requestId', 'values') or fields(msg, 'type', 'requestId', 'values', 'notes')):
+            values = msg['values']
+            notes = msg.get('notes', [])
+            if not isinstance(notes, list) or len(notes) > 128 or not all(
+                    isinstance(note, dict) and fields(note, 'name', 'value', 'text') and
+                    all(isinstance(v, str) for v in note.values()) for note in notes):
+                raise ProtocolError('invalid option notes')
+            if (isinstance(values, dict) and len(values) <= 32 and
+                    all(isinstance(k, str) and (isinstance(v, str) or type(v) in (int, float) or
+                        isinstance(v, list) and all(isinstance(x, str) for x in v)) for k, v in values.items())):
+                return True
+            raise ProtocolError('invalid answer')
         if kind == 'join' and (fields(msg, 'type', 'requestId') or
                                (fields(msg, 'type', 'requestId', 'captions') and type(msg['captions']) is bool)):
             if self.joined or self.joining:
@@ -149,6 +163,13 @@ class Phone:
             if all(fields(i, 'requestId', 'project', 'question', 'createdAt') and route(i['requestId']) and
                    isinstance(i['project'], str) and isinstance(i['question'], str) and type(i['createdAt']) is int and
                    0 <= i['createdAt'] <= 2**53 - 1 for i in msg['items']):
+                return
+        elif kind == 'form' and fields(msg, 'type', 'requestId', 'form') and route(rid):
+            if msg['form'] is None or (isinstance(msg['form'], dict) and isinstance(msg['form'].get('sections'), list)):
+                return
+        elif kind == 'answer' and fields(msg, 'type', 'requestId', 'status', 'message') and route(rid):
+            if (msg['status'] in ('accepted', 'invalid', 'stale', 'busy', 'uncertain') and
+                    isinstance(msg['message'], str) and len(msg['message']) <= 8192):
                 return
         elif kind == 'error' and fields(msg, 'type', 'code') and route(msg['code']):
             self.joining = None

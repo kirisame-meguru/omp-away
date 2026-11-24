@@ -170,6 +170,17 @@ export async function connectRuntime(settings:Settings, report:(code:string)=>vo
 			if (closed || !online.has(device)) return;
 			switch (message.type) {
 				case "list": inbox(device); break;
+				case "form":
+					control(device,{type:"form",requestId:message.requestId,
+						form:requests.get(message.requestId)?.audience.has(device) ? core.form(message.requestId) : null});
+					break;
+				case "answer": {
+					const result=requests.get(message.requestId)?.audience.has(device)
+						? await core.answer(message.requestId,message.values,message.notes)
+						: {status:"stale" as const,message:"This request is no longer available."};
+					control(device,{type:"answer",requestId:message.requestId,...result});
+					break;
+				}
 				case "silence": if (requests.get(message.requestId)?.audience.has(device)) core.silence(message.requestId); break;
 				case "join": await join(device,message.requestId,message.captions===true); break;
 				case "hangup": if (active?.device===device && active.id===message.requestId) active.decision.close(); break;

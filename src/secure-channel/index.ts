@@ -2,14 +2,19 @@ import { spawn } from 'node:child_process';
 import { delimiter, isAbsolute } from 'node:path';
 import { Framer, frame, isRoute as route, mediaPacket, readMedia } from './framing';
 import { preferences, preferencePatch, type Preferences } from '../decisions/preferences';
+import type { TouchForm, TouchResult } from '../decisions/touch';
 
 export type PhoneControl =
   | { type: 'list' }
+  | { type: 'form'; requestId: string }
+  | { type: 'answer'; requestId: string; values: Record<string, unknown>; notes?: unknown[] }
   | { type: 'join'; requestId: string; captions?: boolean }
   | { type: 'silence' | 'hangup'; requestId: string }
   | { type: 'played'; requestId: string; mark: string };
 export type DesktopControl =
   | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number }[] }
+  | { type: 'form'; requestId: string; form: TouchForm | null }
+  | ({ type: 'answer'; requestId: string } & TouchResult)
   | { type: 'joined' | 'ended'; requestId: string }
   | { type: 'mark'; requestId: string; mark: string }
   | { type: 'transcript'; requestId: string; role: 'user' | 'assistant'; text: string; final: boolean }

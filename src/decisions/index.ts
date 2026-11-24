@@ -3,6 +3,7 @@ import { createCall, type DecisionCall } from "./call";
 import { type DecisionForm, prepare } from "./form";
 import { preferences, type Preferences } from "./preferences";
 import type { Exchange, SideContext } from "./side";
+import { touchForm, touchValues, touchNotes, type TouchForm, type TouchResult } from "./touch";
 
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
@@ -73,13 +74,40 @@ export class DecisionCoordinator {
 		if(wait===0) ring(); else e.cancelTimer=this.#clock.after(wait,ring);
 	}
 	list():InboxItem[] { return Array.from(this.#pending.values(),e=>({...e.item})); }
+	form(id:string):TouchForm|null {
+		const entry=this.#pending.get(id);
+		if(!entry || entry.submitted || this.#closed) return null;
+		const form={...touchForm(entry.ask.html,entry.form), optionNotes:entry.ask.supportsOptionNotes === true,
+			title:entry.ask.context?.title, description:entry.ask.context?.blockedWork, voice:entry.form.voiceAvailable};
+		return Buffer.byteLength(JSON.stringify(form))<=60_000 ? form : null;
+	}
+	async answer(id:string,input:unknown,noteInput:unknown=[]):Promise<TouchResult> {
+		const entry=this.#pending.get(id);
+		if(!entry || entry.submitted || this.#closed) return {status:"stale",message:"This request is no longer available."};
+		if(this.#active?.entry===entry) return {status:"busy",message:"End the voice interaction before submitting by touch."};
+		const checked=touchValues(entry.form,input);
+		if("error" in checked) return {status:"invalid",message:checked.error};
+		const notes=touchNotes(entry.form,checked.values,noteInput);
+		if(!notes || notes.length && !entry.ask.supportsOptionNotes) return {status:"invalid",message:"Option notes are invalid or unsupported by this desktop."};
+		// Reserve before awaiting: duplicate taps/devices cannot dispatch a second answer.
+		entry.submitted=true;
+		this.silence(id);
+		try {
+			const result=await entry.ask.submitConfirmed(id,checked.values,notes);
+			if(result==="accepted") {
+				if(this.#pending.get(id)===entry) this.end(id);
+				return {status:"accepted",message:"Answer submitted."};
+			}
+		} catch { /* A partially dispatched answer must never be retried automatically. */ }
+		return {status:"uncertain",message:"Submission could not be confirmed. Check the desktop before answering again."};
+	}
 	silence(id:string):boolean {
 		const e=this.#pending.get(id); if(!e) return false;
 		e.silenced=true; e.cancelTimer?.(); e.cancelTimer=undefined; return true;
 	}
 	join(id:string):DecisionCall|undefined {
 		const entry=this.#pending.get(id);
-		if(this.#active || !entry || entry.submitted || this.#closed) return;
+		if(this.#active || !entry || entry.submitted || this.#closed || !entry.form.voiceAvailable) return;
 		this.silence(id);
 		const call=createCall({form:entry.form,ctx:entry.ctx,history:entry.history,
 			close:()=>{if(this.#active?.call===call) this.#active=undefined;},

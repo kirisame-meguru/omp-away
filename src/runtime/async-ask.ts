@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { PendingAsk, Values } from "../index";
+import type { AnswerNote, PendingAsk, Values } from "../index";
 import type { Admin } from "./index";
 import { isRoute } from "../secure-channel/framing";
 
@@ -12,7 +12,8 @@ export type QuestionSubmission =
 export interface AsyncQuestion {
 	readonly id: string; readonly requestId: string; readonly toolCallId: string; readonly title: string;
 	readonly html: string; readonly blockedWork: string; readonly createdAt: number;
-	submitConfirmed(values: Values): QuestionSubmission;
+	readonly supportsOptionNotes?: boolean;
+	submitConfirmed(values: Values, notes?: AnswerNote[]): QuestionSubmission;
 }
 export interface QuestionSource {
 	readonly version: 1; readonly sessionId: string; readonly signal: AbortSignal;
@@ -101,10 +102,12 @@ export function connectAsyncQuestions(
 							pending: {
 								requestId, toolCallId: item.toolCallId, deduplicationKey: `async:${requestId}`,
 								html: item.html, createdAt: item.createdAt, context: { title: item.title, blockedWork: item.blockedWork },
-								async submitConfirmed(id, values) {
+								supportsOptionNotes: item.supportsOptionNotes === true,
+								async submitConfirmed(id, values, notes = []) {
 									if (id !== requestId || !owned() || !offer.active || next.offers.get(item.id) !== offer) return "stale";
+									if (notes.length && item.supportsOptionNotes !== true) return "stale";
 									let result: unknown;
-									try { result = submit(values); } catch { result = { kind: "uncertain" }; }
+									try { result = submit(values, notes); } catch { result = { kind: "uncertain" }; }
 									retire(offer);
 									// Canonical submission may synchronously remove this offer; keep its own receipt.
 									const receipt: QuestionSubmission = outcome(result) ? result : { kind: "uncertain" };
