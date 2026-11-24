@@ -200,7 +200,12 @@ class CallAudioTest {
                     if (InstrumentationRegistry.getArguments().getString("captions") == "on") {
                         assertTrue("Live transcript snapshots never arrived", partialCaptions.get() > 0)
                         assertTrue("Both caller turns must complete", callerFinals.get() >= 2)
-                        instrumentation.runOnMainSync { assertTrue("Recognized confirmation is missing from the real caption view", callerView.text.contains("yeah", ignoreCase = true)) }
+                        instrumentation.runOnMainSync {
+                            assertTrue("The confirmation caption must be final", callerFinal)
+                            assertTrue("The recognized confirmation must not be empty", callerText.isNotBlank())
+                            assertEquals("The caption view must show the actual recognized confirmation",
+                                "You: $callerText", callerView.text.toString())
+                        }
                     }
                     assertTrue("Speaking phase never started", speakingTransitions.get() > 0)
                     assertTrue("Speaking phase did not return to listening after hardware playout", listeningTransitions.get() > 0)

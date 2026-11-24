@@ -120,7 +120,7 @@ class Peer:
             raise RuntimeError('no Opus encoder')
         transceiver.setCodecPreferences(codecs)
         self.events = self.pc.createDataChannel('oai-events')
-        # The authenticated SDK sideband is the sole owner of events; never bridge SCTP to the phone.
+        # The host owns live lifecycle/delegation. SCTP carries startup context only, never phone controls.
         self.opened = asyncio.Event()
         self.events.on('open', self.opened.set)
         if trace is not None:
@@ -157,6 +157,21 @@ class Peer:
         if self.drain is None or self.pc.getTransceivers()[0].currentDirection != 'sendrecv':
             raise ValueError('missing bidirectional negotiated track')
         await asyncio.wait_for(self.opened.wait(), 25)
+
+    def append_context(self, text):
+        if not isinstance(text, str) or self.events.readyState != 'open':
+            raise ValueError('context requires an open data channel')
+        data = text.encode('utf-8')
+        start = 0
+        while start < len(data):
+            end = min(start + 500, len(data))
+            while end < len(data) and data[end] & 0xC0 == 0x80:
+                end -= 1
+            self.events.send(json.dumps({
+                'type': 'session.context.append', 'channel': 'commentary',
+                'content': [{'type': 'input_text', 'text': data[start:end].decode('utf-8')}],
+            }, ensure_ascii=False, separators=(',', ':')))
+            start = end
 
     def phone_pcm(self, frame):
         self.source.push(frame)
@@ -225,9 +240,13 @@ async def main():
                 peer.phone_pcm(data)
             elif kind == JSON and not answered:
                 message = json.loads(data)
-                if set(message) != {'type', 'sdp'} or message['type'] != 'answer' or not isinstance(message['sdp'], str):
+                if (set(message) not in ({'type', 'sdp'}, {'type', 'sdp', 'context'}) or
+                        message['type'] != 'answer' or not isinstance(message['sdp'], str) or
+                        'context' in message and not isinstance(message['context'], str)):
                     raise ValueError('expected answer')
                 await peer.answer(message['sdp'])
+                if 'context' in message:
+                    peer.append_context(message['context'])
                 answered = True
                 control({'type': 'ready'})
             else:

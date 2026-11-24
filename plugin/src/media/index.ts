@@ -1,98 +1,71 @@
-import type { ExtensionContext } from '@oh-my-pi/pi-coding-agent';
-import { VERSION } from '@oh-my-pi/pi-utils';
-import { LiveTransport, buildSessionContextAppend, chunkLiveContext } from './live-sdk.generated.mjs';
+import type { ExtensionContext, ExtensionLiveSession } from '@oh-my-pi/pi-coding-agent';
+import type { QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
-import { VoiceSession, type VoiceCallbacks } from './session';
-import { openVoiceTrace } from './trace';
-import type { CallLog } from './call-log';
-import voiceInstructions from '../../prompts/voice.md' with { type:'text' };
 
-export interface VoiceOptions extends VoiceCallbacks {
-	ctx: Pick<ExtensionContext, 'modelRegistry' | 'sessionManager'>;
-	brief: string;
-	signal?: AbortSignal;
-	log?: CallLog;
-	onEnd(reason?: Error): void;
+export type VoiceContext=ExtensionContext & {awayContext?:(content:string)=>Promise<void>};
+export interface VoiceOptions {
+	ctx: VoiceContext;
+	call: QuestionCall;
+	onCaption?(role:'user'|'assistant', text:string, final:boolean):void;
+	onAudio(pcm:Uint8Array):void|Promise<void>;
+	onEnd(reason?:Error):void;
 }
 export interface VoiceCall {
-	sendPcm(pcm: Uint8Array): void;
-	sendSpeakable(text: string, instruction?: boolean): Promise<void>;
-	close(): Promise<void>;
+	sendPcm(pcm:Uint8Array):void;
+	close():Promise<void>;
 }
 
-/** Open one desktop-authenticated Codex call. The peer owns only ephemeral WebRTC
- * keys and the signaled SDP. Neither device nor media process receives the login. */
-export async function openVoice(options: VoiceOptions): Promise<VoiceCall> {
-	const { ctx, brief, signal, onEnd, onTranscript, onAudio, onInterrupt, onSpeechStarted, onCaption, log } = options;
-	signal?.throwIfAborted();
-	if (typeof brief !== 'string' || !brief.trim() || brief.length > 8192) throw new Error('Missing or oversize decision brief');
-	const sessionId = ctx.sessionManager.getSessionId(), authStorage = ctx.modelRegistry.authStorage;
-	if (!sessionId || !authStorage) throw new Error('The current desktop session cannot authenticate Codex voice');
-	const trace = openVoiceTrace(process.env.OMP_AWAY_VOICE_TRACE);
-	const controller = new AbortController(), ended = Promise.withResolvers<never>();
-	void ended.promise.catch(() => {});
-	let peer: MediaPeer | undefined, transport: LiveTransport | undefined;
-	let cleanup: Promise<void> | undefined;
-	const abort = () => { void close() };
-	let timer = setTimeout(() => { void close(new Error('Desktop voice setup timed out')) }, 60_000);
-	const session = new VoiceSession({ onTranscript, onAudio, onInterrupt, onSpeechStarted, onCaption }, message => {
-		if (!transport || controller.signal.aborted) return Promise.reject(new Error('Voice is closed'));
-		return transport.send(message);
-	}, reason => { void close(reason) }, trace, log);
-	function close(reason?: Error): Promise<void> {
-		if (cleanup) return cleanup;
-		const done = Promise.withResolvers<void>(); cleanup = done.promise;
-		clearTimeout(timer); signal?.removeEventListener('abort', abort); session.stop();
-		trace?.close();
-		controller.abort(); ended.reject(reason ?? new Error('Voice closed'));
-		void Promise.allSettled([peer?.close(), transport?.close()]).then(() => done.resolve());
-		try { onEnd(reason) } catch { /* Consumer failure must not prevent resource cleanup. */ }
+export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
+	const {ctx,call}=options;
+	call.signal.throwIfAborted();
+	if (typeof ctx.startLive !== 'function' || typeof ctx.awayContext !== 'function') throw Error('This host does not expose native remote live mode');
+	const context='<omp-away-plugin>\nThe user has answered your call. Continue this conversation in native live mode using the handset for audio. Discuss the pending question naturally; do not invent a form submission or require a scripted confirmation.\n'+JSON.stringify({requestId:call.question.requestId,...call.question.context,html:call.question.html})+'\n</omp-away-plugin>';
+	let live:ExtensionLiveSession|undefined,peer:MediaPeer|undefined;
+	let closed=false,muted=false,cleanup:Promise<void>|undefined;
+	let output=Promise.resolve(),queued=0;
+	const ended=Promise.withResolvers<never>();
+	void ended.promise.catch(()=>{});
+	const abort=()=>{void close()};
+	function close(reason?:Error):Promise<void> {
+		if(cleanup) return cleanup;
+		closed=true;clearTimeout(timer);call.signal.removeEventListener('abort',abort);
+		ended.reject(reason??Error('Voice call ended'));
+		cleanup=Promise.resolve().then(async()=>{
+			await Promise.allSettled([live?.stop(),peer?.close()]);
+		});
+		try {options.onEnd(reason)} catch {}
 		return cleanup;
 	}
-	signal?.addEventListener('abort', abort, { once: true });
-	let stage = 'Desktop voice requires stock omp 19.1.0';
+	const timer=setTimeout(()=>{void close(Error('Voice setup timed out'))},60000).unref();
+	call.signal.addEventListener('abort',abort,{once:true});
 	async function start() {
-		if (VERSION !== '19.1.0') throw new Error('Unsupported host SDK');
-		controller.signal.throwIfAborted();
-		stage = 'Unable to start the desktop media helper; provision plugin/media/.venv with uv';
-		// WebRTC carries the microphone; output comes only from the ordered sideband.
-		// Mixing its PCM with independently timed RTP can clip or duplicate a turn.
-		peer = spawnPeer(() => {}, () => { void close(new Error('Desktop media peer unavailable')) }, process.env.OMP_AWAY_VOICE_TRACE ? trace.sctp : undefined);
-		const sdpOffer = await peer.offer;
-		controller.signal.throwIfAborted();
-		if (!sdpOffer) throw new Error('Missing media offer');
-		stage = 'Codex voice signaling failed; check the desktop Codex login and network';
-		transport = new LiveTransport({ authStorage, sessionId, sdpOffer, signal: controller.signal, voice: 'sol',
-			instructions: voiceInstructions,
-			callbacks: { onEvent: e => { void session.event(e) }, onOutputLevel() {} },
+		peer=spawnPeer(pcm=>{
+			if(closed) return;
+			if(++queued>250) {void close(Error('Phone audio transport stalled'));return}
+			output=output.then(()=>closed?undefined:options.onAudio(pcm)).catch(()=>{void close(Error('Phone audio unavailable'))}).finally(()=>{--queued});
+		},()=>{void close(Error('Media peer unavailable'))});
+		const sdpOffer=await peer.offer;
+		if(closed) return;
+		// Release a native Ask before live delegation needs the same agent loop.
+		// The phone call retains its route until the native live controller stops.
+		await call.takeOver();
+		if(closed) return;
+		await ctx.awayContext!(context);
+		if(closed) return;
+		live=await ctx.startLive!({
+			sdpOffer,
+			onPhase:phase=>{muted=phase==='muted'},
+			onTranscript:transcript=>{if(!closed) options.onCaption?.(transcript.role,transcript.text,transcript.final)},
+			onEnd:reason=>{void close(reason)},
 		});
-		await transport.connect(); controller.signal.throwIfAborted();
-		// Signaling alone did not reliably ground the live speaker. Supply its
-		// instructions and form data on the supported, non-spoken context stream.
-		for (const chunk of chunkLiveContext(voiceInstructions))
-			await transport.send(buildSessionContextAppend(chunk,'commentary'));
-		for (const chunk of chunkLiveContext(brief))
-			await transport.send(buildSessionContextAppend(chunk,'commentary'));
-		controller.signal.throwIfAborted();
-		if (!transport.sdpAnswer) throw new Error('Missing remote media answer');
-		stage = 'Codex did not establish the bidirectional Opus peer';
-		await peer.answer(transport.sdpAnswer); controller.signal.throwIfAborted();
-		trace?.step('voice.ready');
+		if(closed) {await live.stop();return}
+		await peer.answer(live.sdpAnswer,context);
 		clearTimeout(timer);
-		timer = setTimeout(() => { void close(new Error('Desktop voice call duration limit reached')) }, 15 * 60_000);
-		timer.unref();
 	}
-	try { await Promise.race([start(), ended.promise]) }
-	catch {
-		const reason = new Error(stage); await close(reason); throw reason;
-	}
+	try {await Promise.race([start(),ended.promise]);call.signal.throwIfAborted();if(closed) throw Error('Voice call ended')}
+	catch(error) {await close(error instanceof Error?error:Error('Voice unavailable'));throw error}
 	return {
-		sendPcm(pcm) {
-			if (controller.signal.aborted) throw new Error('Voice closed');
-			try { session.input(pcm); peer!.sendPcm(pcm) }
-			catch { const reason = new Error('Invalid or stalled phone audio'); void close(reason); throw reason }
-		},
-		sendSpeakable: (text, instruction) => session.sendSpeakable(text, instruction),
-		close: () => close(),
+		sendPcm(pcm) {if(closed) throw Error('Voice closed');if(!muted) peer!.sendPcm(pcm)},
+		close:()=>close(),
 	};
 }

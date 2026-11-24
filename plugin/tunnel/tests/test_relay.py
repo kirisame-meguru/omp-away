@@ -70,10 +70,19 @@ async def close_tls_server(server):
                 for result in results:
                     if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                         raise result
-        await server.close()
-        # aiohttp BaseSite.stop() closes its asyncio.Server but does not await
-        # wait_closed(); HTTP handler shutdown cannot see unfinished TLS handshakes.
-        await asyncio.gather(*(listener.wait_closed() for listener in listeners))
+        # Python 3.11 Server.wait_closed() returns immediately once _sockets
+        # is None, even if accepted transports still contribute to _active_count.
+        # Register its drain waiters before aiohttp closes the listeners.
+        drains = [asyncio.create_task(listener.wait_closed()) for listener in listeners]
+        try:
+            await asyncio.sleep(0)
+            await server.close()
+            # HTTP handler shutdown cannot see unfinished TLS handshakes.
+            await asyncio.gather(*drains)
+        finally:
+            for drain in drains:
+                drain.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
 
 
 class LocalHost:
@@ -276,6 +285,7 @@ class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
                         server = TestServer(web.Application(), scheme='https', host='127.0.0.1')
                         await server.start_server(ssl=tls, access_log=None)
                         listener = next(iter(server.runner.sites))._server
+                        descriptors = [sock.fileno() for sock in listener.sockets]
                         peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         peer.setblocking(False)
                         closing = None
@@ -290,12 +300,19 @@ class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
                                     while listener.is_serving():
                                         await asyncio.sleep(0)
                                 done, _ = await asyncio.wait({closing}, timeout=.02)
-                                self.assertFalse(done, 'Cleanup returned while its accepted TLS socket was still live')
+                                if done:
+                                    await closing
+                                    self.assertEqual(listener._active_count, 0,
+                                                     'Cleanup returned while its accepted TLS socket was still live')
                             peer.close()
                             if closing is None:
                                 closing = asyncio.create_task(close_tls_server(server))
                             await closing
                             self.assertEqual(listener._active_count, 0)
+                            self.assertFalse(listener.is_serving())
+                            self.assertEqual(listener.sockets, ())
+                            accepts = getattr(loop, '_accept_futures', {})
+                            self.assertTrue(all(fd not in accepts for fd in descriptors))
                         finally:
                             peer.close()
                             if closing is not None and not closing.done():

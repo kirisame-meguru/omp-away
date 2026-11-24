@@ -6,4 +6,6 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "omp-away"
-include(":app")
+include(":app", ":radiance")
+// Opt in to the standalone visual study without configuring it for normal app builds.
+if (providers.gradleProperty("includePrototype").orNull == "true") include(":prototype")

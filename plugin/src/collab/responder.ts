@@ -8,6 +8,7 @@ export interface Responder {
 	end(reqId: number): void;
 	clear(): void;
 	submitConfirmed(requestId: string, values: FormValues): Promise<Dispatch>;
+	withdraw(requestId: string): Promise<Dispatch>;
 }
 
 interface Call {
@@ -19,7 +20,7 @@ interface Call {
 }
 
 /** One exclusive native Ask in one host generation. The caller clears on tool end, loss, or generation change. */
-export function createResponder(reply: (id: number, value: string) => Promise<boolean>): Responder {
+export function createResponder(reply: (id: number, value?: string) => Promise<boolean>): Responder {
 	let current: Call | undefined;
 
 	function clear() {
@@ -95,6 +96,12 @@ export function createResponder(reply: (id: number, value: string) => Promise<bo
 			delete call.open;
 		},
 		clear,
+		async withdraw(id: string): Promise<Dispatch> {
+			const call = current;
+			if (!call || call.id !== id || !call.open || call.open.sent || call.submission) return "stale";
+			call.open.sent = true;
+			return await reply(call.open.reqId) ? "accepted" : "stale";
+		},
 		async submitConfirmed(id: string, values: FormValues): Promise<Dispatch> {
 			const call = current;
 			if (!call || call.id !== id || !call.open || call.submission) return "stale";

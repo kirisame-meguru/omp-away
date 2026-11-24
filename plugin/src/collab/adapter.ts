@@ -11,7 +11,7 @@ interface Callbacks {
 }
 export interface Adapter {
   readonly port: number;
-  reply(reqId: number, value: string): Promise<boolean>;
+  reply(reqId: number, value?: string): Promise<boolean>;
   close(): Promise<void>;
 }
 interface Ticket { local: number; wire: number; submitted: boolean }
@@ -187,7 +187,7 @@ export async function startAdapter(port: number, sessionId: string, callbacks: C
     port: server.port!,
     async reply(id, value) {
       const c = host, ticket = c?.byLocal.get(id);
-      if (!c?.room || c.phase !== 'ready' || !ticket || ticket.submitted || typeof value !== 'string') return false;
+      if (!c?.room || c.phase !== 'ready' || !ticket || ticket.submitted || (value !== undefined && typeof value !== 'string')) return false;
       ticket.submitted = true;
       try {
         await c.room.current(c.abort.signal);

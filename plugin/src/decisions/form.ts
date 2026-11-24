@@ -28,7 +28,7 @@ export function prepare(html: string, context?: QuestionContext): DecisionForm |
 		const question=questions.get(item.field.name) ?? item.field.name;
 		return item.kind==="choice" ? `${question}\n${item.rows.join("; ")}` : question;
 	}).join("\n");
-	// Do not offer a voice call that would have to silently omit some choices.
+	// Legacy scripted voice budgets never exclude a valid touch form or native-live call.
 	const voiceSupported=native.fields.length<=32 && budget(description,16_384) && budget(opening,8192);
 	const display=questionDisplay(parsed);
 	return {native,questions,description,opening,display,voiceSupported,question:displayExcerpt((display?.fields.map(f=>f.label) ?? fields.map(f=>f.question || "Question")).join("; "),256)};
@@ -36,8 +36,14 @@ export function prepare(html: string, context?: QuestionContext): DecisionForm |
 const record = (x:unknown): x is Record<string,unknown> => !!x && typeof x === "object" && !Array.isArray(x);
 const key = (s:string) => s.toLowerCase().normalize("NFC").replace(/\s+/g," ").trim();
 const audible=(s:string)=>key(s).match(/[\p{L}\p{N}]+/gu)?.join(" ") ?? "";
+const acronym=/^[A-Z]{2,8}$/;
+function indistinguishable(left:string,right:string) {
+	const a=audible(left),b=audible(right);
+	return a===b || ((acronym.test(left)||acronym.test(right)) && a.replaceAll(" ","")===b.replaceAll(" ",""));
+}
 function mentioned(evidence:string, label:string) {
-	const atom = key(label).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+	// ASR can split uppercase initialisms without changing their letters.
+	const atom = acronym.test(label) ? key(label).split("").join(" *") : key(label).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
 	return !!atom && new RegExp(`(?:^|[^\\p{L}\\p{N}])${atom}(?:$|[^\\p{L}\\p{N}])`,"u").test(key(evidence));
 }
 
@@ -94,7 +100,7 @@ export function extractDraft(form: DecisionForm, utterance: string, data:unknown
 				const label = (option && spansText(option.label).trim()) || v;
 				if (!(option ? mentioned(evidence,label) || mentioned(evidence,v) : evidence.includes(v))) return;
 				// Reject audibly indistinguishable options; a codebook is not a voice decision.
-				if(option && item.enabled.some(o=>o!==option && audible(spansText(o.label).trim() || o.value)===audible(label))) return;
+				if(option && item.enabled.some(o=>o!==option && indistinguishable(spansText(o.label).trim() || o.value,label))) return;
 				pieces.push(label);
 			}
 			answer=Array.isArray(value) ? Object.freeze(pieces) : pieces[0] ?? null;

@@ -3,14 +3,19 @@ import { delimiter, isAbsolute } from 'node:path';
 import { Framer, frame, isRoute as route, mediaPacket, readMedia } from './framing';
 import { preferences, preferencePatch, type Preferences } from '../decisions/preferences';
 import type { QuestionDisplay } from '../decisions/display';
+import type { TouchForm, TouchResult } from '../decisions/touch';
 
 export type PhoneControl =
   | { type: 'list'; details?: boolean }
+  | { type: 'form'; requestId: string }
+  | { type: 'answer'; requestId: string; values: Record<string, unknown>; notes?: unknown[] }
   | { type: 'join'; requestId: string; captions?: boolean }
   | { type: 'silence' | 'hangup'; requestId: string }
   | { type: 'played'; requestId: string; mark: string };
 export type DesktopControl =
   | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number; session?: string }[] }
+  | { type: 'form'; requestId: string; form: TouchForm | null }
+  | ({ type: 'answer'; requestId: string } & TouchResult)
   | { type: 'question'; requestId: string; display: QuestionDisplay }
   | { type: 'proposal'; requestId: string; text: string }
   | { type: 'joined' | 'ended'; requestId: string }

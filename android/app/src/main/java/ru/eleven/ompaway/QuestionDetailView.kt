@@ -1,11 +1,9 @@
 package ru.eleven.ompaway
 
 import android.content.Context
-import android.graphics.Typeface
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.TextView
 
 /** Plain text only: no HTML, editable controls, choice listeners, or submission capabilities. */
 internal class QuestionDetailView(context: Context) : ScrollView(context) {
@@ -13,7 +11,13 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
     private var request: Pending? = null
     private var shown: QuestionDisplay? = null
     private var fresh = false
-    init { isFillViewport = true; addView(body); contentDescription = "Read-only question and options" }
+    init {
+        isFillViewport = true; addView(body); contentDescription = "Read-only question and options"
+        isNestedScrollingEnabled = false
+        background = RadianceUi.surface(context, 0x40181824, 18)
+        val padding = RadianceUi.dp(context, 14)
+        body.setPadding(padding, padding, padding, padding)
+    }
 
     fun bind(item: Pending, display: QuestionDisplay?, verified: Boolean) {
         val safeDisplay = if (verified) display else null
@@ -46,12 +50,8 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
         if (switched || !verified) scrollTo(0, 0)
     }
 
-    private fun label(value: String, heading: Boolean = false) = TextView(context).apply {
-        text = value; textSize = if (heading) 18f else 17f
-        textDirection = View.TEXT_DIRECTION_FIRST_STRONG
-        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-        isAccessibilityHeading = heading
-        setPadding(0, (8 * resources.displayMetrics.density).toInt(), 0, 0)
-        if (heading) setTypeface(typeface, Typeface.BOLD)
-    }.also { body.addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
+    private fun label(value: String, heading: Boolean = false) =
+        RadianceUi.text(context, value, if (heading) 18 else 17, heading).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }.also { body.addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
 }

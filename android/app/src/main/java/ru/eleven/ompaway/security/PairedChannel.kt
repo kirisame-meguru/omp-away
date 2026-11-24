@@ -24,6 +24,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import org.json.JSONArray
 import ru.eleven.ompaway.QuestionDisplay
 import ru.eleven.ompaway.decodeQuestionDisplay
 
@@ -35,6 +36,8 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         fun onVerify(emoji: String) {}
         fun onReady() {}
         fun onInbox(items: List<InboxItem>) {}
+        fun onForm(requestId: String, form: JSONObject?) {}
+        fun onAnswer(requestId: String, status: String, message: String) {}
         fun onQuestion(requestId: String, display: QuestionDisplay?) {}
         fun onProposal(requestId: String, text: String) {}
         fun onJoined(requestId: String) {}
@@ -255,6 +258,20 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                 for (item in snapshot) s.pendingIds.add(item.requestId)
                 listener.onInbox(snapshot)
             }
+            "form" -> {
+                msg.fields("type", "requestId", "form")
+                val id = msg.text("requestId")
+                if (id in s.pendingIds)
+                    listener.onForm(id, if (msg.isNull("form")) null else msg.getJSONObject("form"))
+            }
+            "answer" -> {
+                msg.fields("type", "requestId", "status", "message")
+                val status = msg.text("status")
+                require(status in setOf("accepted", "invalid", "stale", "busy", "uncertain"))
+                val message = msg.get("message") as String
+                require(message.length <= 8192 && '\u0000' !in message)
+                listener.onAnswer(msg.text("requestId"), status, message)
+            }
             "question" -> {
                 msg.fields("type", "requestId", "display")
                 val id = msg.text("requestId")
@@ -310,6 +327,18 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     }
     private fun listMessage() = JSONObject().put("type", "list").apply { if (details.enabled) put("details", true) }
     fun list() = action { sendJson(it, listMessage()) }
+    fun form(requestId: String) = action { s -> if (requestId in s.pendingIds) command(s, "form", requestId) }
+    fun answer(requestId: String, values: JSONObject, notes: JSONArray): Boolean {
+        val s = ready ?: return false
+        if (closed.get()) return false
+        // Snapshot before the worker runs: editors remain owned by the main thread.
+        val bytes = JSONObject().put("type", "answer").put("requestId", requestId)
+            .put("values", values).put("notes", notes).toString().toByteArray()
+        if (bytes.size > 60_000) return false
+        val packet = frame(1, bytes)
+        post { current(s) { if (s === ready) checkNotNull(s.tls).send(packet) } }
+        return true
+    }
     fun join(requestId: String) = action { s ->
         if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId, captions = true) }
     }

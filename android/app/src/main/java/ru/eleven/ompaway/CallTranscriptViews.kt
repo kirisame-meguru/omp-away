@@ -9,8 +9,9 @@ internal class CallTranscriptViews(
     private val caller: TextView,
     private val assistant: TextView,
 ) {
-    fun update(ready: Boolean, speaking: Boolean, callerText: String, callerFinal: Boolean, assistantText: String, assistantFinal: Boolean) {
-        status.text = if (!ready) "Connecting audio…" else if (speaking) "Speaking…" else "Listening…"
+    fun update(ready: Boolean, speaking: Boolean, callerText: String, callerFinal: Boolean, assistantText: String,
+               assistantFinal: Boolean, thinking: Boolean = false) {
+        status.text = if (!ready) "Connecting audio…" else if (speaking) "Speaking…" else if (thinking) "Thinking…" else "Listening…"
         caller.visibility = if (callerText.isEmpty()) View.GONE else View.VISIBLE
         caller.text = (if (callerFinal) "You: " else "You (live): ") + callerText
         assistant.visibility = if (assistantText.isEmpty()) View.GONE else View.VISIBLE

@@ -24,7 +24,7 @@ function harness(write?: () => void | Promise<void>, caption?: () => void, log?:
 	}, async message => { sent.push(message) }, error => { failures.push(error) },undefined,log);
 	return {session,sent,starts,transcripts,audio,events,failures,captions};
 }
-test('isolated loud microphone frames do not interrupt work, but sustained speech binds its first frame',()=>{
+test('microphone energy waits for recognition while retaining the first sustained frame timestamp',async()=>{
 	const starts:number[]=[];
 	let now=100;
 	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now);
@@ -34,22 +34,44 @@ test('isolated loud microphone frames do not interrupt work, but sustained speec
 		expect(starts).toHaveLength(0);
 		now=200;
 		for(let i=0;i<3;i++){session.input(speech);now+=20}
+		expect(starts).toHaveLength(0);
+		now=900;
+		await session.event({type:'unknown',wireType:'input_audio_buffer.speech_started'});
 		expect(starts).toEqual([200]);
 	} finally {session.stop();clock.mockRestore()}
+});
+test('quieter caller audio remains intact during loud handset output',()=>{
+	let now=100;
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	const caller=new Uint8Array(960).fill(4), output=new Uint8Array(960).fill(64);
+	try {
+		expect(h.session.input(caller)).toBe(caller);
+		h.session.rtp(output);
+		for(let i=0;i<3;i++) {
+			expect(h.session.input(caller)).toBe(caller);
+			now+=20;
+		}
+		expect(caller.every(value=>value===4)).toBe(true);
+		expect(h.starts).toEqual([]);
+		now=501;
+		expect(h.session.input(caller)).toBe(caller);
+		expect(h.audio).toEqual([output]);
+		expect(h.failures).toEqual([]);
+	} finally {h.session.stop();clock.mockRestore()}
 });
 test('local transcript retains both speakers and unfinished turns without sending speech to logger sinks',async()=>{
 	const root=await mkdtemp(join(tmpdir(),'away-speech-log-'));
 	const info=vi.spyOn(logger,'info').mockImplementation(()=>{});
 	const log=await openCallLog(root,'request','session');
 	if(!log) throw Error('Transcript setup failed');
-	const h=harness(undefined,undefined,log);
+	const h=endpointHarness(undefined,undefined,log);
 	try {
 		h.session.input(speech);
-		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'Bl'}})!);
-		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'ue'}})!);
-		await h.session.event(final('user','Blue.'));
+		await h.partial('Bl',100,140);
+		await h.partial('ue',140,200);
+		await h.complete('Blue.',100,200);h.advance(75);
 		await h.session.event(final('assistant','Shall I use Blue?'));
-		await h.session.event(parseLiveServerEvent({type:'input_transcript.added',item:{text:'Yes, but'}})!);
+		await h.partial('Yes, but',300,400);
 		await h.session.event(parseLiveServerEvent({type:'output_transcript.added',item:{text:'Let me'}})!);
 		h.session.stop();
 		await Promise.all([log.close(),log.close()]);
@@ -59,23 +81,23 @@ test('local transcript retains both speakers and unfinished turns without sendin
 			{role:'user',phase:'delta',text:'Bl'},
 			{role:'user',phase:'delta',text:'ue'},
 			{role:'user',phase:'provider-final',text:'Blue.'},
-			{role:'user',phase:'resolved-provider',text:'Blue.'},
+			{role:'user',phase:'resolved-silence',text:'Blue.'},
 			{role:'assistant',phase:'provider-final',text:'Shall I use Blue?'},
 			{role:'user',phase:'delta',text:'Yes, but'},
 			{role:'assistant',phase:'delta',text:'Let me'},
 		]);
-		expect(rows.find(row=>row.phase==='resolved-provider')?.bound).toBe(true);
+		expect(rows.find(row=>row.phase==='resolved-silence')?.bound).toBe(true);
 		expect(rows.filter(row=>row.kind==='closed')).toHaveLength(1);
 		for(const text of ['Blue.','Shall I use Blue?','Yes, but','Let me']) expect(JSON.stringify(info.mock.calls)).not.toContain(text);
 		expect(h.failures).toEqual([]);
-	} finally {h.session.stop();await log.close();info.mockRestore();await rm(root,{recursive:true,force:true})}
+	} finally {h.close();await log.close();info.mockRestore();await rm(root,{recursive:true,force:true})}
 });
 function frames(session:VoiceSession, frame:Uint8Array, count:number) {
 	for(let i=0;i<count;i++) session.rtp(frame);
 }
-function endpointHarness() {
+function endpointHarness(write?:()=>void|Promise<void>,caption?:()=>void,log?:CallLog) {
 	vi.useFakeTimers(); let now=0;
-	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness(write,caption,log);
 	return {...h,
 		async partial(text:string,start:number,end:number) {
 			await h.session.event(parseLiveServerEvent({type:'input_transcript.added',start_ms:start,end_ms:end,item:{text}})!);
@@ -90,6 +112,95 @@ function endpointHarness() {
 		close() {h.session.stop();clock.mockRestore();vi.useRealTimers()},
 	};
 }
+test('provider-final fragments preserve one correction until live microphone silence',async()=>{
+	const h=endpointHarness();
+	try {
+		h.advance(3,speech);
+		await h.partial('Wait stop.',100,200);
+		await h.complete('Wait stop.',100,200);
+		expect(h.transcripts).toEqual([]);
+		h.advance(10,speech);
+		await h.partial('I meant SQLite and Keep local.',300,600);
+		await h.complete('I meant SQLite and Keep local.',300,600);
+		expect(h.transcripts).toEqual([]);
+		expect(h.starts).toHaveLength(1);
+		h.advance(74);expect(h.transcripts).toEqual([]);
+		h.advance(1);
+		expect(h.transcripts).toEqual([['user','Wait stop. I meant SQLite and Keep local.',h.starts[0]]]);
+		expect(h.failures).toEqual([]);
+	} finally {h.close()}
+});
+test.each([false,true])('a finalized affirmative remains pending through its spoken qualifier, final=%s',async complete=>{
+	const h=endpointHarness();
+	try {
+		h.advance(3,speech);
+		await h.partial('Yes.',100,200);
+		await h.complete('Yes.',100,200);
+		h.advance(40);expect(h.transcripts).toEqual([]);
+		h.advance(3,speech);
+		await h.partial('But do not submit yet.',300,600);
+		if(complete)await h.complete('But do not submit yet.',300,600);
+		expect(h.transcripts).toEqual([]);
+		h.advance(75);
+		expect(h.transcripts).toEqual([['user','Yes. But do not submit yet.',h.starts[0]]]);
+		expect(h.starts).toHaveLength(1);
+	} finally {h.close()}
+});
+test.each(['overlapping-partial','regressing-final','earlier-onset'] as const)
+('unusable %s after a finalized affirmative cannot authorize its retained prefix',async scenario=>{
+	const h=endpointHarness();
+	try {
+		h.advance(3,speech);await h.partial('Yes.',100,200);await h.complete('Yes.',100,200);
+		if(scenario==='overlapping-partial')await h.partial('But wait.',150,200);
+		else if(scenario==='regressing-final')await h.complete('Wait.',100,150);
+		else await h.complete('Yes.',50,200);
+		if(h.failures.length)h.elapse(1500);else h.advance(75);
+		expect(h.transcripts).toEqual([]);
+	} finally {h.close()}
+});
+test('duplicate provider finals do not repeat words and a complete corrected final replaces the aggregate',async()=>{
+	const h=endpointHarness();
+	try {
+		h.advance(3,speech);
+		await h.partial('Wait.',100,200);
+		await h.complete('Wait.',100,200);
+		await h.complete('Wait.',100,200);
+		h.advance(3,speech);
+		await h.partial('Blue.',300,400);
+		await h.complete('Wait.',100,200); // A repeated prefix final cannot erase the newer partial.
+		await h.complete('Wait. Green.',100,400);
+		expect(h.transcripts).toEqual([]);
+		h.advance(75);
+		expect(h.transcripts).toEqual([['user','Wait. Green.',h.starts[0]]]);
+		expect(h.failures).toEqual([]);
+	} finally {h.close()}
+});
+test.each(['overlap','unscoped'])('an unusable provider-final continuation cannot retain an affirmative prefix: %s',async kind=>{
+	const h=endpointHarness();
+	try {
+		h.advance(3,speech);
+		await h.partial('Yes.',100,200);
+		await h.complete('Yes.',100,200);
+		expect(h.transcripts).toEqual([]);
+		if(kind==='overlap')await h.complete('but not yet',150,300);
+		else await h.session.event(final('user','but not yet'));
+		if(h.failures.length)h.elapse(1500);else h.advance(75);
+		expect(h.transcripts).toEqual([]);
+	} finally {h.close()}
+});
+test('quieter caller activity during playback cannot manufacture silence for a pending affirmative',async()=>{
+	const h=endpointHarness(), caller=new Uint8Array(960).fill(4);
+	try {
+		await h.partial('Yes',100,200);
+		for(let i=0;i<100;i++) {
+			h.session.rtp(speech);
+			h.advance(1,caller);
+		}
+		expect(h.transcripts).toEqual([]);
+		h.advance(75);
+		expect(h.transcripts).toEqual([['user','Yes',h.starts[0]]]);
+	} finally {h.close()}
+});
 test('silence endpoint completes missing finals and late overlapping finals cannot consume the next answer',async()=>{
 	const h=endpointHarness();
 	try {
@@ -128,11 +239,13 @@ test('silence endpoint needs live quiet microphone frames and is cancelled by ha
 		h.session.stop(); h.elapse(5000); expect(h.transcripts).toEqual([]);
 	} finally {h.close()}
 });
-test('provider final correction wins immediately and cancels the pending silence endpoint',async()=>{
+test('provider final replaces its partial correction but still waits for microphone silence',async()=>{
 	const h=endpointHarness();
 	try {
 		h.session.input(speech); await h.partial('Yeah',120,190);
-		await h.complete('No',100,200); h.advance(75);
+		await h.complete('No',100,200);
+		expect(h.transcripts).toEqual([]);
+		h.advance(75);
 		expect(h.transcripts).toEqual([['user','No',h.starts[0]]]);
 	} finally {h.close()}
 });
@@ -162,35 +275,35 @@ test('unscoped, malformed or oversize recognition cannot leave an affirmative pr
 	}
 });
 test('live captions coalesce deltas, replace provisional text with the final turn, and stop at hangup',async()=>{
-	vi.useFakeTimers(); const h=harness();
+	const h=endpointHarness();
 	try {
-		await h.session.event({type:'input_transcript.added',item:{text:'Cof'}});
-		await h.session.event({type:'input_transcript.added',item:{text:'fee'}});
+		await h.partial('Cof',100,140);
+		await h.partial('fee',140,200);
 		await h.session.event({type:'output_transcript.added',item:{text:'Tea?'}});
-		vi.advanceTimersByTime(100);
+		h.elapse(100);
 		expect(h.captions).toEqual([['user','Coffee',false],['assistant','Tea?',false]]);
 		expect(h.transcripts).toEqual([]);
-		await h.session.event(final('user','Coffee.'));
+		await h.complete('Coffee.',100,200);h.advance(75);
 		expect(h.captions.at(-1)).toEqual(['user','Coffee.',true]);
-		await h.session.event({type:'input_transcript.added',item:{text:'Yeah'}});
-		vi.advanceTimersByTime(100);
+		await h.partial('Yeah',300,400);
+		h.elapse(100);
 		expect(h.captions.at(-1)).toEqual(['user','Yeah',false]);
 		await h.session.event({type:'output_transcript.added',item:{text:'More'}});
 		const count=h.captions.length;
 		h.session.stop(); vi.advanceTimersByTime(100);
 		expect(h.captions).toHaveLength(count);
-	} finally {h.session.stop();vi.useRealTimers()}
+	} finally {h.close()}
 });
 test('failed caption delivery cannot stop audio or discard a final caller decision',async()=>{
-	vi.useFakeTimers(); const h=harness(undefined,()=>{throw Error('Display unavailable')});
+	const h=endpointHarness(undefined,()=>{throw Error('Display unavailable')});
 	try {
-		await h.session.event({type:'input_transcript.added',item:{text:'Coffee'}});
-		vi.advanceTimersByTime(100);
-		await h.session.event(final('user','Coffee'));
+		await h.partial('Coffee',100,200);
+		h.elapse(100);
+		await h.complete('Coffee',100,200);h.advance(75);
 		h.session.rtp(speech);
 		expect(h.transcripts).toEqual([['user','Coffee',h.starts[0]]]);
 		expect(h.audio).toEqual([speech]); expect(h.failures).toEqual([]);
-	} finally {h.session.stop();vi.useRealTimers()}
+	} finally {h.close()}
 });
 test('audio reaches the handset before any assistant final or verification',async()=>{
 	const h=harness();
@@ -206,6 +319,31 @@ test('new speech instructions do not wait for a previous response to finish',asy
 		await h.session.event({type:'output_transcript.added',item:{text:'Previous reply'}});
 		void h.session.sendSpeakable('Coffee. Submit?',true);
 		expect(h.sent).toHaveLength(1);
+	} finally {h.session.stop()}
+});
+test('a validated readback has one speakable trigger after all preparation chunks',async()=>{
+	const h=harness(), instruction='Read the proposed answers: '+JSON.stringify({fields:[{field:'Note',answer:'careful '.repeat(180)}]});
+	try {
+		await h.session.sendSpeakable(instruction,true);
+		const context=h.sent.filter(message=>message.type==='session.context.append');
+		const preparation=context.filter(message=>message.channel==='commentary');
+		const speakable=context.filter(message=>message.channel==='speakable');
+		expect(preparation.length).toBeGreaterThan(1);
+		expect(preparation.flatMap(message=>message.content.map(part=>part.text)).join('')).toContain(instruction);
+		expect(speakable).toHaveLength(1);
+		expect(context.at(-1)).toBe(speakable[0]);
+		for(const message of context) for(const part of message.content) expect(Buffer.byteLength(part.text)).toBeLessThanOrEqual(500);
+		expect(h.failures).toEqual([]);
+	} finally {h.session.stop()}
+});
+test('interruption during readback preparation cannot release a stale speakable trigger',async()=>{
+	const h=harness();
+	try {
+		const pending=h.session.sendSpeakable('Proposed note: '+ 'careful '.repeat(180),true);
+		await h.session.event({type:'unknown',wireType:'input_audio_buffer.speech_started'});
+		await pending;
+		expect(h.sent.filter(message=>message.type==='session.context.append' && message.channel==='speakable')).toEqual([]);
+		expect(h.failures).toEqual([]);
 	} finally {h.session.stop()}
 });
 test('ordered audio deltas stream every frame without requiring an assistant transcript',async()=>{
@@ -275,17 +413,16 @@ test.each(['before','during'] as const)('microphone startup %s streaming cannot 
 	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
 });
 test('recognized caller speech discards queued old audio without erasing the confirmation onset',async()=>{
-	vi.useFakeTimers(); let now=0;
-	const clock=vi.spyOn(performance,'now').mockImplementation(()=>now), h=harness();
+	const h=endpointHarness();
 	try {
 		frames(h.session,speech,30); h.session.input(speech); const written=h.audio.length;
-		await h.session.event({type:'input_transcript.added',item:{text:'Yes'}});
+		await h.partial('Yes',100,200);
 		await h.session.event({type:'unknown',wireType:'turn.interrupted'});
-		now+=1000;vi.advanceTimersByTime(1000);
+		h.elapse(1000);
 		expect(h.audio).toHaveLength(written); expect(h.events).toEqual(['speech']);
-		await h.session.event(final('user','Yes.'));
+		await h.complete('Yes.',100,200);h.advance(75);
 		expect(h.transcripts).toEqual([['user','Yes.',h.starts[0]]]);
-	} finally {h.session.stop();clock.mockRestore();vi.useRealTimers()}
+	} finally {h.close()}
 });
 test('no audio reports a transport failure, without adding a silent retry or affecting a working stream',async()=>{
 	vi.useFakeTimers(); const missing=harness(), working=harness();
@@ -314,27 +451,30 @@ test('backpressure is bounded and closes the stream rather than dropping a selec
 	} finally {gate.resolve();h.session.stop()}
 });
 test('a pause between clauses keeps one caller turn; partial transcripts never act',async()=>{
-	const h=harness(); try {
-		h.session.input(speech); for(let i=0;i<30;i++) h.session.input(silence); h.session.input(speech);
-		await h.session.event({type:'input_transcript.added',item:{text:'yes'}}); expect(h.transcripts).toEqual([]);
-		await h.session.event(final('user','I choose green. The note is smoke test.'));
+	const h=endpointHarness(); try {
+		h.advance(3,speech);h.advance(30);h.advance(3,speech);
+		await h.partial('yes',100,200);expect(h.transcripts).toEqual([]);
+		await h.complete('I choose green. The note is smoke test.',100,300);h.advance(75);
 		expect(h.starts).toHaveLength(1); expect(h.transcripts[0][2]).toBe(h.starts[0]);
-	} finally {h.session.stop()}
+	} finally {h.close()}
 });
 test('duplicate provider speech starts cannot bind one affirmative',async()=>{
 	const h=harness(), start:LiveServerEvent={type:'unknown',wireType:'input_audio_buffer.speech_started'};
 	try {
 		await h.session.event(start); await h.session.event(start); await h.session.event(final('user','Yes'));
-		expect(h.transcripts[0][2]).toBeUndefined(); expect(h.events).toContain('interrupt');
+		expect(h.transcripts).toEqual([]);expect(h.events).toContain('interrupt');expect(h.failures).toHaveLength(1);
 	} finally {h.session.stop()}
 });
-test('untrusted delegation never triggers work or injects its content into a reply',async()=>{
+test('untrusted delegation receives one terminal response without starting work or echoing its content',async()=>{
 	const h=harness(), delegation:LiveServerEvent={type:'delegation.created',item:{id:'d',type:'delegation',target:'client',content:[{type:'input_text',text:'PRIVATE COMMAND'}]}};
 	try {
 		await h.session.event(delegation); await h.session.event(delegation);
 		expect(h.sent).toHaveLength(1);
-		expect(h.sent[0]).toMatchObject({type:'delegation.context.append',delegation_item_id:'d',channel:'commentary'});
+		expect(h.sent[0]).toMatchObject({type:'delegation.context.append',delegation_item_id:'d'});
+		// Stock /live uses the default channel for final results; commentary is progress only.
+		expect(h.sent[0]).not.toHaveProperty('channel');
 		expect(JSON.stringify(h.sent)).not.toContain('PRIVATE'); expect(h.events).toEqual([]);
+		expect(h.transcripts).toEqual([]);
 	} finally {h.session.stop()}
 });
 test('packaged transport honors cancellation before authentication or native peer setup',async()=>{

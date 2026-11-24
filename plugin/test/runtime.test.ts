@@ -88,6 +88,18 @@ test("proposal metadata comes from a validated draft, never assistant speech or 
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
+test("rejecting a readback clears its visual proposal without submitting",async()=>{
+	const f=await fixture(); try {
+		f.wire.onConnect!("phone"); f.offer("A"); await f.wire.onMessage("phone",{type:"list",details:true});
+		await f.join("phone","A"); const v=f.voices[0];
+		v.onSpeechStarted("draft"); v.onTranscript("user","Blue.","draft"); await tick();
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message).toMatchObject({text:"Private lane?: Blue"});
+		v.onSpeechStarted("reject"); v.onTranscript("user","No.","reject"); await tick();
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message).toEqual({type:"proposal",requestId:"A",text:""});
+		expect(f.submitted).toEqual([]);
+		expect(v.signal?.aborted).toBe(false);
+	} finally {await f.runtime.close()}
+});
 test("retirement wakes the birth audience even offline, only once, before shutdown",async()=>{
 	const f=await fixture();
 	f.offer("A"); f.wire.onConnect!("new-phone"); f.offer("B");
@@ -278,14 +290,41 @@ test("corrections replace the pending values and obsolete handset messages canno
 		expect(f.submitted).toEqual([["A",{lane:"red"}]]); expect(f.sideCalls).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-test("bound informational speech consults the coding session without a model delegation or a submission",async()=>{
+test("unbound or duplicate informational speech cannot start desktop work or submit",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
 		const v=f.voices[0], question="What were the two handover words from the session?";
 		v.onTranscript("assistant",question); v.onTranscript("user",question,"missing-onset");
 		v.onSpeechStarted("one"); v.onTranscript("user",question,"one"); v.onTranscript("user",question,"one");
-		await tick(); expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
-		expect(f.consultations[0].promptText).toContain(question); expect(f.spoken.slice(1)).toEqual([{text:"The private handover is silver maple.",instruction:false}]);
+		await tick(); expect(f.consultations).toHaveLength(0);
+		expect(f.spoken).toHaveLength(1);
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test("ordinary task questions leave the realtime voice to answer without a second desktop-model reply",async()=>{
+	const f=await fixture();
+	try {
+		f.wire.onConnect!("phone");f.offer("A");await f.join("phone","A");
+		const voice=f.voices[0];
+		voice.onSpeechStarted("context");
+		voice.onTranscript("user","What were we working on?","context");
+		voice.onTranscript("assistant","We are adding offline storage to the notes app.");
+		await tick();
+		expect(f.sideCalls).toEqual([]);
+		expect(f.spoken).toHaveLength(1);
+		expect(f.submitted).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test("a talkative context request classified as discussion does not queue a duplicate spoken answer",async()=>{
+	const f=await fixture();
+	Object.assign(f.ctx,{async runEphemeralTurn(){return {assistantMessage:{stopReason:"stop"},replyText:'{"clarify":true}'}}});
+	try {
+		f.wire.onConnect!("phone");f.offer("A");await f.join("phone","A");
+		const voice=f.voices[0];
+		voice.onSpeechStarted("context");
+		voice.onTranscript("user","I was making lunch and lost track. Remind me what this project is about.","context");
+		await tick();
+		expect(f.spoken).toHaveLength(1);
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
@@ -293,19 +332,16 @@ test.each([
 	"Ask the main model to come up with some other two drinks",
 	"Could you please ask the main model for two other drinks?",
 	"Please suggest two alternative drinks.",
-])("informational request answers the caller without approving the previous draft: %s",async request=>{
-	const answer="Water and orange juice are two other ideas; the form still lists Tea and Coffee.";
-	const f=await fixture(async()=>answer);
+])("direct informational conversation cannot approve the previous draft: %s",async request=>{
+	const f=await fixture();
 	try {
 		f.wire.onConnect!("phone");
 		f.offer("A",'<form><fieldset><legend>Which drink would you like?</legend><label><input type="radio" name="drink" value="tea">Tea</label><label><input type="radio" name="drink" value="coffee">Coffee</label></fieldset></form>');
 		await f.join("phone","A"); const v=f.voices[0];
 		v.onSpeechStarted("proposal"); v.onTranscript("user","Coffee","proposal"); await tick();
 		v.onSpeechStarted("request"); v.onTranscript("user",request,"request"); await tick();
-		expect(f.spoken.at(-1)).toEqual({text:answer,instruction:false});
-		expect(f.sideCalls).toEqual(["away-consult"]);
-		expect(f.consultations[0].tools).toBe(false);
-		expect(f.consultations[0].promptText).toContain(request);
+		expect(f.spoken).toHaveLength(2); // Opening and the original validated readback only.
+		expect(f.sideCalls).toEqual([]);
 		v.onSpeechStarted("yes"); v.onTranscript("user","Yes","yes"); await tick();
 		expect(f.submitted).toEqual([]);
 		v.onSpeechStarted("fresh"); v.onTranscript("user","Coffee","fresh"); await tick();
@@ -313,22 +349,93 @@ test.each([
 		expect(f.submitted).toEqual([["A",{drink:"coffee"}]]);
 	} finally {await f.runtime.close()}
 });
-async function realVoiceFixture(stateDir=""){
+async function realVoiceFixture(stateDir="",html?:string){
+	vi.useFakeTimers();let now=100;
+	const clock=vi.spyOn(performance,"now").mockImplementation(()=>now);
 	const sent:LiveClientMessage[]=[], failures:Error[]=[];
 	let session!:VoiceSession;
-	const f=await fixture(undefined,async options=>{
-		session=new VoiceSession(options,async m=>{sent.push(m)},err=>{failures.push(err);options.onEnd(err)},undefined,options.log);
-		return {sendPcm:pcm=>session.input(pcm),sendSpeakable:(text,instruction)=>session.sendSpeakable(text,instruction),async close(){session.stop()}};
-	},stateDir);
-	f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
-	return {...f,session,sent,failures};
+	try {
+		const f=await fixture(undefined,async options=>{
+			session=new VoiceSession(options,async m=>{sent.push(m)},err=>{failures.push(err);options.onEnd(err)},undefined,options.log);
+			return {sendPcm:pcm=>session.input(pcm),sendSpeakable:(text,instruction)=>session.sendSpeakable(text,instruction),async close(){session.stop()}};
+		},stateDir);
+		f.wire.onConnect!("phone"); f.offer("A",html); await f.join("phone","A");
+		const close=f.runtime.close.bind(f.runtime);
+		f.runtime.close=async()=>{try{await close()}finally{clock.mockRestore();vi.useRealTimers()}};
+		const capture=(count:number,frame=pcm)=>{
+			for(let i=0;i<count;i++){now+=20;f.wire.onPcm("phone",frame);vi.advanceTimersByTime(20)}
+		};
+		return {...f,session,sent,failures,capture,
+			advance(ms:number){now+=ms;vi.advanceTimersByTime(ms)},
+			async quiet(){
+				capture(75);
+				await tick();
+			},
+		};
+	} catch(error){clock.mockRestore();vi.useRealTimers();throw error}
 }
-test("asking for the options lists the enabled native labels without favoring one or proposing a change",async()=>{
+test.each([["Yes.","yes","Yes"],["No.","no","No"]])
+("real voice proposes the literal %s option, then a fresh Yes submits canonical values",async(answer,value,label)=>{
+	const html='<form><fieldset><legend>Continue?</legend><label><input type="radio" name="proceed" value="yes">Yes</label><label><input type="radio" name="proceed" value="no" checked>No</label></fieldset></form>';
+	const f=await realVoiceFixture("",html), speech=new Uint8Array(960).fill(8);
+	try {
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		f.session.rtp(speech); await tick();
+		const openingMessages=f.sent.length;
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:answer}}); await f.quiet();
+		expect(f.submitted).toEqual([]);
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message).toEqual({type:"proposal",requestId:"A",text:`Continue?: ${label}`});
+		const readback=f.sent.slice(openingMessages).map(message=>
+			message.type==="session.context.append" && message.channel==="commentary"
+				? message.content.map(part=>part.type==="input_text" ? part.text : "").join("") : "").join("");
+		expect(readback).toContain(`"answer":"${label}"`);
+		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"Okay."}});
+		expect(f.submitted).toEqual([]);
+		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
+		f.session.rtp(speech); await tick();
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes."}}); await f.quiet();
+		expect(f.submitted).toEqual([["A",{proceed:value}]]);
+		expect(f.invalidations).toEqual([["phone","A"]]);
+		expect(f.controls.at(-1)?.message).toEqual({type:"inbox",items:[]});
+		expect(f.failures).toEqual([]); expect(f.sideCalls).toEqual([]);
+		expect(f.voices[0].signal?.aborted).toBe(true);
+	} finally {await f.runtime.close()}
+});
+test("a provider-final Yes plus a continuing correction cannot submit the old native draft",async()=>{
+	const f=await realVoiceFixture(),speech=new Uint8Array(960).fill(8);
+	const event=async(text:string,start:number,end:number,final=false)=>{
+		await f.session.event(parseLiveServerEvent(final
+			? {type:"turn.done",turn:{role:"user",transcript:text,start_ms:start,end_ms:end}}
+			: {type:"input_transcript.added",item:{text},start_ms:start,end_ms:end})!);
+	};
+	Object.assign(f.ctx,{async runEphemeralTurn(){return {assistantMessage:{stopReason:"stop"},
+		replyText:'{"fields":[{"name":"lane","value":"red","evidence":"Red"}]}'}}});
+	try {
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		f.capture(3,speech);await event("Blue.",0,100);await event("Blue.",0,100,true);await f.quiet();
+		f.capture(3,speech);await event("Yes.",200,300);await event("Yes.",200,300,true);
+		f.capture(40);expect(f.submitted).toEqual([]);
+		f.capture(3,speech);await event("But change it to Red.",400,600);await event("But change it to Red.",400,600,true);
+		expect(f.submitted).toEqual([]);
+		await f.quiet();
+		expect(f.submitted).toEqual([]);
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message)
+			.toEqual({type:"proposal",requestId:"A",text:"Private lane?: Red"});
+		f.capture(3,speech);await event("Yes.",700,800);await event("Yes.",700,800,true);await f.quiet();
+		expect(f.submitted).toEqual([["A",{lane:"red"}]]);
+		expect(f.failures).toEqual([]);
+	} finally {await f.runtime.close()}
+});
+test("the direct voice receives all native option labels and discussing them cannot approve a proposal",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A");
 		const v=f.voices[0]; v.onSpeechStarted("proposal"); v.onTranscript("user","Blue.","proposal"); await tick();
 		v.onSpeechStarted("q"); v.onTranscript("user","What are the options?","q"); await tick();
-		expect(f.spoken.at(-1)).toEqual({text:"The options are: Blue; Red.",instruction:false});
+		expect(v.brief).toContain("Blue");expect(v.brief).toContain("Red");
+		expect(f.spoken).toHaveLength(2);
+		expect(f.sideCalls).toEqual([]);
 		v.onSpeechStarted("yes"); v.onTranscript("user","Yes.","yes"); await tick();
 		expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
@@ -341,7 +448,7 @@ test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah aft
 	try {
 		f.session.rtp(speech); await tick(); expect(f.audioOut).toEqual(["phone"]);
 		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
-		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Blue."}}); await tick();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Blue."}}); await f.quiet();
 		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
 		f.session.rtp(speech); await tick();
 		expect(f.submitted).toEqual([]); expect(f.controls.some(c=>c.message.type==="mark")).toBe(false);
@@ -349,7 +456,7 @@ test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah aft
 		await f.session.event({type:"unknown",wireType:"turn.interrupted"});
 		await f.session.event({type:"turn.done",turn:{role:"assistant",transcript:"Okay, submitting."}});
 		expect(f.submitted).toEqual([]);
-		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yeah..."}}); await tick();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yeah..."}}); await f.quiet();
 		expect(f.failures).toEqual([]); expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
 		expect(f.sideCalls).toEqual([]);
 		expect(f.voices[0].signal?.aborted).toBe(true);
@@ -365,16 +472,15 @@ test.each(["recorded","unwritable","write-failed"])("real voice accepts Yeah aft
 			const ended=rows.findIndex(row=>row.stage==="ended"), accepted=rows.findIndex(row=>row.reply==="accepted");
 			expect(ended).toBeGreaterThan(-1); expect(accepted).toBeGreaterThan(ended);
 			expect(rows.findIndex(row=>row.kind==="closed")).toBeGreaterThan(accepted);
-			expect(rows.filter(row=>row.phase==="resolved-provider").map(row=>row.text)).toEqual(["Blue.","Yeah..."]);
+			expect(rows.filter(row=>row.phase==="resolved-silence").map(row=>row.text)).toEqual(["Blue.","Yeah..."]);
 		} else if(mode==="unwritable") expect(files).toEqual([]);
 		else {expect(failure).toHaveBeenCalled();expect(files).toHaveLength(1);expect(files[0]).toEndWith(".active.jsonl")}
 	} finally {failure?.mockRestore();await f.runtime.close();await rm(root,{recursive:true,force:true})}
 });
 test("missing provider finals still require a new affirmative and submit the native draft exactly once",async()=>{
-	vi.useFakeTimers(); let now=0;
-	const clock=vi.spyOn(performance,"now").mockImplementation(()=>now), f=await realVoiceFixture();
+	const f=await realVoiceFixture();
 	const speech=new Uint8Array(960).fill(8);
-	const quiet=(count:number)=>{for(let i=0;i<count;i++){now+=20;f.wire.onPcm("phone",pcm);vi.advanceTimersByTime(20)}};
+	const quiet=(count:number)=>f.capture(count);
 	const say=async(text:string,start:number)=>{
 		f.wire.onPcm("phone",speech);
 		await f.session.event(parseLiveServerEvent({type:"input_transcript.added",item:{text},start_ms:start,end_ms:start+100})!);
@@ -394,13 +500,14 @@ test("missing provider finals still require a new affirmative and submit the nat
 		expect(f.controls.filter(c=>c.message.type==="ended")).toEqual([{device:"phone",message:{type:"ended",requestId:"A"}}]);
 		await f.session.event(parseLiveServerEvent({type:"turn.done",turn:{role:"user",transcript:"Yeah",start_ms:500,end_ms:600}})!);
 		expect(f.submitted).toHaveLength(1);
-	} finally {await f.runtime.close();clock.mockRestore();vi.useRealTimers()}
+	} finally {await f.runtime.close()}
 });
-test("real VoiceSession preserves the local mic onset across an invalid delegation and consults only for the caller",async()=>{
+test("real VoiceSession rejects work delegations without routing ordinary conversation through another model",async()=>{
 	const f=await realVoiceFixture(), {session,sent,failures}=f;
 	const question="What were the two handover words from the session?";
 	const delegation=(id:string,text:string):LiveServerEvent=>({type:"delegation.created",item:{id,type:"delegation",target:"client",content:[{type:"input_text",text}]}});
 	try {
+		await f.wire.onMessage("phone",{type:"list",details:true});
 		const initial=sent.length;
 		await session.event(delegation("unbound",JSON.stringify({kind:"clarify",question})));
 		expect(f.consultations).toHaveLength(0);
@@ -410,15 +517,125 @@ test("real VoiceSession preserves the local mic onset across an invalid delegati
 		await session.event(delegation("provider-first",'{"kind":"clarify","question":"What private value should the model choose?"}'));
 		expect(f.consultations).toHaveLength(0);
 		await session.event({type:"turn.done",turn:{role:"user",transcript:question}});
+		await f.quiet();
+		expect(f.controls.at(-1)?.message).toEqual({type:"proposal",requestId:"A",text:""});
 		await session.event(delegation("late",JSON.stringify({kind:"clarify",question})));
 		await tick();
-		expect(f.consultations).toHaveLength(1); expect(f.consultations[0].tools).toBe(false);
-		expect(f.consultations[0].promptText).toContain(question);
+		expect(f.consultations).toHaveLength(0);
+		expect(f.sideCalls).toEqual([]);
 		const spoken=sent.slice(initial).filter(m=>m.type==="session.context.append" && m.channel==="speakable");
-		expect(spoken).toHaveLength(1);
-		expect(spoken[0]).toMatchObject({content:[{type:"input_text",text:expect.stringContaining(JSON.stringify("The private handover is silver maple."))}]});
+		expect(spoken).toHaveLength(0);
 		expect(failures).toEqual([]); expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
+});
+test("microphone noise without recognized speech cannot cancel pending proposal interpretation",async()=>{
+	const pending=Promise.withResolvers<string>(), f=await realVoiceFixture();
+	const speech=new Uint8Array(960).fill(8);
+	let signal:AbortSignal|undefined;
+	Object.assign(f.ctx,{async runEphemeralTurn(options:{signal:AbortSignal}){
+		signal=options.signal;return {assistantMessage:{stopReason:"stop"},replyText:await pending.promise};
+	}});
+	try {
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Choose Blue."}});
+		await f.quiet();expect(signal).toBeDefined();
+		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		expect(signal!.aborted).toBe(false);
+		pending.resolve(blueFields);await tick();
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message)
+			.toEqual({type:"proposal",requestId:"A",text:"Private lane?: Blue"});
+		expect(f.submitted).toEqual([]);
+		expect(f.failures).toEqual([]);
+	} finally {pending.resolve(blueFields);await f.runtime.close()}
+});
+test("late recognition of an early affirmative cannot approve a draft created after its microphone onset",async()=>{
+	const pending=Promise.withResolvers<string>(), f=await realVoiceFixture();
+	const speech=new Uint8Array(960).fill(8);
+	Object.assign(f.ctx,{async runEphemeralTurn(){return {assistantMessage:{stopReason:"stop"},replyText:await pending.promise}}});
+	const onset=()=>{for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);for(let i=0;i<3;i++) f.wire.onPcm("phone",speech)};
+	try {
+		await f.wire.onMessage("phone",{type:"list",details:true});
+		onset();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Choose Blue."}});
+		await f.quiet();
+		f.advance(100);onset();
+		f.advance(100);pending.resolve(blueFields);await tick();
+		expect(f.controls.filter(c=>c.message.type==="proposal").at(-1)?.message)
+			.toEqual({type:"proposal",requestId:"A",text:"Private lane?: Blue"});
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes."}});await f.quiet();
+		expect(f.submitted).toEqual([]);
+		f.advance(100);onset();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Repeat that."}});await f.quiet();
+		f.advance(100);onset();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes."}});await f.quiet();
+		expect(f.submitted).toEqual([["A",{lane:"blue"}]]);
+		expect(f.failures).toEqual([]);
+	} finally {pending.resolve(blueFields);await f.runtime.close()}
+});
+test("unscoped confirmation after pre-draft echo keeps the conservative onset guard",async()=>{
+	const pending=Promise.withResolvers<string>(), f=await realVoiceFixture();
+	const speech=new Uint8Array(960).fill(8), echo=new Uint8Array(960).fill(4);
+	Object.assign(f.ctx,{async runEphemeralTurn(){return {assistantMessage:{stopReason:"stop"},replyText:await pending.promise}}});
+	try {
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Choose Blue."}});await f.quiet();
+		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
+		f.advance(100);f.session.rtp(speech);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",echo);
+		f.advance(100);pending.resolve(blueFields);await tick();
+		f.advance(700);
+		for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);
+		for(let i=0;i<3;i++) f.wire.onPcm("phone",speech);
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Yes, please go ahead."}});await f.quiet();
+		expect(f.submitted).toEqual([]);
+		expect(f.failures).toEqual([]);
+	} finally {pending.resolve(blueFields);await f.runtime.close()}
+});
+test.each(["fresh","early","earlier-final","unscoped-final","earlier-partial","unacknowledged","unrelated-answer","no-fresh-capture","duplicate-ack","missing-range"])
+("readback onset binding remains fail-closed: %s",async scenario=>{
+	const pending=Promise.withResolvers<string>(), f=await realVoiceFixture();
+	const speech=new Uint8Array(960).fill(8);
+	Object.assign(f.ctx,{async runEphemeralTurn(){return {assistantMessage:{stopReason:"stop"},replyText:await pending.promise}}});
+	const onset=()=>{for(let i=0;i<40;i++) f.wire.onPcm("phone",pcm);for(let i=0;i<3;i++) f.wire.onPcm("phone",speech)};
+	const event=async(payload:unknown)=>{const parsed=parseLiveServerEvent(payload);expect(parsed).not.toBeNull();await f.session.event(parsed!)};
+	let acknowledged=0,through=0;
+	const acknowledge=async()=>{
+		for(;acknowledged<f.sent.length;acknowledged++) if(f.sent[acknowledged].type==="session.context.append") {
+			const start=through;through+=100;
+			await event({type:"session.context.appended",start_ms:start,end_ms:through});
+		}
+	};
+	try {
+		// Account for the opening before the current draft is issued.
+		await acknowledge();
+		onset();
+		await f.session.event({type:"turn.done",turn:{role:"user",transcript:"Choose Blue."}});await f.quiet();
+		f.advance(100);onset(); // Loud echo, or an actual premature affirmative.
+		f.advance(100);pending.resolve(blueFields);await tick();
+		if(scenario!=="unacknowledged") await acknowledge();
+		if(scenario==="duplicate-ack")
+			await event({type:"session.context.appended",start_ms:through-100,end_ms:through});
+		f.advance(500);
+		await event({type:"turn.done",turn:{role:"assistant",
+			transcript:scenario==="unrelated-answer"?"Let me check.":"Blue. Submit?",
+			...(scenario==="missing-range"?{}:{start_ms:400,end_ms:800})}});
+		expect(f.submitted).toEqual([]);
+		f.advance(200);
+		if(scenario!=="no-fresh-capture") onset(); // A real new confirmation, or subsequent unrelated noise.
+		// Recognition can lag capture past context acknowledgement. Only the
+		// fresh case follows the complete readback in the provider's timeline.
+		const start=scenario==="early"?500:1000,end=scenario==="early"?700:1200;
+		await event({type:"input_transcript.added",item:{text:"Yes."},start_ms:start,end_ms:end});
+		if(scenario==="earlier-partial")await event({type:"input_transcript.added",item:{text:"Yes."},start_ms:500,end_ms:end});
+		await event({type:"turn.done",turn:{role:"user",transcript:"Yes.",
+			...(scenario==="unscoped-final"?{}:{start_ms:scenario==="earlier-final"?500:start,end_ms:end})}});
+		if(!f.failures.length)await f.quiet();
+		expect(f.submitted).toEqual(scenario==="fresh"?[["A",{lane:"blue"}]]:[]);
+		if(["earlier-final","unscoped-final","earlier-partial"].includes(scenario))expect(f.failures).toHaveLength(1);
+		else expect(f.failures).toEqual([]);
+	} finally {pending.resolve(blueFields);await f.runtime.close()}
 });
 test.each(["Run the release now.", "Can you deploy the blue lane?", "Please change the chosen lane.", "What is the lane? Then deploy it.", "Yes submit this.", "I am not sure."])("non-clarification does not consult: %s",async text=>{
 	const f=await fixture(); try {
@@ -427,15 +644,20 @@ test.each(["Run the release now.", "Can you deploy the blue lane?", "Please chan
 		expect(f.consultations).toHaveLength(0); expect(f.submitted).toEqual([]);
 	} finally {await f.runtime.close()}
 });
-test.each(["interrupt","hangup","end"])("late clarification cannot speak after %s",async stop=>{
-	const pending=Promise.withResolvers<string>(), f=await fixture(()=>pending.promise); try {
+test.each(["interrupt","hangup","end"])("late proposal interpretation cannot speak after %s",async stop=>{
+	const pending=Promise.withResolvers<string>(), f=await fixture();
+	let signal:AbortSignal|undefined;
+	Object.assign(f.ctx,{async runEphemeralTurn(options:{signal:AbortSignal}){
+		signal=options.signal;return {assistantMessage:{stopReason:"stop"},replyText:await pending.promise};
+	}});
+	try {
 		f.wire.onConnect!("phone"); f.offer("A"); await f.join("phone","A"); const v=f.voices[0];
-		v.onSpeechStarted("u"); v.onTranscript("user","What are the two handover words","u"); await tick();
-		expect(f.consultations).toHaveLength(1);
+		v.onSpeechStarted("u"); v.onTranscript("user","Choose Blue.","u"); await tick();
+		expect(signal).toBeDefined();
 		if (stop==="interrupt") v.onInterrupt(); else if (stop==="end") f.runtime.end("A"); else f.wire.onMessage("phone",{type:"hangup",requestId:"A"});
-		expect(f.consultations[0].signal.aborted).toBe(true); pending.resolve("Late answer"); await tick();
+		expect(signal!.aborted).toBe(true);pending.resolve(blueFields);await tick();
 		expect(f.spoken).toHaveLength(1); expect(f.submitted).toEqual([]);
-	} finally {await f.runtime.close()}
+	} finally {pending.resolve(blueFields);await f.runtime.close()}
 });
 test("comparison is local, one-use, and cannot authorize a new enrollment with an old command",async()=>{
 	let status:string|undefined; const confirmation=new Enrollment(text=>{status=text});
@@ -529,6 +751,7 @@ test("recoverable mobile conditions and command guidance warn, while protocol fa
 			expect(notices.map(n=>n.type)).toEqual(["warning","warning","warning","warning","warning"]);
 			report("phone_protocol_error"); report("secure_helper_protocol_error"); report("unexpected-failure");
 			expect(notices.slice(-3).map(n=>n.type)).toEqual(["error","error","error"]);
+			expect(notices.every(n=>!n.text.includes("The desktop form stays available"))).toBe(true);
 			await admin!.command("pair");
 			expect(notices.at(-1)?.type).toBe("warning");
 			idle=true;

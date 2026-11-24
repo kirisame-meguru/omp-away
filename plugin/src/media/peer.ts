@@ -8,7 +8,7 @@ const headerLength = 5;
 
 export interface MediaPeer {
 	offer: Promise<string>;
-	answer(sdp: string): Promise<void>;
+	answer(sdp: string, context?: string): Promise<void>;
 	sendPcm(pcm: Uint8Array): void;
 	close(): Promise<void>;
 }
@@ -88,9 +88,9 @@ export function spawnPeer(onAudio: (pcm: Uint8Array) => void, onFailure: () => v
 	}
 	return {
 		offer: offer.promise,
-		async answer(sdp: string) {
+		async answer(sdp: string, context?: string) {
 			if (phase !== 'answer' || sdp.length > MAX_JSON) throw new Error('Invalid media answer');
-			const data = Buffer.from(JSON.stringify({ type: 'answer', sdp }));
+			const data = Buffer.from(JSON.stringify({ type: 'answer', sdp, ...(context === undefined ? {} : { context }) }));
 			if (data.length > MAX_JSON) throw new Error('Oversize media answer');
 			phase = 'connecting'; send(JSON_KIND, data); await ready.promise;
 		},

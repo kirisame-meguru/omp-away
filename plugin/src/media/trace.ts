@@ -14,6 +14,7 @@ const wire = [
 ];
 const peerShapes = ['binary','oversize','invalid','turn.user.valid','turn.assistant.valid','turn.user.missing_transcript','turn.assistant.missing_transcript','turn.missing_turn','turn.other_role','transcript.missing_text'];
 const steps = ['endpoint.user','caption.delivery_failed','onset.local','onset.provider','interrupt','speech.started.callback','final.user.bound','final.user.unbound',
+	'onset.rebound','context.unaligned','readback.completed',
 	'rtp.replay.started','rtp.replay.limit','rtp.first_voiced','rtp.voice.none','rtp.voice.partial','rtp.voice.enough',
 	'rtp.quiet.none','rtp.quiet.partial','rtp.quiet.enough','rtp.writes.pending','rtp.writes.drained','rtp.receive.idle','rtp.receive.recent',
 	'rtp.end.quiet_frames','rtp.end.receive_gap','rtp.end.quiet_gap',

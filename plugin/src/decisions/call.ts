@@ -11,6 +11,9 @@ export interface DecisionCall {
 	consult(question:string):Promise<string>;
 	speechStarted(utteranceId:string, startedAt?:number):void;
 	speechFinished(utteranceId:string, transcript:string):Promise<DecisionReply>;
+	readback(utteranceId:string, mark:string, transcript:string):Promise<boolean>;
+	played(mark:string):void;
+	outputStarted():void;
 	interrupt():void;
 	close():void;
 }
@@ -18,6 +21,10 @@ interface CallOptions {
 	form:DecisionForm; ctx:SideContext; history:Exchange[];
 	close():void;
 	submit(values: Draft["values"]):Promise<"accepted"|"stale">;
+}
+interface ReadbackProof {
+	mark:string; draft:Draft; knownAt:number; playedAt?:number;
+	controller:AbortController; result:Promise<boolean>;
 }
 // Recognition may punctuate a rising affirmative or combine repeated replies into one turn.
 // Every repeated clause must still be the same complete affirmative, never a qualifier.
@@ -27,26 +34,32 @@ const greeting=/^(?:(?:hello|hey|hi)(?: there)?[\s,.!?]*)+$/i;
 const ignored:DecisionReply={kind:"ignored"}, stale:DecisionReply={kind:"stale"};
 export function createCall(opt:CallOptions):DecisionCall {
 	const life=new AbortController();
-	const used=new Set<string>();
-	let currentBrief="", submitting=false, proposal:Draft|undefined, confirmable:Draft|undefined;
-	let confirmableAt=0;
-	let speaking:{id:string;draft?:Draft}|undefined;
+	const used=new Map<string,boolean>(), marks=new Set<string>();
+	let currentBrief="", submitting=false, proposal:Draft|undefined;
+	let reviewOwner:string|undefined, proof:ReadbackProof|undefined;
+	let speaking:{id:string;proof?:ReadbackProof}|undefined;
 	let work:AbortController|undefined;
-	function invalidate() {
-		work?.abort(); work=undefined; confirmable=undefined; speaking=undefined;
+	function clearProof(keep?:ReadbackProof) {
+		if(proof!==keep) proof?.controller.abort();
+		proof=undefined;
+	}
+	function invalidate(keep?:ReadbackProof) {
+		work?.abort(); work=undefined; clearProof(keep);
+		if(speaking?.proof!==keep) speaking?.proof?.controller.abort();
+		speaking=undefined; reviewOwner=undefined;
 	}
 	function close() {
 		if(life.signal.aborted) return;
-		invalidate(); proposal=undefined; currentBrief=""; used.clear(); life.abort(); opt.close();
+		invalidate(); proposal=undefined; currentBrief=""; used.clear(); marks.clear(); life.abort(); opt.close();
 	}
 	function takeId(id:string) {
 		if(typeof id!=="string" || !id || id.length>256 || used.has(id)) return false;
 		// Excessive traffic closes this call, not its underlying Ask.
 		if(used.size>=2048) { close(); return false; }
-		used.add(id); return true;
+		used.set(id,false); return true;
 	}
-	function read(draft:Draft):DecisionReply {
-		confirmable=draft;confirmableAt=performance.now();
+	function read(draft:Draft, owner:string):DecisionReply {
+		clearProof(); reviewOwner=owner;
 		return {kind:"say",text:`${readbackInstruction.trim()}\n${draft.voiceData}`,draft:draft.fields};
 	}
 	async function submit(draft:Draft):Promise<DecisionReply> {
@@ -85,43 +98,96 @@ export function createCall(opt:CallOptions):DecisionCall {
 		opening:()=>currentBrief,
 		consult,
 		interrupt:invalidate,
+		readback(owner,mark,transcript) {
+			if(life.signal.aborted || submitting || !proposal || owner!==reviewOwner ||
+				typeof mark!=="string" || !/^[A-Za-z0-9_-]{1,128}$/.test(mark) || marks.has(mark))
+				return Promise.resolve(false);
+			if(marks.size>=2048) {close();return Promise.resolve(false);}
+			marks.add(mark); clearProof();
+			if(typeof transcript!=="string" || transcript.includes("\0") || Buffer.byteLength(transcript)>8192 ||
+				!/\bsubmit\s*\?\s*$/iu.test(transcript) || (transcript.match(/\bsubmit\s*\?/giu)?.length??0)!==1)
+				return Promise.resolve(false);
+			const done=Promise.withResolvers<boolean>();
+			const observed:ReadbackProof={mark,draft:proposal,knownAt:performance.now(),controller:new AbortController(),result:done.promise};
+			// Publish before dispatch: a provider can synchronously reenter caller handling.
+			proof=observed;
+			void side(opt.ctx,opt.form,"verify",{transcript},observed.controller.signal).then(json=>{
+				if(observed.controller.signal.aborted || life.signal.aborted || proposal!==observed.draft) return false;
+				const spoken=extractDraft(opt.form,transcript,JSON.parse(json));
+				return !!spoken && isDeepStrictEqual(spoken.values,observed.draft.values);
+			}).then(done.resolve,()=>done.resolve(false));
+			return done.promise;
+		},
+		played(mark) {
+			if(!life.signal.aborted && proof?.mark===mark && proof.playedAt===undefined)
+				proof.playedAt=performance.now();
+		},
+		outputStarted:()=>clearProof(),
 		speechStarted(id,startedAt=performance.now()) {
 			if(life.signal.aborted || submitting) return;
-			const previous=speaking, draft=confirmableAt<=startedAt ? confirmable : undefined;
-			invalidate();
-			if(!takeId(id) || previous || !currentBrief) return;
-			speaking={id,draft};
+			const previous=speaking;
+			const captured=!previous && Number.isFinite(startedAt) && proof && proof.knownAt<=startedAt &&
+				proof.playedAt!==undefined && proof.playedAt<=startedAt ? proof : undefined;
+			invalidate(captured);
+			if(!takeId(id) || previous || !currentBrief) {captured?.controller.abort();return;}
+			speaking={id,proof:captured};
 		},
 		async speechFinished(id,text) {
 			if(life.signal.aborted || submitting) return stale;
+			// A replayed final must not cancel verification already owned by this turn.
+			if(used.get(id)===true) return ignored;
 			if(!speaking || speaking.id!==id) { invalidate(); return ignored; }
-			const {draft}=speaking; speaking=undefined;
-			if(typeof text!=="string" || !text.trim() || Buffer.byteLength(text)>4096) return ignored;
-			const utterance=text.trim();
-			// Only an explicit affirmative in a separate utterance submits.
-			if(greeting.test(utterance)) return {kind:"say",text:currentBrief};
-			if(directYes.test(utterance)) {
-				return draft ? submit(draft) : ignored;
+			used.set(id,true);
+			const captured=speaking.proof; speaking=undefined;
+			if(typeof text!=="string" || !text.trim() || Buffer.byteLength(text)>4096) {
+				captured?.controller.abort();return ignored;
 			}
-			if(repeat.test(utterance)) return proposal ? read(proposal) : {kind:"say",text:currentBrief};
+			const utterance=text.trim();
+			// Before a proposal exists, literal options such as "Yes" and "No"
+			// are answers. Once proposed, confirmation/cancellation takes precedence.
+			if(!proposal) {
+				const exact=exactChoiceDraft(opt.form,utterance);
+				if(exact) { proposal=exact; return read(exact,id); }
+			}
+			// Only an explicit affirmative in a separate utterance submits.
+			if(directYes.test(utterance)) {
+				if(!captured) return proposal ? read(proposal,id) : ignored;
+				const token=work=captured.controller;
+				try {
+					const verified=await captured.result;
+					if(token.signal.aborted || life.signal.aborted || work!==token) return stale;
+					return verified ? submit(captured.draft) : proposal ? read(proposal,id) : ignored;
+				} finally {
+					if(work===token) work=undefined;
+					token.abort();
+				}
+			}
+			captured?.controller.abort();
+			if(greeting.test(utterance)) return {kind:"say",text:currentBrief};
+			if(repeat.test(utterance)) return proposal ? read(proposal,id) : {kind:"say",text:currentBrief};
 			if(/^(?:no|nope|cancel|stop|discard|never mind|do not submit|don't submit)[.!]?$/i.test(utterance)) { proposal=undefined; return ignored; }
-			const exact=exactChoiceDraft(opt.form,utterance);
-			if(exact) { proposal=exact; return read(exact); }
+			const exact=proposal ? exactChoiceDraft(opt.form,utterance) : undefined;
+			if(exact) { proposal=exact; return read(exact,id); }
 			const token=work=new AbortController();
 			try {
 				const previous=proposal;
-				proposal=undefined;
+				// Keep the validated draft until this classification settles; an interrupt
+				// revokes confirmation but must not erase a draft awaiting discussion.
 				const json=await side(opt.ctx,opt.form,"extract",{utterance:text,...(previous ? {previousDraft:previous.fields} : {})},token.signal);
 				if(token.signal.aborted || life.signal.aborted) return stale;
 				const intent:unknown=JSON.parse(json);
-				if(isDeepStrictEqual(intent,{repeat:true}) && previous) { proposal=previous; return read(previous); }
+				if(isDeepStrictEqual(intent,{repeat:true}) && previous) return read(previous,id);
 				if(isDeepStrictEqual(intent,{clarify:true})) {
-					proposal=previous;
-					return {kind:"say",text:await consult(text)};
+					// The realtime voice already answers discussion from task context.
+					return ignored;
 				}
 				proposal=extractDraft(opt.form,text,intent,previous);
-				return proposal ? read(proposal) : {kind:"say",text:currentBrief};
-			} catch { return token.signal.aborted || life.signal.aborted ? stale : {kind:"say",text:"The coding session could not interpret that answer. Nothing was submitted."}; }
+				return proposal ? read(proposal,id) : ignored;
+			} catch {
+				if(token.signal.aborted || life.signal.aborted) return stale;
+				proposal=undefined;
+				return {kind:"say",text:"The coding session could not interpret that answer. Nothing was submitted."};
+			}
 			finally { if(work===token) work=undefined; }
 		},
 		close,

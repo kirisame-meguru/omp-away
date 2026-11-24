@@ -7,27 +7,124 @@ const html = `<form><input type="hidden" name="rev" value="r4"><label for="targe
 const extraction = (lane: unknown = "p", count: unknown = 3) => JSON.stringify({fields:[{name:"lane",value:lane,evidence:"Production"},{name:"count",value:count,evidence:"three"}]});
 const proposal = "Production with three replicas, please.";
 const choiceHtml = '<form><input type="hidden" name="rev" value="r4"><label for="drink">Tea or coffee?</label><select id="drink" name="drink" required><option value="t" selected>Tea</option><option value="c">Coffee</option><option value="x" disabled>Retired</option></select></form>';
+const yesNoHtml = '<form><input type="hidden" name="rev" value="r4"><fieldset><legend>Continue?</legend><label><input type="radio" name="proceed" value="y">Yes</label><label><input type="radio" name="proceed" value="n" checked>No</label></fieldset></form>';
+const turns=new WeakMap<DecisionCall,string>();
 function fixture() {
 	let now=100, seq=0;
 	const jobs=new Map<number,{time:number;callback():void}>();
 	const invites:string[]=[], errors:string[]=[], writes:unknown[]=[], prompts:string[]=[];
 	const efforts:{purpose:string;minimized:boolean}[]=[];
 	let reply:(prompt:string,signal:AbortSignal)=>string|Promise<string>=p=>p.includes('"utterance"') ? extraction() : "The release is waiting for a lane and replica count.";
+	let verification=extraction();
 	const ctx:SideContext={async runEphemeralTurn(opt){
 		expect(opt.tools).toBe(false); expect(opt.signal).toBeInstanceOf(AbortSignal);
 		prompts.push(opt.promptText); efforts.push({purpose:opt.purpose,minimized:opt.minimizeEffort===true});
-		return {replyText:await reply(opt.promptText,opt.signal),assistantMessage:{stopReason:"stop"}};
+		return {replyText:opt.purpose==="away-verify" ? verification : await reply(opt.promptText,opt.signal),assistantMessage:{stopReason:"stop"}};
 	}};
 	const core=new DecisionCoordinator({invite:id=>{invites.push(id)},error:code=>errors.push(code),clock:{now:()=>now,after(ms,callback){const id=++seq;jobs.set(id,{time:now+ms,callback});return()=>{jobs.delete(id)}}}});
 	const ask=(id:string):PendingAsk=>({requestId:id,toolCallId:`tool-${id}`,html,async submitConfirmed(id,values){writes.push([id,values]);return "accepted"}});
-	return {core,invites,writes,prompts,efforts,errors,ctx,ask,offer:(id:string)=>core.offer(ask(id),ctx,"project"),setReply(fn:typeof reply){reply=fn},advance(ms:number){now+=ms;for(const [id,job] of jobs) if(job.time<=now){jobs.delete(id);job.callback()}}};
+	return {core,invites,writes,prompts,efforts,errors,ctx,ask,offer:(id:string)=>core.offer(ask(id),ctx,"project"),setReply(fn:typeof reply){reply=fn},advance(ms:number){now+=ms;for(const [id,job] of jobs) if(job.time<=now){jobs.delete(id);job.callback()}},
+		async heard(call:DecisionCall,text="Production with three replicas. Submit?",result=extraction()) {
+			const owner=turns.get(call),mark=`readback-${++item}`;
+			if(!owner) throw Error("Missing caller turn");
+			verification=result;
+			expect(await call.readback(owner,mark,text)).toBe(true);
+			call.played(mark);
+		},
+	};
 }
 let item=0;
-function speak(call:DecisionCall,text:string){const id=`u${++item}`;call.speechStarted(id);return call.speechFinished(id,text)}
+function speak(call:DecisionCall,text:string){const id=`u${++item}`;turns.set(call,id);call.speechStarted(id);return call.speechFinished(id,text)}
 function readback(reply:DecisionReply){
 	if(reply.kind!=="say" || !reply.draft) throw Error("Expected a structured proposal");
 	return {draft:reply.draft,text:reply.text};
 }
+test.each(["JSO N","J S O N","JS ON","JSON"])
+("acronym spacing %s preserves canonical values and requires a separate confirmation",async spelling=>{
+	const f=fixture(),text=`Choose ${spelling} and Deploy.`;
+	const form='<form><input type="hidden" name="rev" value="r4"><label for="s">Storage</label><select id="s" name="storage"><option value="json">JSON</option><option value="sqlite">SQLite</option></select><label for="r">Rollout</label><select id="r" name="rollout"><option value="local">Keep local</option><option value="deploy">Deploy</option></select></form>';
+	try {
+		f.core.offer({...f.ask("X"),html:form},f.ctx,"project");
+		const call=f.core.join("X")!;await call.brief();
+		f.setReply(()=>JSON.stringify({fields:[{name:"storage",value:"json",evidence:spelling},{name:"rollout",value:"deploy",evidence:"Deploy"}]}));
+		expect(readback(await speak(call,text)).draft).toEqual([{field:"Storage",answer:"JSON"},{field:"Rollout",answer:"Deploy"}]);
+		expect(f.prompts.at(-1)).toContain(JSON.stringify({utterance:text}));
+		expect(f.writes).toEqual([]);
+		await f.heard(call,`Storage: ${spelling}; Rollout: Deploy. Submit?`,JSON.stringify({fields:[{name:"storage",value:"json",evidence:spelling},{name:"rollout",value:"deploy",evidence:"Deploy"}]}));
+		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["X",{rev:"r4",storage:"json",rollout:"deploy"}]]);
+	} finally {f.core.close()}
+});
+test.each([
+	["JSON","J S Q N","J S Q N"],["JSON","J S 0 N","J S 0 N"],
+	["JSON","XJSON","XJSON"],["JSON","JSONX","JSONX"],
+	["JSON","JSO N","JSON"],["Keep local","Keep lo cal","Keep lo cal"],
+])("acronym matching rejects altered letters, word fragments and missing evidence: %s / %s",async(label,text,evidence)=>{
+	const f=fixture();try {
+		f.core.offer({...f.ask("X"),html:`<form><label for="s">Storage</label><select id="s" name="storage"><option value="chosen">${label}</option><option value="other">Alternative</option></select></form>`},f.ctx,"project");
+		const call=f.core.join("X")!;await call.brief();
+		f.setReply(()=>JSON.stringify({fields:[{name:"storage",value:"chosen",evidence}]}));
+		expect((await speak(call,text)).kind).toBe("ignored");
+		expect((await speak(call,"Yes.")).kind).toBe("ignored");
+		expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
+test.each([["json","JSON"],["spaced","JSO N"]])
+("acronym matching rejects indistinguishable native labels when selecting %s",async(value,text)=>{
+	const f=fixture();try {
+		f.core.offer({...f.ask("X"),html:'<form><label for="s">Storage</label><select id="s" name="storage"><option value="json">JSON</option><option value="spaced">JSO N</option></select></form>'},f.ctx,"project");
+		const call=f.core.join("X")!;await call.brief();
+		f.setReply(()=>JSON.stringify({fields:[{name:"storage",value,evidence:text}]}));
+		expect((await speak(call,text)).kind).toBe("ignored");
+		expect((await speak(call,"Yes.")).kind).toBe("ignored");
+		expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
+test.each([["Yes.","y","Yes"],["No.","n","No"],["Yes? Yes.","y","Yes"],["No! No.","n","No"]])
+('literal choice %s proposes its own value before a separate confirmation submits',async(answer,value,label)=>{
+	const f=fixture(); try {
+		f.core.offer({...f.ask("X"),html:yesNoHtml},f.ctx,"project");
+		const call=f.core.join("X")!; await call.brief();
+		f.setReply(()=>{throw Error("A literal Yes/No choice needs no model interpretation")});
+		expect(readback(await speak(call,answer)).draft).toEqual([{field:"Continue?",answer:label}]);
+		expect(f.writes).toEqual([]);
+		await f.heard(call,`Continue? ${label}. Submit?`,JSON.stringify({fields:[{name:"proceed",value,evidence:label}]}));
+		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["X",{rev:"r4",proceed:value}]]);
+		expect(f.efforts).toEqual([{purpose:"away-verify",minimized:false}]);
+	} finally {f.core.close()}
+});
+test('a premature Yes cannot confirm or replace an existing Yes/No proposal',async()=>{
+	const f=fixture(); try {
+		f.core.offer({...f.ask("X"),html:yesNoHtml},f.ctx,"project");
+		const call=f.core.join("X")!; await call.brief();
+		const began=performance.now();
+		readback(await speak(call,"No."));
+		await f.heard(call,"Continue? No. Submit?",'{"fields":[{"name":"proceed","value":"n","evidence":"No"}]}');
+		call.speechStarted("early",began);
+		expect(readback(await call.speechFinished("early","Yes.")).draft).toEqual([{field:"Continue?",answer:"No"}]);
+		expect(f.writes).toEqual([]);
+		expect(readback(await speak(call,"Repeat that")).draft).toEqual([{field:"Continue?",answer:"No"}]);
+		await f.heard(call,"Continue? No. Submit?",'{"fields":[{"name":"proceed","value":"n","evidence":"No"}]}');
+		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["X",{rev:"r4",proceed:"n"}]]);
+	} finally {f.core.close()}
+});
+test('No still rejects a proposed answer, then can be selected as a new answer',async()=>{
+	const f=fixture(); try {
+		f.core.offer({...f.ask("X"),html:yesNoHtml},f.ctx,"project");
+		const call=f.core.join("X")!; await call.brief();
+		readback(await speak(call,"Yes."));
+		await f.heard(call,"Continue? Yes. Submit?",'{"fields":[{"name":"proceed","value":"y","evidence":"Yes"}]}');
+		expect((await speak(call,"No.")).kind).toBe("ignored");
+		expect(f.writes).toEqual([]);
+		expect(readback(await speak(call,"No.")).draft).toEqual([{field:"Continue?",answer:"No"}]);
+		expect(f.writes).toEqual([]);
+		await f.heard(call,"Continue? No. Submit?",'{"fields":[{"name":"proceed","value":"n","evidence":"No"}]}');
+		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["X",{rev:"r4",proceed:"n"}]]);
+	} finally {f.core.close()}
+});
 test('debounced speech that began before a readback cannot confirm the new draft',async()=>{
 	const f=fixture();
 	try {
@@ -35,21 +132,23 @@ test('debounced speech that began before a readback cannot confirm the new draft
 		const call=f.core.join("X")!;await call.brief();
 		const began=performance.now();
 		await speak(call,"Coffee.");
+		await f.heard(call,"Coffee. Submit?",'{"fields":[{"name":"drink","value":"c","evidence":"Coffee"}]}');
 		call.speechStarted("early",began);
-		expect((await call.speechFinished("early","Yes.")).kind).toBe("ignored");
+		expect(readback(await call.speechFinished("early","Yes.")).draft).toEqual([{field:"Tea or coffee?",answer:"Coffee"}]);
 		expect(f.writes).toEqual([]);
 	} finally {f.core.close()}
 });
 test.each(["Yes.","Yeah.","Yep!","Yup","Sure.","Okay.","OK.","Yeah, go ahead.","Yeah, please submit it.","Yeah…"])
-('explicit affirmative %s submits the native draft without model checks',async affirmative=>{
+('explicit affirmative %s submits the reviewed native draft without another confirmation classifier',async affirmative=>{
 	const f=fixture(); try {
 		f.core.offer({...f.ask("X"),html:choiceHtml},f.ctx,"project");
 		const call=f.core.join("X")!; await call.brief();
 		f.setReply(()=>{throw Error("No extra model check is allowed")});
 		const result=await speak(call,"Coffee."); expect(readback(result).draft).toEqual([{field:"Tea or coffee?",answer:"Coffee"}]);
 		expect(f.writes).toEqual([]);
+		await f.heard(call,"Coffee. Submit?",'{"fields":[{"name":"drink","value":"c","evidence":"Coffee"}]}');
 		expect((await speak(call,affirmative)).kind).toBe("accepted");
-		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
+		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([{purpose:"away-verify",minimized:false}]);
 	} finally {f.core.close()}
 });
 test('ASR punctuation and repeated replies still propose once and require a separate confirmation',async()=>{
@@ -59,8 +158,9 @@ test('ASR punctuation and repeated replies still propose once and require a sepa
 		f.setReply(()=>{throw Error("Repeated native words need no model interpretation")});
 		expect(readback(await speak(call,"Coffee? Coffee.")).draft).toEqual([{field:"Tea or coffee?",answer:"Coffee"}]);
 		expect(f.writes).toEqual([]);
+		await f.heard(call,"Coffee. Submit?",'{"fields":[{"name":"drink","value":"c","evidence":"Coffee"}]}');
 		expect((await speak(call,"Yeah? Yeah.")).kind).toBe("accepted");
-		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([]);
+		expect(f.writes).toEqual([["X",{rev:"r4",drink:"c"}]]); expect(f.efforts).toEqual([{purpose:"away-verify",minimized:false}]);
 	} finally {f.core.close()}
 });
 test('the opening names enabled choices and every field without waiting for a model summary',async()=>{
@@ -123,6 +223,7 @@ test('a natural proposal and separate yes submit immutable canonical values exac
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); const r=readback(await speak(call,proposal));
 		expect(r.draft).toEqual([{field:"Release lane",answer:"Production"},{field:"Replicas",answer:"3"}]);
 		expect(Object.isFrozen(r.draft[0])).toBe(true); expect(f.writes).toEqual([]);
+		await f.heard(call);
 		call.speechStarted("final"); const submit=call.speechFinished("final","Yes.");
 		expect((await call.speechFinished("final","yes")).kind).not.toBe("accepted");
 		expect((await submit).kind).toBe("accepted"); expect(f.writes).toEqual([["A",{rev:"r4",lane:"p",count:3}]]);
@@ -143,14 +244,19 @@ test('a correction replaces the current proposal; repeat and confirmation use on
 		const current=readback(await speak(call,"Actually, make that two replicas."));
 		expect(current.draft).toEqual([{field:"Release lane",answer:"Production"},{field:"Replicas",answer:"2"}]);
 		expect(current.draft).not.toEqual(old.draft); expect(readback(await speak(call,"Repeat that")).draft).toEqual(current.draft);
+		await f.heard(call,"Production with two replicas. Submit?",'{"fields":[{"name":"lane","value":"p","evidence":"Production"},{"name":"count","value":2,"evidence":"two"}]}');
 		await speak(call,"Yes"); expect(f.writes).toEqual([["A",{rev:"r4",lane:"p",count:2}]]);
 	} finally {f.core.close()}
 });
-test('consultation invalidates confirmation without turning its answer into a submission',async()=>{
+test('discussion revokes approval; the next affirmative refreshes the readback instead of silently disappearing',async()=>{
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); await speak(call,proposal);
+		await f.heard(call);
 		f.setReply(()=>"Production has a rollback plan."); await call.consult("Why production?");
-		expect((await speak(call,"Yes")).kind).toBe("ignored"); expect(f.writes).toEqual([]);
+		readback(await speak(call,"Yes")); expect(f.writes).toEqual([]);
+		await f.heard(call);
+		expect((await speak(call,"Yes")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["A",{rev:"r4",lane:"p",count:3}]]);
 	} finally {f.core.close()}
 });
 test.each([extraction("x"),extraction("p",5),extraction("p","3"),extraction().replace("Production","unstated"),JSON.stringify({fields:[{name:"lane",value:"d",evidence:"Production"}]}),"not json"])
@@ -172,6 +278,7 @@ test.each(["No.","Cancel","Yes, but change it to two","Would that be safe?","Don
 ('negative, conditional or conversational speech is not confirmation: %s',async text=>{
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); await speak(call,proposal);
+		await f.heard(call);
 		f.setReply(()=>"{}"); expect((await speak(call,text)).kind).not.toBe("accepted");
 		expect((await speak(call,"Yes")).kind).toBe("ignored"); expect(f.writes).toEqual([]);
 	} finally {f.core.close()}
@@ -189,6 +296,7 @@ test('an altered native submission result is not success and is never retried',a
 	const f=fixture(); let attempts=0; try {
 		f.core.offer({...f.ask("A"),async submitConfirmed(){attempts++;return "stale"}},f.ctx,"project");
 		const call=f.core.join("A")!; await call.brief(); await speak(call,proposal);
+		await f.heard(call);
 		expect((await speak(call,"Yes")).kind).toBe("stale"); await speak(call,"Yes");
 		expect(attempts).toBe(1); expect(f.core.join("A")).toBeUndefined();
 	} finally {f.core.close()}
@@ -201,6 +309,7 @@ test('multi-option ordering and explicit empty checkboxes do not copy checked de
 		const select=(team:string[])=>JSON.stringify({fields:[{name:"team",value:team,evidence:"Operations and Quality"},{name:"notify",value:null,evidence:"do not announce"}]});
 		f.setReply(()=>select(["ops","qa"])); const invalid=await speak(call,text); expect(invalid.kind==="say" && !!invalid.draft).toBe(false);
 		f.setReply(()=>select(["qa","ops"])); expect(readback(await speak(call,text)).draft[1]?.answer).toBe(null);
+		await f.heard(call,"Operations and Quality; do not announce. Submit?",select(["qa","ops"]));
 		await speak(call,"Yes"); expect(f.writes).toEqual([["X",{team:["qa","ops"]}]]);
 	} finally {f.core.close()}
 });
@@ -210,7 +319,9 @@ test('dictated text is preserved and instruction-like values stay serialized as 
 		const call=f.core.join("X")!; await call.brief(); f.setReply(()=>JSON.stringify({fields:[{name:"note",value,evidence:value}]}));
 		const r=readback(await speak(call,`For the note, put ${value}`)), parts=r.text.split("\n");
 		expect(parts.slice(0,-1).join("\n")).not.toContain(value); expect(JSON.parse(parts.at(-1)!)).toEqual({fields:[{field:"Note",answer:value}]});
-		expect(f.writes).toEqual([]); await speak(call,"Yes"); expect(f.writes).toEqual([["X",{note:value}]]);
+		expect(f.writes).toEqual([]);
+		await f.heard(call,`Note: ${value} Submit?`,JSON.stringify({fields:[{name:"note",value,evidence:value}]}));
+		await speak(call,"Yes"); expect(f.writes).toEqual([["X",{note:value}]]);
 	} finally {f.core.close()}
 });
 test('partial corrections cannot use a new request or its defaults as a previous proposal',async()=>{
@@ -235,8 +346,9 @@ test('only extraction requests minimum effort; contextual consultation retains s
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); f.setReply(()=>"Production has a rollback plan.");
 		await call.consult("Why production?"); f.setReply(()=>extraction()); await speak(call,proposal);
+		await f.heard(call);
 		expect((await speak(call,"That is correct.")).kind).toBe("accepted");
-		expect(f.efforts).toEqual([{purpose:"away-consult",minimized:false},{purpose:"away-extract",minimized:true}]);
+		expect(f.efforts).toEqual([{purpose:"away-consult",minimized:false},{purpose:"away-extract",minimized:true},{purpose:"away-verify",minimized:false}]);
 	} finally {f.core.close()}
 });
 test('hangup aborts a clarification even when its provider ignores cancellation',async()=>{
@@ -262,11 +374,43 @@ test('clarifications retain bounded same-request history without leaking it into
 		expect(f.prompts.at(-1)).not.toContain("Unique question A");
 	} finally {f.core.close()}
 });
-test('a natural clarification delegates only the caller question to the tool-free session',async()=>{
+test('a natural clarification is left to the live speaker without a second desktop answer',async()=>{
 	const f=fixture(); try {
 		f.offer("A"); const call=f.core.join("A")!; await call.brief(); const question="Há alguma vantagem para o projeto?";
-		f.setReply(prompt=>prompt.includes('"utterance"')?'{"clarify":true}':"A implantação fica reversível.");
-		expect(await speak(call,question)).toEqual({kind:"say",text:"A implantação fica reversível."});
-		expect(f.prompts.at(-1)).toContain(question); expect(f.writes).toEqual([]);
+		f.setReply(()=>'{"clarify":true}');
+		expect(await speak(call,question)).toEqual({kind:"ignored"});
+		expect(f.prompts).toHaveLength(1);
+		expect(f.prompts[0]).toContain(question); expect(f.writes).toEqual([]);
+	} finally {f.core.close()}
+});
+test.each(["Repeat that.","Yes."])('interrupting classification with %s preserves the draft but requires a fresh readback',async followup=>{
+	const f=fixture(), started=Promise.withResolvers<AbortSignal>(), slow=Promise.withResolvers<string>();
+	try {
+		f.offer("A"); const call=f.core.join("A")!; await call.brief();
+		const original=readback(await speak(call,proposal)).draft;
+		await f.heard(call);
+		f.setReply((_,signal)=>{started.resolve(signal);return slow.promise});
+		const discussion=speak(call,"Before I confirm, remind me why this is the recommended choice.");
+		const signal=await started.promise;
+		const repeated=await speak(call,followup);
+		expect(signal.aborted).toBe(true);
+		expect(await discussion).toEqual({kind:"stale"});
+		expect(repeated).toMatchObject({kind:"say",draft:original});
+		expect(f.writes).toEqual([]);
+		slow.resolve('{"clarify":true}'); await nextTurn();
+		await f.heard(call);
+		expect((await speak(call,"Yes.")).kind).toBe("accepted");
+		expect(f.writes).toEqual([["A",{rev:"r4",lane:"p",count:3}]]);
+	} finally {slow.resolve('{"clarify":true}');f.core.close()}
+});
+test('failed classification still discards the previous proposal rather than reviving it',async()=>{
+	const f=fixture();
+	try {
+		f.offer("A"); const call=f.core.join("A")!; await call.brief();
+		readback(await speak(call,proposal));
+		f.setReply(()=>{throw Error("provider unavailable")});
+		expect((await speak(call,"Change that choice.")).kind).toBe("say");
+		expect(await speak(call,"Yes.")).toEqual({kind:"ignored"});
+		expect(f.writes).toEqual([]);
 	} finally {f.core.close()}
 });

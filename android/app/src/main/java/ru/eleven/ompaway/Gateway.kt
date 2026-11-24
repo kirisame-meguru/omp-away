@@ -9,6 +9,8 @@ import com.google.firebase.messaging.FirebaseMessaging
 import ru.eleven.ompaway.security.InboxItem
 import ru.eleven.ompaway.security.PairedChannel
 import java.util.concurrent.FutureTask
+import org.json.JSONArray
+import org.json.JSONObject
 
 class Gateway : Application() {
     internal lateinit var store: InboxStore
@@ -46,6 +48,7 @@ class Gateway : Application() {
     private val joinTimeout = Runnable { if (call != null && !talking) endCall("Voice did not become ready. Request remains pending.") }
     @Volatile private var call: CallService? = null
     internal val callId: String? get() = call?.id
+    internal val callVisual: CallVisualSource? get() = call
     private var endingId: String? = null
     internal val idle get() = call == null && endingId == null
     internal var talking = false
@@ -60,6 +63,58 @@ class Gateway : Application() {
         private set
     internal val paired get() = current().channel.isPaired()
     private val sentSilences = mutableSetOf<String>()
+    internal val forms = mutableMapOf<String, JSONObject>()
+    internal val drafts = mutableMapOf<String, JSONObject>()
+    internal val noteDrafts = mutableMapOf<String, JSONArray>()
+    internal val formMessages = mutableMapOf<String, String>()
+    internal val submitting = mutableSetOf<String>()
+    internal var answerReceipt: String? = null
+        private set
+    private val loadingForms = mutableSetOf<String>()
+    private val awaitingReceipts = mutableSetOf<String>()
+
+    internal fun loadForm(id: String) {
+        if (!verifiedInbox || id !in store.state.pending || id in forms || id in formMessages || !loadingForms.add(id)) return
+        val s = current()
+        s.channel.form(id)
+        main.postDelayed({
+            if (session === s && loadingForms.remove(id)) {
+                formMessages[id] = "Question did not arrive. Reconnect to refresh."
+                changed()
+            }
+        }, 30_000)
+    }
+
+    internal fun answer(id: String, values: JSONObject, notes: JSONArray) {
+        if (observer == null || !verifiedInbox || !idle || requestedJoin != null ||
+            id !in forms || id !in store.state.pending || id in submitting) return
+        acknowledge(id)
+        answerReceipt = null
+        submitting.add(id); formMessages[id] = "Submitting…"
+        awaitingReceipts.add(id)
+        drafts[id] = values; noteDrafts[id] = notes
+        val s = current()
+        if (!s.channel.answer(id, values, notes)) {
+            submitting.remove(id)
+            awaitingReceipts.remove(id)
+            formMessages[id] = "Answer was not sent. Check the connection or shorten your text."
+            changed(); return
+        }
+        main.postDelayed({
+            if (session === s && id in submitting && formMessages[id] == "Submitting…") {
+                formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
+                changed()
+            }
+        }, 30_000)
+        changed()
+    }
+
+    private fun invalidateForms() {
+        forms.clear(); loadingForms.clear()
+        awaitingReceipts.clear()
+        formMessages.keys.retainAll(submitting)
+        for (id in submitting) formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -129,6 +184,7 @@ class Gateway : Application() {
     }
 
     private fun refreshToken() {
+        if (BuildConfig.ISOLATED_INTEGRATION) return
         val lookup = tokenState.beginLookup()
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             if (tokenState.isCurrent(lookup)) {
@@ -214,6 +270,10 @@ class Gateway : Application() {
     internal fun join(id: String) {
         acknowledge(id)
         if (observer == null || !validId(id)) return
+        if (id in submitting || forms[id]?.optBoolean("voice", true) == false) {
+            status = "Voice is unavailable for this question. Review its answer on the home screen."
+            changed(); return
+        }
         if (!idle) { status = "End the current call before answering another request."; changed(); return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             status = "Microphone permission is required. Nothing was joined."; changed(); return
@@ -292,6 +352,7 @@ class Gateway : Application() {
         endingId = null
         verifiedInbox = false; verifyEmoji = null; pairing = false; sentSilences.clear()
         store.state.invalidateDetails()
+        invalidateForms()
         old?.channel?.close()
     }
 
@@ -300,6 +361,11 @@ class Gateway : Application() {
         check(Looper.myLooper() == Looper.getMainLooper())
         val channel = current().channel
         val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
+        for (id in removed) {
+            forms.remove(id); drafts.remove(id); noteDrafts.remove(id)
+            loadingForms.remove(id); formMessages.remove(id)
+        }
+        submitting.removeAll(removed)
         for (id in removed) Invites.cancel(this, id)
         verifiedInbox = true; sentSilences.removeAll(removed)
         val toSilence = store.state.silenced.filter { sentSilences.add(it) }
@@ -342,6 +408,34 @@ class Gateway : Application() {
 
         override fun onInbox(items: List<InboxItem>) = ui { reconcileInbox(items) }
 
+        override fun onForm(requestId: String, form: JSONObject?) = ui {
+            loadingForms.remove(requestId)
+            if (!verifiedInbox || requestId !in store.state.pending) return@ui
+            if (form != null) {
+                forms[requestId] = form
+                if (requestId !in submitting) formMessages.remove(requestId)
+            } else {
+                forms.remove(requestId)
+                if (requestId !in submitting)
+                    formMessages[requestId] = "Touch answers are unavailable for this question. Review details or use voice."
+            }
+            changed()
+        }
+
+        override fun onAnswer(requestId: String, status: String, message: String) = ui {
+            if (!awaitingReceipts.remove(requestId)) return@ui
+            // An uncertain delivery is never automatically retried, including across reconnects.
+            if (status == "invalid" || status == "busy") submitting.remove(requestId)
+            if (requestId in store.state.pending) formMessages[requestId] = message
+            this@Gateway.status = message
+            answerReceipt = message
+            if (status == "accepted" || status == "stale") {
+                forms.remove(requestId); drafts.remove(requestId); noteDrafts.remove(requestId)
+                channel.list()
+            }
+            changed()
+        }
+
         override fun onQuestion(requestId: String, display: QuestionDisplay?) = ui {
             if (verifiedInbox && store.state.question(requestId, display)) changed()
         }
@@ -383,6 +477,7 @@ class Gateway : Application() {
             }
             requestedJoin = null
             verifiedInbox = false; store.state.invalidateDetails()
+            invalidateForms()
             endCall(null); verifyEmoji = null; pairing = false; connecting = false
             status = when (code) {
                 "relay_origin_required" -> "Relay setup required. Pairing keys have been retained."
@@ -398,6 +493,7 @@ class Gateway : Application() {
             ui {
                 endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
                 store.state.invalidateDetails()
+                invalidateForms()
                 endingId = null
                 if (!status.startsWith("Desktop connection error")) status = "Disconnected. Showing cached inbox."
                 changed()

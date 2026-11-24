@@ -13,7 +13,7 @@ const runtimeWarnings: Readonly<Record<string,string>> = {
 	relay_disconnected: "Relay disconnected; reconnecting",
 	"phone-control-unavailable": "Could not update the phone",
 	"unsupported-form": "This form is not supported by Away voice",
-	"invite-unavailable": "Could not send the phone invitation",
+	"invite-unavailable": "Push notifications could not be sent; open the phone inbox or use the desktop",
 };
 
 export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"close"> {
@@ -75,7 +75,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		},
 	},code=>{
 		const warning=Object.hasOwn(runtimeWarnings,code) ? runtimeWarnings[code] : undefined;
-		notify(`Away: ${warning ?? code}. The desktop form stays available.`,warning===undefined?"error":"warning");
+		notify(`Away: ${warning ?? (code==="phone_protocol_error" ? "Invalid phone data; the connection was closed" : code)}.`,warning===undefined?"error":"warning");
 	});
 	if (!current()) {await runtime.close();return}
 	notify("Away: secure mobile gateway ready");

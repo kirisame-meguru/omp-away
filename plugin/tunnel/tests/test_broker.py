@@ -509,6 +509,52 @@ class BrokerTest(test_relay.RelayTest):
         self.assertTrue((await self.host.command('control', **dest, message=error))['ok'])
         self.assertEqual(json.loads((await phone.read_frame())[1]), error)
 
+    async def test_completed_call_tail_is_discarded_and_next_call_keeps_its_owner(self):
+        phone = await self.phone()
+        connected = await self.host.expect('connected')
+        second = await self.session()
+        await second.expect('connected')
+        dest = {'deviceId': 'phone_1', 'ref': connected['ref']}
+        items = []
+        for session, request in [(self.host.local, 'request_a'), (second, 'request_b')]:
+            item = {'requestId': request, 'project': 'Test', 'question': 'Choose', 'createdAt': 1}
+            items.append(item)
+            self.assertTrue((await session.command('control', **dest, message={'type': 'inbox', 'items': [item]}))['ok'])
+            await phone.read_frame()
+        await phone.send_json({'type': 'join', 'requestId': 'request_a'})
+        await self.host.expect('message')
+        self.assertTrue((await self.host.command('control', **dest, message={'type': 'joined', 'requestId': 'request_a'}))['ok'])
+        await phone.read_frame()
+        await phone.send_frame(2, b'a' * 960)
+        self.assertEqual((await self.host.expect('pcm'))['pcm'], b'a' * 960)
+        mark = {'type': 'mark', 'requestId': 'request_a', 'mark': 'tail-mark'}
+        self.assertTrue((await self.host.command('control', **dest, message=mark))['ok'])
+        await phone.read_frame()
+        self.assertTrue((await self.host.command('control', **dest, message={'type': 'ended', 'requestId': 'request_a'}))['ok'])
+        # Send the already-captured microphone tail before observing the desktop's end.
+        await phone.send_frame(2, b'x' * 960)
+        await phone.send_frame(2, b'y' * 960)
+        await phone.send_json({'type': 'hangup', 'requestId': 'request_a'})
+        await phone.send_json({'type': 'played', 'requestId': 'request_a', 'mark': 'tail-mark'})
+        self.assertEqual(json.loads((await phone.read_frame())[1]), {'type': 'ended', 'requestId': 'request_a'})
+        await phone.send_json({'type': 'list', 'details': True})
+        for session in (self.host.local, second):
+            # The ordered list fences the tail: no PCM, error, hangup, or lost event leaked.
+            self.assertEqual((await session.expect('message'))['message'], {'type': 'list', 'details': True})
+        # Preserve the release's complete-snapshot handshake before the next call.
+        for session, item in zip((self.host.local, second), items):
+            self.assertTrue((await session.command('control', **dest, message={'type': 'inbox', 'items': [item]}))['ok'])
+        self.assertEqual(json.loads((await phone.read_frame())[1]), {'type': 'inbox', 'items': items})
+        await phone.send_json({'type': 'join', 'requestId': 'request_b'})
+        self.assertEqual((await second.expect('message'))['message']['requestId'], 'request_b')
+        self.assertTrue((await second.command('control', **dest, message={'type': 'joined', 'requestId': 'request_b'}))['ok'])
+        await phone.read_frame()
+        await phone.send_frame(2, b'b' * 960)
+        self.assertEqual((await second.expect('pcm'))['pcm'], b'b' * 960)
+        self.assertTrue((await self.host.command('devices'))['ok'])
+        self.assertFalse((await self.host.command('pcm', **dest, pcm=b'z' * 960))['ok'])
+        self.assertTrue(self.control_ready.empty())
+
     async def test_simultaneous_proxy_processes_elect_one_gateway_that_survives_its_first_parent(self):
         init = {**self.host.broker.init, 'stateDir': str(self.root / 'process-desktop')}
         fixture = Path(__file__).with_name('gateway_child.py')

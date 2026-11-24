@@ -324,7 +324,7 @@ function parseLiveServerEvent2(payload) {
     return parseLiveServerEvent(value);
   if (value.type !== "session.output_audio.delta") {
     const event = parseLiveServerEvent(value);
-    if (event?.type === "input_transcript.added" || event?.type === "turn.done" && event.turn.role === "user") {
+    if (event?.type === "input_transcript.added" || event?.type === "turn.done" || event?.type === "unknown" && event.wireType === "session.context.appended") {
       const range = event.type === "turn.done" ? value.turn : value;
       if (isRecord2(range) && typeof range.start_ms === "number" && typeof range.end_ms === "number" && Number.isFinite(range.start_ms) && Number.isFinite(range.end_ms) && range.start_ms >= 0 && range.end_ms >= range.start_ms)
         return { ...event, startMs: range.start_ms, endMs: range.end_ms };

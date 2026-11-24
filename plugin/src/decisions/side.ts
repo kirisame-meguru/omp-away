@@ -1,13 +1,14 @@
 import consult from "../../prompts/decisions/consult.md" with { type: "text" };
 import extract from "../../prompts/decisions/extract.md" with { type: "text" };
+import verify from "../../prompts/decisions/verify.md" with { type: "text" };
 import { logger } from "@oh-my-pi/pi-utils";
 import type { DecisionForm } from "./form";
 
 export interface SideContext {
 	runEphemeralTurn?(options:{promptText:string;tools:false;signal:AbortSignal;purpose:string;dedupeReply:false;maxContextBytes:number;minimizeEffort?:boolean;onTextDelta:(text:string)=>void}):Promise<{replyText:string;assistantMessage:{stopReason:string}}>;
 }
-type SidePurpose="consult"|"extract";
-const prompts = {consult,extract};
+type SidePurpose="consult"|"extract"|"verify";
+const prompts = {consult,extract,verify};
 export type Exchange = {question:string; answer:string};
 export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):Promise<T> {
 	signal.throwIfAborted();
@@ -23,7 +24,7 @@ export async function untilAbort<T>(start:()=>Promise<T>|T, signal:AbortSignal):
 }
 /** The only model boundary. No sendUserMessage, live delegation, tools or main-session mutation. */
 export async function side(ctx: SideContext, form: DecisionForm, kind:SidePurpose, data: Record<string,unknown>, signal: AbortSignal): Promise<string> {
-	const byteCap = kind === "extract" ? 8192 : 2048;
+	const byteCap = kind === "consult" ? 2048 : 8192;
 	signal.throwIfAborted();
 	const started=performance.now();
 	let completed=false;

@@ -14,7 +14,8 @@ export function parseLiveServerEvent(payload: unknown): LiveServerEvent | null {
 	if (!isRecord(value)) return parseStock(value);
 	if (value.type !== 'session.output_audio.delta') {
 		const event=parseStock(value);
-		if (event?.type==='input_transcript.added' || (event?.type==='turn.done' && event.turn.role==='user')) {
+		if (event?.type==='input_transcript.added' || event?.type==='turn.done' ||
+			(event?.type==='unknown' && event.wireType==='session.context.appended')) {
 			const range=event.type==='turn.done' ? value.turn : value;
 			if (isRecord(range) && typeof range.start_ms==='number' && typeof range.end_ms==='number' &&
 				Number.isFinite(range.start_ms) && Number.isFinite(range.end_ms) && range.start_ms>=0 && range.end_ms>=range.start_ms)
