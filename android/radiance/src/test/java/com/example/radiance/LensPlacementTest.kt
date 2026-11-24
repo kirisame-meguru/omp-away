@@ -55,4 +55,29 @@ class LensPlacementTest {
         assertEquals(scale, placement.scale, 0f)
         assertEquals(432f, placement.baseRadius, 0f)
     }
+
+    @Test fun compactLensFitsItsHeaderSlotAndRestoresVoicePlacement() {
+        val placement = LensPlacement(topAnchored = true, density = 3f)
+        placement.resize(1080, 2160, 72f)
+        val voiceScale = placement.scale
+        val voiceBottom = placement.restingBottom
+        placement.compact = true
+        for (size in listOf(56, 112, 168)) {
+            placement.resize(size, size, 0f)
+            val shell = ShellMotion()
+            for (mode in 0..3) {
+                shell.target(mode, true)
+                val radius = placement.baseRadius * placement.scale
+                val center = size * .33f - placement.lift(shell) * placement.baseRadius
+                assertTrue("Lens must not cover adjacent controls", radius * shell.width * 2f < size)
+                assertTrue(center - radius * shell.height * .744f >= 0f)
+                assertTrue(center + radius * shell.height * .744f <= size)
+                if (mode == 1) assertEquals(size * .5f, center, .001f)
+            }
+        }
+        placement.compact = false
+        placement.resize(1080, 2160, 72f)
+        assertEquals(voiceScale, placement.scale, 0f)
+        assertEquals(voiceBottom, placement.restingBottom, 0f)
+    }
 }

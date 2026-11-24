@@ -23,10 +23,11 @@ class OrbFallback(
     private var background: Shader? = null
     private var glass: Shader? = null
     private var rim: Shader? = null
+    private var scrim: Shader? = null
     private val spectral = arrayOf(
         LinearGradient(-.5f,-.2f,.5f,.2f,intArrayOf(0x33132dff,0xdd126aff.toInt(),0xaa96efff.toInt()),null,Shader.TileMode.CLAMP),
         LinearGradient(-.5f,-.2f,.5f,.2f,intArrayOf(0x33ff1c03,0xddff3b05.toInt(),0xaaffca69.toInt()),null,Shader.TileMode.CLAMP),
-        RadialGradient(0f,.065f,.6f,intArrayOf(0xccd9f6ff.toInt(),0x3384b5c0,Color.TRANSPARENT),null,Shader.TileMode.CLAMP),
+        RadialGradient(0f,0f,.6f,intArrayOf(0xccd9f6ff.toInt(),0x3384b5c0,Color.TRANSPARENT),null,Shader.TileMode.CLAMP),
     )
     private var elapsed = .72f
     private var previous = 0L
@@ -56,6 +57,9 @@ class OrbFallback(
         background = LinearGradient(0f,0f,w.toFloat(),h*.6f,intArrayOf(0xff46372b.toInt(),0xff777065.toInt(),0xffaaa195.toInt()),null,Shader.TileMode.CLAMP)
         glass = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(Color.BLACK, Color.BLACK, 0xff3c3839.toInt(), 0xff645c4b.toInt()), floatArrayOf(0f,.33f,.65f,1f), Shader.TileMode.CLAMP)
         rim = LinearGradient(0f, -.74f, 0f, .74f, intArrayOf(0x223e454c,0x779798a2,0xffe2e1d5.toInt()), null, Shader.TileMode.CLAMP)
+        scrim = LinearGradient(0f, h*.53f, 0f, h*.72f,
+            intArrayOf(Color.TRANSPARENT, 0x25000000, 0x76000000, 0xc6000000.toInt(), 0xeb000000.toInt()),
+            null, Shader.TileMode.CLAMP)
     }
 
     private fun updateLens() {
@@ -120,7 +124,7 @@ class OrbFallback(
                     val x = if (side == 0) -1f + step / 24f else 1f - step / 24f
                     val taper = max(0f, 1f - x*x)
                     val envelope = taper*taper
-                    val y = .065f - amplitude*envelope*sin(angle+x*1.65f+side*1.95f)
+                    val y = -amplitude*envelope*sin(angle+x*1.65f+side*1.95f)
                     if (side == 0 && step == 0) sheet.moveTo(x,y) else sheet.lineTo(x,y)
                 }
                 sheet.close()
@@ -141,8 +145,9 @@ class OrbFallback(
         paint.shader = null
         paint.alpha = 255
         if (layer != OrbLayer.LENS) {
-            paint.color = 0xe8000000.toInt()
-            canvas.drawRect(0f, height*.58f, width.toFloat(), height.toFloat(), paint)
+            paint.shader = scrim
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            paint.shader = null
         }
         if (layer != OrbLayer.SCENE && motion && resumed && isShown && windowVisibility == VISIBLE && (shell.moving || shell.opacity > 0f)) {
             postInvalidateOnAnimation()

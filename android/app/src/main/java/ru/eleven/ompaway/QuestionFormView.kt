@@ -16,6 +16,8 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.TableLayout
+import android.widget.TableRow
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONException
@@ -34,7 +36,7 @@ internal class QuestionFormView(
     private val inputs = mutableListOf<View>()
     private val validators = mutableListOf<() -> String?>()
     private val message = label("")
-    private val send = RadianceUi.button(context, "Submit answer") {
+    private val send = RadianceUi.button(context, "Submit answer", primary = true) {
         val error = validators.firstNotNullOfOrNull { it() }
         if (error == null) submit(values(), notes())
         else {
@@ -102,11 +104,11 @@ internal class QuestionFormView(
                         for (k in 0 until items.length()) addView(label("${if (block.optBoolean("ordered")) "${k + 1}." else "•"} ${spans(items.getJSONArray(k))}"))
                     }
                     "table" -> {
-                        val table = LinearLayout(context).apply { orientation = VERTICAL }
+                        val table = TableLayout(context)
                         val rows = block.getJSONArray("rows")
                         for (k in 0 until rows.length()) {
                             val cells = rows.getJSONArray(k)
-                            val row = LinearLayout(context)
+                            val row = TableRow(context)
                             for (c in 0 until cells.length()) row.addView(label(spans(cells.getJSONArray(c)), k < block.optInt("headerRows")).apply {
                                 minWidth = dp(140); maxWidth = dp(280); setPadding(dp(8), dp(8), dp(8), dp(8))
                             })
@@ -152,7 +154,9 @@ internal class QuestionFormView(
         if (field.getString("kind") == "text") {
             val edit = editor(field.optBoolean("multiline"))
             edit.contentDescription = caption
-            edit.hint = field.optString("placeholder")
+            // Keep authored instructions readable without changing single-line or numeric input.
+            val placeholder = field.optString("placeholder")
+            if (placeholder.isNotBlank()) addView(label(placeholder))
             edit.inputType = when (field.optString("type")) {
                 "number", "range" -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
                 "email" -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
@@ -182,6 +186,7 @@ internal class QuestionFormView(
                     else -> null
                 }
                 edit.error = error
+                if (error != null) edit.requestFocus()
                 error?.let { "$caption: $it" }
             }
             addView(edit, LayoutParams(-1, -2))
@@ -203,7 +208,7 @@ internal class QuestionFormView(
             control.id = View.generateViewId()
             control.text = spans(option.getJSONArray("label")).ifEmpty { value }
             control.contentDescription = "$caption: ${control.text}"
-            control.setTextColor(RadianceUi.cream); control.buttonTintList = RadianceUi.tint; control.textSize = 16f
+            control.setTextColor(RadianceUi.textColors); control.buttonTintList = RadianceUi.tint; control.textSize = 16f
             control.minHeight = dp(48); control.isEnabled = !option.optBoolean("disabled")
             if (control.isEnabled) inputs.add(control)
             val checked = control.isEnabled && if (draft != null) value in values else option.optBoolean("checked")
@@ -216,9 +221,9 @@ internal class QuestionFormView(
         if (field.optBoolean("other")) {
             val custom = values.firstOrNull { value -> controls.none { it.second == value } }
             other = if (multi) CheckBox(context) else RadioButton(context)
-            other.id = View.generateViewId(); other.text = "Other"; other.setTextColor(RadianceUi.cream)
+            other.id = View.generateViewId(); other.text = "Other"; other.setTextColor(RadianceUi.textColors)
             other.contentDescription = "$caption: Other"
-            other.buttonTintList = RadianceUi.tint; other.minHeight = dp(48)
+            other.buttonTintList = RadianceUi.tint; other.minHeight = dp(48); other.textSize = 16f
             inputs.add(other)
             group.addView(other, LayoutParams(-1, -2))
             if (multi) other.isChecked = custom != null else if (custom != null) initial = other as RadioButton
@@ -293,7 +298,7 @@ internal class QuestionFormView(
     }
 
     private fun editor(multiline: Boolean) = EditText(context).apply {
-        setTextColor(RadianceUi.cream); setHintTextColor(RadianceUi.muted); textSize = 16f
+        setTextColor(RadianceUi.textColors); setHintTextColor(RadianceUi.muted); textSize = 16f
         backgroundTintList = android.content.res.ColorStateList.valueOf(RadianceUi.muted)
         minHeight = dp(56)
         isSaveEnabled = false

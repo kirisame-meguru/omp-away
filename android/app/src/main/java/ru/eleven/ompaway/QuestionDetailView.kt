@@ -14,8 +14,8 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
     init {
         isFillViewport = true; addView(body); contentDescription = "Read-only question and options"
         isNestedScrollingEnabled = false
-        background = RadianceUi.surface(context, 0x40181824, 18)
-        val padding = RadianceUi.dp(context, 14)
+        background = RadianceUi.surface(context, RadianceUi.surfaceColor, 8)
+        val padding = RadianceUi.dp(context, 16)
         body.setPadding(padding, padding, padding, padding)
     }
 
@@ -51,7 +51,7 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
     }
 
     private fun label(value: String, heading: Boolean = false) =
-        RadianceUi.text(context, value, if (heading) 18 else 17, heading).apply {
+        RadianceUi.text(context, value, if (heading) 18 else 16, heading).apply {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         }.also { body.addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)) }
 }

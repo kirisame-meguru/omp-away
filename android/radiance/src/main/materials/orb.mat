@@ -69,7 +69,7 @@ fragment {
         float level = materialParams.energy;
         float amplitude = 0.018 + 0.235*level;
         float phase = materialParams.time*3.5 + 0.30;
-        float baseline = -0.065;
+        float baseline = 0.0;
         vec3 radiance = vec3(0.0);
         for (int i=0; i<3; i++) {
             float layer = float(i);
@@ -111,7 +111,7 @@ fragment {
         float fold = baseline+amplitude*envelope*0.45*sin(phase+x*1.65+0.9);
         float foldGlow = exp(-pow((p.y-fold)/(0.012+0.026*level),2.0));
         radiance += vec3(0.90,0.97,1.0)*foldGlow*envelope*level*1.25;
-        float quiet = exp(-pow((p.y-baseline+envelope*0.02)/0.016,2.0));
+        float quiet = exp(-pow((p.y-baseline)/0.016,2.0));
         radiance += vec3(0.65,0.75,0.80)*quiet*envelope*(1.0-level)*0.65;
         return radiance;
     }

@@ -39,14 +39,14 @@ class IncomingCallActivity : Activity() {
             setPadding(RadianceUi.dp(this@IncomingCallActivity, 20), 0,
                 RadianceUi.dp(this@IncomingCallActivity, 20), RadianceUi.dp(this@IncomingCallActivity, 12))
         }
-        body.addView(RadianceUi.text(this, "Incoming away call", 28, heading = true))
+        body.addView(RadianceUi.text(this, "Incoming call", 24, heading = true))
         body.addView(RadianceUi.text(this,
-            "Desktop request. Unlock to review the private question. Answering starts voice, not form submission.", 18))
+            "Unlock to review the question. Answer starts a voice call; it does not submit an answer.", 16))
         val actions = RadianceUi.column(this).apply {
             val padding = RadianceUi.dp(this@IncomingCallActivity, 16)
             setPadding(padding, 0, padding, padding)
         }
-        actions.addView(RadianceUi.button(this, "Answer call") {
+        actions.addView(RadianceUi.button(this, "Answer call", primary = true) {
                 app.acknowledge(request)
                 fun open() {
                     startActivity(Intent().setComponent(ComponentName(packageName, "$packageName.AnswerCall"))
@@ -65,13 +65,14 @@ class IncomingCallActivity : Activity() {
         val sheet = RadianceUi.column(this).apply {
             background = RadianceUi.surface(this@IncomingCallActivity)
             setPadding(0, RadianceUi.dp(this@IncomingCallActivity, 16), 0, 0)
-            addView(ScrollView(this@IncomingCallActivity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(body, LinearLayout.LayoutParams(-1, -2))
             addView(actions, LinearLayout.LayoutParams(-1, -2))
         }
         val overlay = FrameLayout(this).apply {
-            addView(sheet, FrameLayout.LayoutParams(-1, -1, Gravity.BOTTOM).apply {
+            addView(ScrollView(this@IncomingCallActivity).apply { addView(sheet) },
+                FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
                 val margin = RadianceUi.dp(this@IncomingCallActivity, 16)
-                setMargins(margin, RadianceUi.dp(this@IncomingCallActivity, 104), margin, margin)
+                setMargins(margin, margin, margin, margin)
             })
         }
         setContentView(FrameLayout(this).apply {

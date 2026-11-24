@@ -57,8 +57,8 @@ internal class CallScreen(
         surface?.let { addView(it, LayoutParams(-1, -1)) }
         addView(fallback, LayoutParams(-1, -1))
     }
-    private val title = label("Your desktop, in reach.", 30f)
-    private val callNotice = label("Voice captions · Not a submitted answer", 12f)
+    private val title = label("Voice call", 24f)
+    private val callNotice = label("Voice captions · Not a submitted answer", 14f)
     private val caller = label("", 16f)
     private val assistant = label("", 16f)
     private val transcript = CallTranscriptViews(title, caller, assistant)
@@ -83,6 +83,9 @@ internal class CallScreen(
     private var safeLeft = 0
     private var safeRight = 0
     private var safeBottom = 0
+    private var safeTop = 0
+    private val slotLocation = IntArray(2)
+    private val overlayLocation = IntArray(2)
 
     init {
         shell.target(4, true)
@@ -92,42 +95,43 @@ internal class CallScreen(
         backgroundFallback.visibility = if (flat) VISIBLE else INVISIBLE
         heading.apply {
             gravity = Gravity.CENTER_VERTICAL
-            background = RadianceUi.surface(context, 0xd9181824.toInt(), 24)
+            background = RadianceUi.surface(context)
             setPadding(dp(16), dp(4), dp(8), dp(4))
         }
-        heading.addView(label("away", 26f), LinearLayout.LayoutParams(0, -2, 1f))
-        heading.addView(settingsButton.apply {
-            styleButton(this); text = "Settings"
-            setOnClickListener { if (resumed) openSettings() }
-        })
+        heading.addView(label("away", 20f), LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(end)
         addView(heading, LayoutParams(-1, -2, Gravity.TOP).apply { setMargins(dp(12), dp(8), dp(12), 0) })
         content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(16), dp(10), dp(16), dp(8))
+        content.setPadding(dp(16), dp(12), dp(16), dp(8))
         content.gravity = Gravity.CENTER_HORIZONTAL
-        content.background = RadianceUi.surface(context, 0xc9181824.toInt(), 24)
+        content.background = RadianceUi.surface(context)
         title.gravity = Gravity.CENTER
-        title.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        title.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         content.addView(title, LinearLayout.LayoutParams(-1, -2))
         callNotice.gravity = Gravity.CENTER
-        callNotice.setTextColor(0xffc5bfcc.toInt())
+        callNotice.setTextColor(RadianceUi.muted)
         content.addView(callNotice, LinearLayout.LayoutParams(-1, -2))
-        caller.setTextColor(0xffc5bfcc.toInt())
+        caller.setTextColor(RadianceUi.muted)
         content.addView(caller, LinearLayout.LayoutParams(-1, -2))
-        assistant.setTextColor(0xffc5bfcc.toInt())
+        assistant.setTextColor(RadianceUi.muted)
         content.addView(assistant, LinearLayout.LayoutParams(-1, -2))
         controls.orientation = LinearLayout.VERTICAL
         controls.setPadding(dp(24), 0, dp(24), dp(16))
-        val captions = ScrollView(context).apply { isFillViewport = true; addView(content) }
-        controls.addView(captions, LinearLayout.LayoutParams(-1, 0, 1f))
+        val body = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(content, LinearLayout.LayoutParams(-1, -2))
+        }
+        val captions = ScrollView(context).apply { isFillViewport = true; addView(body) }
+        controls.addView(captions, LinearLayout.LayoutParams(-1, -1))
         callActions.gravity = Gravity.CENTER
         callActions.background = GradientDrawable().apply {
-            setColor(0xcc1c1c2b.toInt()); cornerRadius = dp(26).toFloat()
+            setColor(RadianceUi.cardColor); cornerRadius = dp(12).toFloat()
         }
-        callActions.setPadding(dp(6), dp(4), dp(6), dp(4))
+        callActions.setPadding(dp(8), dp(4), dp(8), dp(4))
         styleButton(speaker)
         speaker.setOnClickListener { if (resumed && !ending) changeSpeaker(!speakerEnabled) }
-        styleButton(end)
-        end.text = "Hang up"; end.setTextColor(0xffe9898f.toInt())
+        RadianceUi.styleButton(end, quiet = true, destructive = true)
+        end.text = "Hang up"
         end.setOnClickListener { if (resumed && !ending) hangup() }
         callActions.addView(speaker, LinearLayout.LayoutParams(0, -2, 1f))
         callActions.addView(Button(context).apply {
@@ -135,10 +139,21 @@ internal class CallScreen(
             contentDescription = "View questions and proposed answer"
             setOnClickListener { if (resumed && !ending) openInbox() }
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        callActions.addView(end, LinearLayout.LayoutParams(0, -2, 1f))
-        controls.addView(callActions, LinearLayout.LayoutParams(-1, -2))
+        callActions.addView(settingsButton.apply {
+            styleButton(this); text = "Settings"
+            setOnClickListener { if (resumed) openSettings() }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        body.addView(callActions, LinearLayout.LayoutParams(-1, -2))
         addView(controls, LayoutParams(-1, -2, Gravity.BOTTOM))
         addView(voiceOverlay, LayoutParams(-1, -1))
+        voiceOverlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updatePlacement()
+            layoutControls()
+        }
+        heading.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updatePlacement()
+            layoutControls()
+        }
         setOnApplyWindowInsetsListener { _, insets ->
             val top: Int
             if (Build.VERSION.SDK_INT >= 30) {
@@ -154,9 +169,9 @@ internal class CallScreen(
                 @Suppress("DEPRECATION")
                 top = insets.systemWindowInsetTop
             }
-            placement.resize(width, height, top.toFloat())
+            safeTop = top
+            updatePlacement()
             layoutControls()
-            surface?.refreshPlacement(); fallback.invalidate()
             insets
         }
         showActions()
@@ -172,14 +187,45 @@ internal class CallScreen(
         heading.visibility = if (panelOpen || source == null) GONE else VISIBLE
         controls.visibility = if (panelOpen || source == null) INVISIBLE else VISIBLE
         settingsButton.visibility = if (panelOpen) GONE else VISIBLE
+        if (panelOpen && source == null) voiceOverlay.visibility = INVISIBLE
         content.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
     }
 
     fun setPanelOpen(open: Boolean) {
-        panelOpen = open
+        if (panelOpen != open) {
+            panelOpen = open
+            voiceOverlay.visibility = if (open) INVISIBLE else VISIBLE
+            if (!open) voiceOverlay.layoutParams = LayoutParams(-1, -1)
+            updatePlacement()
+            layoutControls()
+        }
         showActions()
         importantForAccessibility = if (open) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             else IMPORTANT_FOR_ACCESSIBILITY_AUTO
+    }
+
+    fun placePanelLens(slot: View) {
+        if (!panelOpen || source == null || slot.width <= 0 || slot.height <= 0) return
+        slot.getLocationInWindow(slotLocation)
+        (voiceOverlay.parent as? View)?.getLocationInWindow(overlayLocation) ?: return
+        val size = minOf(slot.width, slot.height, dp(64))
+        val left = slotLocation[0] - overlayLocation[0] + (slot.width - size) / 2
+        val top = slotLocation[1] - overlayLocation[1] + (slot.height - size) / 2
+        val params = voiceOverlay.layoutParams as LayoutParams
+        if (params.width != size || params.height != size || params.leftMargin != left || params.topMargin != top) {
+            params.width = size; params.height = size
+            params.leftMargin = left; params.topMargin = top
+            voiceOverlay.layoutParams = params
+        }
+        voiceOverlay.visibility = VISIBLE
+    }
+
+    private fun updatePlacement() {
+        placement.compact = panelOpen
+        placement.resize(voiceOverlay.width, voiceOverlay.height,
+            if (panelOpen) 0f else (safeTop + heading.height).toFloat())
+        surface?.refreshPlacement()
+        fallback.invalidate()
     }
 
     fun bind(next: CallVisualSource?) {
@@ -210,30 +256,39 @@ internal class CallScreen(
     }
 
     private fun label(value: String, size: Float) = TextView(context).apply {
-        text = value; textSize = size; setTextColor(0xfff4eee4.toInt())
-        setPadding(0, dp(5), 0, dp(8))
+        text = value; textSize = size; setTextColor(RadianceUi.cream)
+        setPadding(0, dp(4), 0, dp(8))
         textDirection = View.TEXT_DIRECTION_FIRST_STRONG
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density + .5f).toInt()
     private fun still() = !animations
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        placement.resize(w, h)
+        updatePlacement()
         layoutControls()
-        surface?.refreshPlacement(); fallback.invalidate()
     }
 
     private fun layoutControls() {
         heading.layoutParams = (heading.layoutParams as LayoutParams).apply {
             leftMargin = maxOf(dp(12), safeLeft)
             rightMargin = maxOf(dp(12), safeRight)
-            topMargin = placement.topInset.toInt() + dp(8)
+            topMargin = safeTop + dp(8)
         }
         controls.setPadding(maxOf(dp(24), safeLeft), 0, maxOf(dp(24), safeRight), maxOf(dp(16), safeBottom))
-        val viewportHeight = height
-        val fraction = if (width > viewportHeight) .55f else .43f
-        controls.layoutParams = (controls.layoutParams as LayoutParams).apply {
-            height = (viewportHeight * fraction).toInt().coerceAtLeast(dp(190)).coerceAtMost(viewportHeight)
+        val stacked = width / resources.displayMetrics.density / resources.configuration.fontScale < 360f
+        val orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        if (callActions.orientation != orientation) {
+            callActions.orientation = orientation
+            for (index in 0 until callActions.childCount) {
+                callActions.getChildAt(index).layoutParams = if (stacked)
+                    LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f)
+            }
+        }
+        if (!panelOpen) {
+            val top = (placement.restingBottom.toInt() + dp(16)).coerceIn(0, height)
+            controls.layoutParams = (controls.layoutParams as LayoutParams).apply {
+                height = this@CallScreen.height - top
+            }
         }
     }
 

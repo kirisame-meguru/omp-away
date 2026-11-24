@@ -164,7 +164,7 @@ class RadianceHomeTest {
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
             val renderer = scene.getChildAt(0)
             click("Pair desktop")
-            await { texts(activity.window.decorView).contains("Pair a desktop") }
+            await { texts(activity.window.decorView).contains("Pair desktop") }
             instrumentation.runOnMainSync {
                 assertTrue(texts(activity.window.decorView).contains("Scan pairing QR"))
                 assertTrue(texts(activity.window.decorView).contains("Pair from clipboard"))
@@ -207,27 +207,31 @@ class RadianceHomeTest {
     }
 
     @Test fun animationsControlBothRendererClocksWithoutReplacingTheScene() {
+        check(BuildConfig.ISOLATED_INTEGRATION)
         val preferences = ScreenPreferences(context)
         val oldAnimations = preferences.animations
         val oldQuality = preferences.quality
         preferences.animations = true
         preferences.quality = 2
         val activity = launch()
+        val app = context.applicationContext as Gateway
+        val call = CallService(context, "animation-fixture", {}, {}, {})
+        val callField = Gateway::class.java.getDeclaredField("call").apply { isAccessible = true }
+        val render = InboxActivity::class.java.getDeclaredMethod("render").apply { isAccessible = true }
         try {
             val scene = descendants(activity.window.decorView).filterIsInstance<CallScreen>().single()
             val native = scene.getChildAt(0)
-            // Visual-only source: exercises renderer clocks without opening a microphone or channel.
+            // Register an active, unstarted call so the activity places its real panel lens.
+            // No microphone, channel, or pairing credentials are opened.
             instrumentation.runOnMainSync {
-                scene.bind(object : CallVisualSource {
-                    override val active = true
-                    override val connected = true
-                    override fun microphoneLevel(nowMillis: Long) = 0f
-                    override fun playbackLevel() = 0f
-                })
+                check(app.callVisual == null)
+                callField.set(app, call)
+                render.invoke(activity)
             }
             click("Settings")
             for (quality in listOf("2D", "GPU")) {
                 click(quality)
+                await { scene.voiceOverlay.isShown && scene.voiceOverlay.width > 0 }
                 val renderer = if (quality == "2D")
                     descendants(scene.voiceOverlay).filterIsInstance<com.example.radiance.OrbFallback>().single()
                 else descendants(scene.voiceOverlay).filterIsInstance<com.example.radiance.OrbSurface>().single()
@@ -251,7 +255,11 @@ class RadianceHomeTest {
             }
             click("Done")
         } finally {
-            instrumentation.runOnMainSync { activity.finish() }
+            instrumentation.runOnMainSync {
+                call.close()
+                callField.set(app, null)
+                activity.finish()
+            }
             preferences.animations = oldAnimations
             preferences.quality = oldQuality
         }
@@ -318,12 +326,12 @@ class RadianceHomeTest {
                     app.registerActivityLifecycleCallbacks(callbacks)
                 }
                 activity = recreate(activity)
-                await { texts(activity.window.decorView).contains("Verify your desktop") }
+                await { texts(activity.window.decorView).contains("Verify desktop") }
                 click("Back")
                 instrumentation.runOnMainSync {
-                    val expected = if (savedReturn == "REQUESTS") "Questions" else "Pair a desktop"
+                    val expected = if (savedReturn == "REQUESTS") "Questions" else "Pair desktop"
                     assertTrue(texts(activity.window.decorView).contains(expected))
-                    assertFalse(texts(activity.window.decorView).contains("Verify your desktop"))
+                    assertFalse(texts(activity.window.decorView).contains("Verify desktop"))
                     assertNull(app.callVisual)
                 }
             } finally {

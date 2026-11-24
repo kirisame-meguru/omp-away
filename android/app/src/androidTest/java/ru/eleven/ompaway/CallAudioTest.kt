@@ -24,6 +24,13 @@ import org.junit.Test
 import kotlin.math.sin
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import java.io.File
+import org.json.JSONObject
 import ru.eleven.ompaway.security.bytesJson
 
 class CallAudioTest {
@@ -118,12 +125,19 @@ class CallAudioTest {
         }
     }
     @Test fun isolatedDesktopSpeechReachesHardwareWithMicrophoneRunning() {
-        val port = InstrumentationRegistry.getArguments().getString("desktopAudioPort")?.toIntOrNull()
+        val arguments = InstrumentationRegistry.getArguments()
+        val port = arguments.getString("desktopAudioPort")?.toIntOrNull()
         assumeTrue("Requires the isolated desktop voice probe over adb reverse", port != null && port in 1024..65535)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        configureSpeaker()
         val context = instrumentation.targetContext
+        check(context.packageName == "ru.eleven.ompaway.integration") { "Disposable integration app only" }
+        val showCallScreen = arguments.getString("callScreen") == "on"
+        val snapshotRun = arguments.getString("callScreenSnapshots")
+        require(snapshotRun == null || showCallScreen && snapshotRun.matches(Regex("[a-z0-9-]{1,64}")))
+        if (!showCallScreen) configureSpeaker()
         val activity = instrumentation.startActivitySync(Intent(context, Activity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        var screen: CallScreen? = null
+        var visualProbe: LiveScreenProbe? = null
         try {
             lateinit var transcriptViews: CallTranscriptViews
             lateinit var callerView: TextView
@@ -137,16 +151,25 @@ class CallAudioTest {
             val callerFinals = AtomicInteger()
             val speakingTransitions = AtomicInteger()
             val listeningTransitions = AtomicInteger()
-            fun renderVoice() = transcriptViews.update(mediaReady, mediaSpeaking, callerText, callerFinal, assistantText, assistantFinal)
+            val microphoneFrames = AtomicInteger()
+            val receivedFrames = AtomicInteger()
+            fun renderVoice() {
+                val actual = screen
+                if (actual != null) actual.captions(callerText, callerFinal, assistantText, assistantFinal)
+                else if (!showCallScreen) transcriptViews.update(mediaReady, mediaSpeaking, callerText, callerFinal, assistantText, assistantFinal)
+            }
             instrumentation.runOnMainSync {
-                val column = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-                val status = TextView(activity)
-                callerView = TextView(activity)
-                val assistant = TextView(activity)
-                column.addView(status); column.addView(callerView); column.addView(assistant)
-                activity.setContentView(column)
-                transcriptViews = CallTranscriptViews(status, callerView, assistant)
-                renderVoice()
+                if (showCallScreen) activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else {
+                    val column = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+                    val status = TextView(activity)
+                    callerView = TextView(activity)
+                    val assistant = TextView(activity)
+                    column.addView(status); column.addView(callerView); column.addView(assistant)
+                    activity.setContentView(column)
+                    transcriptViews = CallTranscriptViews(status, callerView, assistant)
+                    renderVoice()
+                }
             }
             Socket(InetAddress.getLoopbackAddress(), port!!).use { socket ->
                 socket.soTimeout = 120_000
@@ -158,8 +181,13 @@ class CallAudioTest {
                 fun send(kind: Int, pcm: ByteArray? = null) = synchronized(output) {
                     output.write(kind); if (pcm != null) output.write(pcm); output.flush()
                 }
-                val call = CallService(context, "isolated-test", { send(1, it) },
-                    { played.incrementAndGet(); send(2) }, { failures.incrementAndGet(); send(3) },
+                val call = CallService(context, "isolated-test", { microphoneFrames.incrementAndGet(); send(1, it) },
+                    { played.incrementAndGet(); send(2) }, {
+                        failures.incrementAndGet()
+                        // The desktop may already have closed the transport after a failed scenario.
+                        // Keep the original failure observable without crashing before evidence cleanup.
+                        try { send(3) } catch (_: java.io.IOException) { }
+                    },
                     { instrumentation.runOnMainSync { mediaReady = true; renderVoice() } },
                     { active -> instrumentation.runOnMainSync {
                         mediaSpeaking = active
@@ -167,11 +195,37 @@ class CallAudioTest {
                         renderVoice()
                     } })
                 try {
-                    instrumentation.runOnMainSync { call.start() }
+                    instrumentation.runOnMainSync {
+                        if (showCallScreen) {
+                            val speakerMode = arguments.getString("speakerMode")
+                            require(speakerMode == null || speakerMode == "on" || speakerMode == "off")
+                            val enabled = speakerMode?.let { it == "on" } ?: CallAudioSettings(context).speakerEnabled
+                            check(call.setSpeakerEnabled(enabled))
+                            screen = CallScreen(activity, call, { next ->
+                                if (call.setSpeakerEnabled(next)) screen?.setSpeaker(next)
+                            }, { call.close(); socket.close() }).also {
+                                activity.setContentView(it); it.setSpeaker(enabled); it.resume()
+                            }
+                            renderVoice()
+                        }
+                        call.start()
+                    }
+                    if (showCallScreen) {
+                        visualProbe = LiveScreenProbe(activity, checkNotNull(screen), call, microphoneFrames, receivedFrames,
+                            snapshotRun?.let { File(context.filesDir, "acoustic-screen/$it") }) {
+                            callerFinal && assistantFinal && callerFinals.get() >= 2 &&
+                                callerText.isNotBlank() && assistantText.isNotBlank() &&
+                                containsText(checkNotNull(screen), "You: $callerText") &&
+                                containsText(checkNotNull(screen), "Assistant: $assistantText")
+                        }.also { it.start() }
+                    }
                     while (true) when (input.readUnsignedByte()) {
-                        1 -> call.receive(ByteArray(960).also { input.readFully(it) })
+                        1 -> {
+                            val pcm = ByteArray(960).also { input.readFully(it) }
+                            receivedFrames.incrementAndGet(); call.receive(pcm)
+                        }
                         2 -> call.mark("drain")
-                        3 -> break
+                        3 -> { visualProbe?.finishCaptions(); break }
                         4 -> {
                             val size = input.readInt()
                             require(size in 1..65536)
@@ -195,7 +249,9 @@ class CallAudioTest {
                         else -> error("Invalid isolated audio packet")
                     }
                     assertEquals("Real audio failed", 0, failures.get())
-                    if (CallAudioSettings(context).speakerEnabled) awaitSpeaker(context.getSystemService(AudioManager::class.java), true)
+                    val expectedSpeaker = if (showCallScreen) arguments.getString("speakerMode")?.let { it == "on" }
+                        ?: CallAudioSettings(context).speakerEnabled else CallAudioSettings(context).speakerEnabled
+                    if (expectedSpeaker) awaitSpeaker(context.getSystemService(AudioManager::class.java), true)
                     assertEquals("Opening and options did not physically drain", 2, played.get())
                     if (InstrumentationRegistry.getArguments().getString("captions") == "on") {
                         assertTrue("Live transcript snapshots never arrived", partialCaptions.get() > 0)
@@ -203,16 +259,156 @@ class CallAudioTest {
                         instrumentation.runOnMainSync {
                             assertTrue("The confirmation caption must be final", callerFinal)
                             assertTrue("The recognized confirmation must not be empty", callerText.isNotBlank())
-                            assertEquals("The caption view must show the actual recognized confirmation",
+                            if (showCallScreen) assertTrue("CallScreen must show the actual recognized caption",
+                                containsText(checkNotNull(screen), "You: $callerText"))
+                            else assertEquals("The caption view must show the actual recognized confirmation",
                                 "You: $callerText", callerView.text.toString())
                         }
                     }
                     assertTrue("Speaking phase never started", speakingTransitions.get() > 0)
                     assertTrue("Speaking phase did not return to listening after hardware playout", listeningTransitions.get() > 0)
-                } finally { instrumentation.runOnMainSync { call.close() } }
+                    visualProbe?.assertAudioDrivenWaves()
+                } finally {
+                    try { visualProbe?.close() }
+                    finally { instrumentation.runOnMainSync { screen?.dispose(); call.close() } }
+                }
             }
-        } finally { instrumentation.runOnMainSync { activity.finish() } }
+        } finally {
+            instrumentation.runOnMainSync {
+                screen?.dispose()
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.finish()
+            }
+        }
     }
+    private fun containsText(view: View, text: String): Boolean =
+        view.isShown && ((view is TextView && view.text.toString() == text) ||
+            (view is ViewGroup && (0 until view.childCount).any { containsText(view.getChildAt(it), text) }))
+
+    private data class LiveScreenSample(val phase: String?, val mic: Float, val playback: Float, val energy: Float, val bounds: Rect)
+
+    /** Observes production rendering and real CallService levels; never supplies synthetic energy/state. */
+    private inner class LiveScreenProbe(
+        private val activity: Activity, private val screen: CallScreen, private val call: CallService,
+        private val microphoneFrames: AtomicInteger, private val receivedFrames: AtomicInteger,
+        private val directory: File?, private val finalCaptions: () -> Boolean,
+    ) : AutoCloseable {
+        private val instrumentation = InstrumentationRegistry.getInstrumentation()
+        private val running = AtomicBoolean(true)
+        private val finishing = AtomicBoolean()
+        private val finalObserved = CountDownLatch(1)
+        private val draws = AtomicInteger()
+        private val seen = mutableMapOf<String, Int>()
+        private val captured = mutableMapOf<String, Int>()
+        private val observations = org.json.JSONArray()
+        private val errors = mutableListOf<String>()
+        private val drawListener = android.view.ViewTreeObserver.OnDrawListener { draws.incrementAndGet() }
+        private var lastCapture = 0L
+        private val worker = Thread({
+            try {
+                while (running.get()) {
+                    observe()
+                    Thread.sleep(80)
+                }
+            } catch (_: InterruptedException) { /* Normal teardown. */ }
+            catch (error: Exception) { synchronized(errors) { errors.add(error.javaClass.simpleName) } }
+        }, "away-live-screen-observer")
+
+        fun start() {
+            directory?.let { check(it.mkdirs()) { "Snapshot directory already exists or cannot be created" } }
+            instrumentation.runOnMainSync { screen.viewTreeObserver.addOnDrawListener(drawListener) }
+            worker.start()
+        }
+
+        private fun sample(): LiveScreenSample {
+            var result = LiveScreenSample(null, 0f, 0f, 0f, Rect())
+            instrumentation.runOnMainSync {
+                val now = SystemClock.elapsedRealtime()
+                val mic = call.microphoneLevel(now)
+                val playback = call.playbackLevel()
+                val energy = screen.energy(0f, 0)
+                val location = IntArray(2)
+                screen.getLocationOnScreen(location)
+                val bounds = Rect(location[0], location[1], location[0] + screen.width, location[1] + screen.height)
+                val visible = screen.isAttachedToWindow && screen.isShown && activity.hasWindowFocus() &&
+                    !bounds.isEmpty && draws.get() >= 2 && call.active
+                val phase = if (!visible) null
+                    else if (finishing.get() && microphoneFrames.get() > 0 && receivedFrames.get() > 0 && finalCaptions()) "final-captions"
+                    else if (!call.connected && containsText(screen, "Connecting audio…")) "connecting"
+                    else if (call.connected && receivedFrames.get() > 0 && playback > 0f && energy > 0f &&
+                        containsText(screen, "Speaking…")) "speaking"
+                    else if (call.connected && microphoneFrames.get() > 0 && mic > 0f && energy > 0f &&
+                        containsText(screen, "Listening…")) "listening"
+                    else null
+                result = LiveScreenSample(phase, mic, playback, energy, bounds)
+            }
+            return result
+        }
+
+        private fun observe() {
+            val before = sample()
+            val phase = before.phase ?: return
+            synchronized(seen) { seen[phase] = (seen[phase] ?: 0) + 1 }
+            if (directory == null) {
+                if (phase == "final-captions") finalObserved.countDown()
+                return
+            }
+            val count = captured[phase] ?: 0
+            val wanted = if (phase == "listening" || phase == "speaking") 2 else 1
+            if (count >= wanted || SystemClock.elapsedRealtime() - lastCapture < 180) return
+            val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+            try {
+                val after = sample()
+                if (after.phase != phase || after.bounds != before.bounds) return
+                val bounds = before.bounds
+                if (bounds.left < 0 || bounds.top < 0 || bounds.right > bitmap.width || bounds.bottom > bitmap.height) return
+                val cropped = Bitmap.createBitmap(bitmap, bounds.left, bounds.top, bounds.width(), bounds.height())
+                val name = "$phase-${count + 1}.png"
+                try { File(directory, name).outputStream().use { check(cropped.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
+                finally { if (cropped !== bitmap) cropped.recycle() }
+                captured[phase] = count + 1
+                lastCapture = SystemClock.elapsedRealtime()
+                observations.put(JSONObject().put("file", name).put("phase", phase).put("elapsedMillis", lastCapture)
+                    .put("microphoneFrames", microphoneFrames.get()).put("receivedFrames", receivedFrames.get())
+                    .put("draws", draws.get()).put("microphoneLevel", before.mic.toDouble())
+                    .put("playbackLevel", before.playback.toDouble()).put("renderedEnergy", before.energy.toDouble()))
+                if (phase == "final-captions") finalObserved.countDown()
+            } finally { bitmap.recycle() }
+        }
+
+        fun finishCaptions() {
+            finishing.set(true)
+            finalObserved.await(3, TimeUnit.SECONDS)
+        }
+
+        fun assertAudioDrivenWaves() {
+            synchronized(errors) { assertTrue("Live screen observer failed: $errors", errors.isEmpty()) }
+            synchronized(seen) {
+                assertTrue("CallScreen never rendered listening waves from real microphone frames", (seen["listening"] ?: 0) > 0)
+                assertTrue("CallScreen never rendered speaking waves from real hardware playback", (seen["speaking"] ?: 0) > 0)
+                assertTrue("CallScreen never displayed final real captions", (seen["final-captions"] ?: 0) > 0)
+            }
+        }
+
+        override fun close() {
+            running.set(false); worker.interrupt(); worker.join(5000)
+            check(!worker.isAlive) { "Live screen observer did not stop" }
+            instrumentation.runOnMainSync {
+                if (screen.viewTreeObserver.isAlive) screen.viewTreeObserver.removeOnDrawListener(drawListener)
+            }
+            directory?.let {
+                val states = JSONObject()
+                for (phase in listOf("connecting", "listening", "speaking", "final-captions")) {
+                    states.put(phase, JSONObject().put("observed", (seen[phase] ?: 0) > 0)
+                        .put("captured", captured[phase] ?: 0)
+                        .put("status", if ((captured[phase] ?: 0) > 0) "captured" else if ((seen[phase] ?: 0) > 0) "observed-not-captured" else "unobserved"))
+                }
+                File(it, "manifest.json").writeText(JSONObject().put("source", "production-CallScreen-real-CallService")
+                    .put("states", states).put("snapshots", observations).put("errors", org.json.JSONArray(errors)).toString(2))
+            }
+        }
+    }
+
     @Test fun joinedAudioCapturesAndReachesHardwareWithoutOpeningThePairedInbox() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

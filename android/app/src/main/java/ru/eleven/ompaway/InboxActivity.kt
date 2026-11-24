@@ -44,6 +44,7 @@ class InboxActivity : Activity() {
     private val formViews = mutableMapOf<String, QuestionFormView>()
     private var answerRequested: String? = null
     private var permissionAnswer: String? = null
+    private var scanRequested = false
     private lateinit var callScreen: CallScreen
     private var callSource: CallVisualSource? = null
     private lateinit var panel: LinearLayout
@@ -52,6 +53,8 @@ class InboxActivity : Activity() {
     private lateinit var panelBack: Button
     private lateinit var panelTitle: TextView
     private lateinit var contentTarget: LinearLayout
+    private lateinit var panelToolbar: LinearLayout
+    private lateinit var panelLensSlot: View
     private var page = Page.REQUESTS
     private var settingsReturn = Page.REQUESTS
     private var renderedPage: Page? = null
@@ -88,21 +91,26 @@ class InboxActivity : Activity() {
         contentTarget = column
         scroll.addView(column)
         callScreen = CallScreen(this, null, app::setSpeakerEnabled, app::hangup, ::openInbox, ::showSettings)
-        val panelHeader = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(8))
+        val panelHeader = RadianceUi.column(this).apply {
+            setPadding(dp(12), dp(8), dp(12), dp(12))
         }
+        panelToolbar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         panelBack = RadianceUi.button(this, "Back") { navigateBack() }
-        panelHeader.addView(panelBack, LinearLayout.LayoutParams(-2, -2))
-        panelTitle = RadianceUi.text(this, "Questions", 18, heading = true).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(8), 0, dp(8), 0)
+        panelToolbar.addView(panelBack, LinearLayout.LayoutParams(-2, -2))
+        panelLensSlot = View(this).apply {
+            minimumWidth = dp(48)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        panelHeader.addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
+        panelToolbar.addView(panelLensSlot, LinearLayout.LayoutParams(0, dp(56), 1f))
+        panelTitle = RadianceUi.text(this, "Questions", 24, heading = true).apply {
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
         panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
-        panelHeader.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
+        panelToolbar.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
+        panelHeader.addView(panelToolbar, LinearLayout.LayoutParams(-1, -2))
+        panelHeader.addView(panelTitle, LinearLayout.LayoutParams(-1, -2))
         panel = RadianceUi.column(this).apply {
-            background = RadianceUi.surface(this@InboxActivity, 0x99181824.toInt())
+            background = RadianceUi.surface(this@InboxActivity)
             visibility = View.GONE
             addView(panelHeader, LinearLayout.LayoutParams(-1, -2))
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -118,6 +126,9 @@ class InboxActivity : Activity() {
             (callScreen.voiceOverlay.parent as? ViewGroup)?.removeView(callScreen.voiceOverlay)
             addView(callScreen.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
         })
+        overlay.viewTreeObserver.addOnGlobalLayoutListener {
+            if (panelLensSlot.visibility == View.VISIBLE) callScreen.placePanelLens(panelLensSlot)
+        }
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.setSystemBarsAppearance(0,
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
@@ -179,6 +190,10 @@ class InboxActivity : Activity() {
         app.foreground(::render, ::renderVoice)
         incomingPair?.let { incomingPair = null; app.pair(it) }
         continueAnswer()
+        if (scanRequested) {
+            scanRequested = false
+            if (page == Page.PAIRING) scan()
+        }
     }
     override fun onPause() {
         resumed = false
@@ -221,6 +236,7 @@ class InboxActivity : Activity() {
     private fun showInboxPanel(open: Boolean) {
         panel.visibility = if (open) View.VISIBLE else View.GONE
         panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
+        panelLensSlot.visibility = if (app.callId != null) View.VISIBLE else View.INVISIBLE
         callScreen.setPanelOpen(open)
     }
 
@@ -261,22 +277,22 @@ class InboxActivity : Activity() {
             toggle("Animations", screenPreferences.animations) {
                 screenPreferences.animations = it; callScreen.refreshAppearance()
             }
-            text("Animate the scene, independently of system animation settings.", 14)
+            text("Animate the scene independently of system motion settings.", 14)
             toggle("Reference backdrop", screenPreferences.lightBackdrop) {
                 screenPreferences.lightBackdrop = it; callScreen.refreshAppearance()
             }
             text("Rendering", 16, bold = true)
-            val quality = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+            val quality = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
             val ids = IntArray(3)
             for ((index, label) in arrayOf("Auto", "GPU", "2D").withIndex()) {
                 val choice = RadioButton(this).apply {
-                    id = View.generateViewId(); text = label; setTextColor(RadianceUi.cream)
+                    id = View.generateViewId(); text = label; setTextColor(RadianceUi.textColors)
                     buttonTintList = RadianceUi.tint
-                    minHeight = dp(48)
+                    minHeight = dp(48); textSize = 16f
                     contentDescription = "$label rendering"
                 }
                 ids[index] = choice.id
-                quality.addView(choice, RadioGroup.LayoutParams(0, -2, 1f))
+                quality.addView(choice, RadioGroup.LayoutParams(-1, -2))
             }
             quality.check(ids[screenPreferences.quality])
             quality.setOnCheckedChangeListener { _, id ->
@@ -290,18 +306,18 @@ class InboxActivity : Activity() {
             toggle("Block screenshots", screenPreferences.blockScreenshots) {
                 screenPreferences.blockScreenshots = it; applyScreenPrivacy()
             }
-            text("Turn off to allow screenshots and screen recording, including captions and pairing details.", 14)
+            text("Hide app content, including captions and pairing details, in screenshots and recordings.", 14)
             toggle("Notification previews", app.inviteSettings.showPreview) {
                 app.inviteSettings.showPreview = it; app.invitationSettingsChanged()
             }
-            text("Previews are private by default. Android lock-screen privacy applies; the public notification stays redacted.", 14)
+            text("Show question previews. Lock-screen privacy still applies; public notifications stay redacted.", 14)
         }
         card {
             text("Invitations", 20, bold = true)
             toggle("Ringing invitations", app.inviteSettings.callMode) {
                 app.inviteSettings.callMode = it; app.invitationSettingsChanged()
             }
-            text("Turn off for notification-only invitations. Sound, vibration and Do Not Disturb follow system settings.", 14)
+            text("Turn off for notifications only. System sound, vibration and Do Not Disturb settings apply.", 14)
             notificationSettings()
             if (Build.VERSION.SDK_INT >= 34) {
                 if (!getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent())
@@ -345,6 +361,8 @@ class InboxActivity : Activity() {
         if (page == Page.NONE) { renderedPage = null; return }
         panelBack.text = if (page == Page.SETTINGS) "Done" else "Back"
         panelBack.visibility = if (page == Page.REQUESTS) View.GONE else View.VISIBLE
+        panelToolbar.visibility = if (panelBack.visibility == View.VISIBLE || panelHangup.visibility == View.VISIBLE)
+            View.VISIBLE else View.GONE
         panelTitle.text = when (page) {
             Page.REQUESTS -> "Questions"
             Page.PAIRING -> "Pair desktop"
@@ -378,20 +396,19 @@ class InboxActivity : Activity() {
 
     private fun renderRequests() {
         card {
-            text(if (app.verifiedInbox) "Questions & answers" else "Questions · Awaiting sync", 26, bold = true)
             text(app.status, 16)
             app.answerReceipt?.let { text(it, 16).accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
             notice?.let { text(it, 14) }
             app.pushWarning?.let { text(it, 14) }
-            if (!app.paired) button("Pair desktop") { openPairing() }
-            else if (app.needsRelayOrigin) button("Restore relay address") { page = Page.RELAY; render() }
+            if (!app.paired) button("Pair desktop", primary = true) { openPairing() }
+            else if (app.needsRelayOrigin) button("Restore relay address", primary = true) { page = Page.RELAY; render() }
             else if (app.callId == null) button(if (app.verifiedInbox) "Refresh questions" else "Reconnect") { notice = null; app.retry() }
             if (!Invites.allowed(this)) notificationSettings()
             button("Settings") { showSettings() }
             if (app.callId != null) button("Return to voice") { page = Page.NONE; render() }
         }
         val state = app.store.state
-        if (state.pending.isEmpty()) card { text(if (app.verifiedInbox) "No pending questions." else "No cached questions.", 17) }
+        if (state.pending.isEmpty()) card { text(if (app.verifiedInbox) "No pending questions." else "No cached questions.", 16) }
         val rows = state.pending.values.sortedWith(compareByDescending<Pending> { it.id == app.callId }.thenByDescending { it.createdAt })
         for (item in rows) card {
             requestHeading(item)
@@ -417,7 +434,7 @@ class InboxActivity : Activity() {
             (detail.parent as? ViewGroup)?.removeView(detail)
             detail.bind(item, app.store.state.details[item.id], app.verifiedInbox)
             contentTarget.addView(detail, LinearLayout.LayoutParams(-1, -2))
-        } else if (app.verifiedInbox) text(item.question, 17)
+        } else if (app.verifiedInbox) text(item.question, 16)
     }
 
     private fun renderForm(item: Pending): Boolean {
@@ -447,9 +464,12 @@ class InboxActivity : Activity() {
 
     private fun voiceButton(item: Pending) {
         if (app.forms[item.id]?.optBoolean("voice", true) == false) return
-        val control = RadianceUi.button(this, "Answer by voice · Optional") { if (resumed) answer(item.id) }
-        control.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_btn_speak_now, 0, 0, 0)
-        control.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(RadianceUi.cream)
+        val control = RadianceUi.button(this, "Answer by voice") { if (resumed) answer(item.id) }
+        val microphone = getDrawable(android.R.drawable.ic_btn_speak_now)?.mutate()?.apply {
+            setBounds(0, 0, dp(20), dp(20))
+        }
+        control.setCompoundDrawablesRelative(microphone, null, null, null)
+        control.compoundDrawableTintList = RadianceUi.textColors
         control.compoundDrawablePadding = dp(8)
         control.contentDescription = "Answer by voice: ${if (app.verifiedInbox) item.question else "Pending question"}"
         control.isEnabled = app.verifiedInbox && app.idle && item.id !in app.submitting
@@ -458,7 +478,7 @@ class InboxActivity : Activity() {
 
     private fun requestHeading(item: Pending) {
         text(if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project.ifBlank { "Desktop request" }
-            else "Desktop request · Pending sync", 20, bold = true)
+            else "Desktop request · Pending sync", 14, bold = true)
         text(DateFormat.getDateTimeInstance().format(Date(item.createdAt)) +
             if (item.id in app.store.state.silenced) " · Silenced" else "", 14)
     }
@@ -480,11 +500,11 @@ class InboxActivity : Activity() {
             card {
                 text("Proposed answer · Not confirmed or submitted", 18, bold = true)
                 text(if (app.verifiedInbox) state.proposals[item.id] ?: "No current proposal from the desktop."
-                    else "Reconnect to review the current proposed answer.", 17)
+                    else "Reconnect to review the current proposed answer.", 16)
             }
             card {
                 text("Voice captions · Not a submitted answer", 18, bold = true)
-                transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 17), text("", 17))
+                transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 16), text("", 16))
                 renderVoice()
                 toggle("Speaker", app.speakerEnabled) { app.setSpeakerEnabled(it) }
             }
@@ -495,13 +515,12 @@ class InboxActivity : Activity() {
 
     private fun renderPairing() {
         card {
-            text(if (app.paired) "Your desktop" else "Pair a desktop", 26, bold = true)
             text(app.status, 16)
             notice?.let { text(it, 14) }
             if (!app.paired) {
                 text("Use the one-time code shown on your own desktop. Compare every emoji on both screens.", 16)
                 if (!app.pairing) {
-                    button("Scan pairing QR") { scan() }
+                    button("Scan pairing QR", primary = true) { scan() }
                     button("Pair from clipboard") {
                         val clip = getSystemService(ClipboardManager::class.java)?.primaryClip
                         val raw = if (clip != null && clip.itemCount == 1) clip.getItemAt(0).text?.toString() else null
@@ -510,8 +529,8 @@ class InboxActivity : Activity() {
                     }
                 } else button("Cancel pairing") { app.retry() }
             } else if (app.needsRelayOrigin) {
-                text("Relay setup required. Your existing pairing keys are retained.", 16)
-                button("Restore relay address") { page = Page.RELAY; render() }
+                text("Your pairing keys are retained.", 16)
+                button("Restore relay address", primary = true) { page = Page.RELAY; render() }
             } else button("Reconnect") { notice = null; app.retry() }
         }
         button("All questions") { page = Page.REQUESTS; render() }
@@ -520,8 +539,8 @@ class InboxActivity : Activity() {
 
     private fun renderRelay() {
         card {
-            text("Existing relay origin", 24, bold = true)
-            text("Enter the same trusted HTTPS relay used by your paired desktop. This sends your existing relay credential there; never enter an unfamiliar address.", 16)
+            text("Trusted relay address", 18, bold = true)
+            text("Use the same trusted HTTPS relay as your paired desktop. Your saved relay credential is sent there. Never enter an unfamiliar address.", 16)
             val input = EditText(this).apply {
                 hint = "https://relay.example"
                 setTextColor(RadianceUi.cream); setHintTextColor(RadianceUi.muted)
@@ -532,7 +551,7 @@ class InboxActivity : Activity() {
                 minHeight = dp(56)
             }
             contentTarget.addView(input, LinearLayout.LayoutParams(-1, -2))
-            button("Restore") {
+            button("Restore", primary = true) {
                 page = Page.PAIRING
                 app.migrateRelayOrigin(input.text.toString())
                 render()
@@ -544,11 +563,10 @@ class InboxActivity : Activity() {
     private fun renderVerification() {
         val code = shownEmoji ?: return
         card {
-            text("Verify your desktop", 24, bold = true)
-            text("Compare all 12 emoji, in order, with the code on the desktop.", 17)
+            text("Compare all 12 emoji, in order, with the code on the desktop.", 16)
             text(code, 30).apply { contentDescription = "Verification code: $code" }
-            text("Only approve if they match exactly.", 17)
-            button("Codes match") { app.confirm(code, true) }
+            text("Only approve if they match exactly.", 16)
+            button("Codes match", primary = true) { app.confirm(code, true) }
             button("Do not match") { app.confirm(code, false) }
         }
     }
@@ -572,8 +590,14 @@ class InboxActivity : Activity() {
 
     private fun scan() {
         notice = null
+        if (!granted(Manifest.permission.CAMERA)) {
+            notice = "Camera access is needed to scan. You can also pair from the clipboard."
+            if (askedAndDenied(Manifest.permission.CAMERA)) appSettings()
+            else ask(Manifest.permission.CAMERA, CAMERA)
+            return
+        }
         IntentIntegrator(this).setCaptureActivity(PairScanActivity::class.java)
-            .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setPrompt("away · Scan your desktop pairing code. Back to cancel.")
+            .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setPrompt("Scan the pairing code on your desktop")
             .setBeepEnabled(false).setBarcodeImageEnabled(false).setOrientationLocked(false).initiateScan()
     }
     @Deprecated("Platform Activity result")
@@ -583,7 +607,7 @@ class InboxActivity : Activity() {
         val raw = result.contents
         if (raw != null && raw.length <= 8192) {
             if (resumed) app.pair(raw) else incomingPair = raw
-        } else notice = "No pairing code read. Check camera permission or use the clipboard."
+        } else notice = "No pairing code scanned. Try again or pair from the clipboard."
     }
 
     private fun granted(permission: String) = checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
@@ -596,11 +620,18 @@ class InboxActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         notice = if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) null
-            else if (requestCode == MIC) "Microphone unavailable. You can still answer by touch." else "Questions remain on the home screen."
+            else when (requestCode) {
+                MIC -> "Microphone unavailable. You can still answer by touch."
+                CAMERA -> "Camera permission denied. Scan again to retry, or pair from the clipboard."
+                else -> "Questions remain on the home screen."
+            }
         if (requestCode == MIC) {
             val id = permissionAnswer; permissionAnswer = null
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) answerRequested = id
             continueAnswer()
+        }
+        if (requestCode == CAMERA && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            if (resumed && page == Page.PAIRING) scan() else scanRequested = true
         }
         if (resumed) render()
     }
@@ -609,15 +640,16 @@ class InboxActivity : Activity() {
     private fun text(value: String, sp: Int, bold: Boolean = false): TextView =
         RadianceUi.text(this, value, sp, bold).also { contentTarget.addView(it) }
 
-    private fun button(label: String, action: () -> Unit) {
-        contentTarget.addView(RadianceUi.button(this, label) { if (resumed) action() }, RadianceUi.rowParams(this))
+    private fun button(label: String, primary: Boolean = false, action: () -> Unit) {
+        contentTarget.addView(RadianceUi.button(this, label, primary = primary) { if (resumed) action() }, RadianceUi.rowParams(this))
     }
 
     private fun toggle(label: String, checked: Boolean, changed: (Boolean) -> Unit) {
         contentTarget.addView(Switch(this).apply {
-            text = label; textSize = 16f; setTextColor(RadianceUi.cream)
+            text = label; textSize = 16f; setTextColor(RadianceUi.textColors)
             minHeight = dp(56); setPadding(0, dp(8), 0, dp(8))
             thumbTintList = RadianceUi.tint
+            trackTintList = RadianceUi.trackTint
             isChecked = checked
             setOnCheckedChangeListener { _, enabled -> if (resumed) changed(enabled) }
         }, LinearLayout.LayoutParams(-1, -2))
@@ -625,14 +657,12 @@ class InboxActivity : Activity() {
 
     private fun card(content: () -> Unit) {
         val parent = contentTarget
-        val card = RadianceUi.column(this, card = true).apply {
-            background = RadianceUi.surface(this@InboxActivity, 0xb3242433.toInt(), 22)
-        }
+        val card = RadianceUi.column(this, card = true)
         parent.addView(card, RadianceUi.rowParams(this))
         contentTarget = card
         try { content() } finally { contentTarget = parent }
     }
-    private companion object { const val MIC = 1; const val NOTIFICATIONS = 2 }
+    private companion object { const val MIC = 1; const val NOTIFICATIONS = 2; const val CAMERA = 3 }
 }
 
 class PairScanActivity : CaptureActivity() {

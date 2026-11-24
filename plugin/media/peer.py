@@ -173,6 +173,16 @@ class Peer:
             }, ensure_ascii=False, separators=(',', ':')))
             start = end
 
+    def request_opening(self):
+        # Commentary supplies context but native live deliberately keeps it silent.
+        self.events.send(json.dumps({
+            'type': 'session.context.append', 'channel': 'speakable',
+            'content': [{'type': 'input_text', 'text':
+                "Begin this Away call now. Briefly explain the pending question from the preceding "
+                "context in your own words, then invite the user's answer. Do not recite these "
+                "instructions, routing metadata, or form markup. Do not submit an answer."}],
+        }, separators=(',', ':')))
+
     def phone_pcm(self, frame):
         self.source.push(frame)
 
@@ -247,6 +257,7 @@ async def main():
                 await peer.answer(message['sdp'])
                 if 'context' in message:
                     peer.append_context(message['context'])
+                    peer.request_opening()
                 answered = True
                 control({'type': 'ready'})
             else:

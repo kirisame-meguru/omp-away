@@ -160,7 +160,9 @@ class RadianceCallTest {
                 assertSame("Foreground lens must be above the actual question panel", screen.voiceOverlay, root.getChildAt(root.childCount - 1))
                 descendants(activity.window.decorView).filterIsInstance<Button>()
                     .single { it.text.toString() == "View details" }.performClick()
-                assertTrue(texts(activity.window.decorView).contains("Choose the fixture option"))
+                assertTrue(texts(activity.window.decorView).contains("1. Choose several"))
+                assertFalse("Structured details must not repeat the fallback summary",
+                    texts(activity.window.decorView).contains("Choose the fixture option"))
                 assertTrue(texts(activity.window.decorView).contains("Fixture proposal"))
                 assertTrue(descendants(activity.window.decorView).any { it is QuestionDetailView })
                 assertTrue("Opening details stopped voice", call.active)

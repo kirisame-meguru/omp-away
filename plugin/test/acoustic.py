@@ -31,7 +31,7 @@ def adb(options, *args):
     return subprocess.run([options.adb, '-s', options.serial, *args], capture_output=True, text=True, timeout=15, check=True)
 
 
-def settings(parser, options):
+def settings(parser: argparse.ArgumentParser, options):
     options.serial = os.environ.get('ANDROID_SERIAL', '').strip()
     if not options.serial or any(char.isspace() for char in options.serial):
         parser.error('Set ANDROID_SERIAL explicitly to the authorized disposable-test device')
@@ -45,12 +45,32 @@ def settings(parser, options):
     if options.mic is None or options.speaker is None:
         parser.error('Select --mic and --speaker explicitly, or set OMP_AWAY_ACOUSTIC_MIC and OMP_AWAY_ACOUSTIC_SPEAKER')
     devices = sd.query_devices()
-    for index, direction in ((options.mic, 'input'), (options.speaker, 'output')):
-        if index is None or not 0 <= index < len(devices) or devices[index]['max_' + direction + '_channels'] < 1:
-            parser.error('Selected audio index does not support the requested direction; use --list-audio')
+    for role, direction in (('mic', 'input'), ('speaker', 'output')):
+        selector = getattr(options, role)
+        if not str(selector).strip():
+            parser.error('Audio device selectors must not be blank')
+        selector = int(selector) if str(selector).isdigit() else selector
+        try:
+            index = sd.query_devices(selector, direction)['index']
+        except (ValueError, sd.PortAudioError):
+            parser.error('Audio selector must identify one available device; include its host API name to disambiguate')
+        if not 0 <= index < len(devices) or devices[index]['max_' + direction + '_channels'] < 1:
+            parser.error('Selected audio device does not support the requested direction; use --list-audio')
+        setattr(options, role, index)
     options.mic_channels = min(2, devices[options.mic]['max_input_channels'])
     options.speaker_channels = min(2, devices[options.speaker]['max_output_channels'])
     options.mic_rate = devices[options.mic]['default_samplerate']
+    hostapis = sd.query_hostapis()
+    options.audio_endpoints = {}
+    for role, index, channels, rate in (
+            ('microphone', options.mic, options.mic_channels, options.mic_rate),
+            ('speaker', options.speaker, options.speaker_channels, RATE)):
+        device = devices[index]
+        options.audio_endpoints[role] = {
+            'index': index, 'name': device['name'], 'hostApiIndex': device['hostapi'],
+            'hostApiName': hostapis[device['hostapi']]['name'],
+            'maxInputChannels': device['max_input_channels'], 'maxOutputChannels': device['max_output_channels'],
+            'defaultSampleRate': device['default_samplerate'], 'streamChannels': channels, 'streamSampleRate': rate}
     sd.check_input_settings(device=options.mic, channels=options.mic_channels, samplerate=options.mic_rate, dtype='float32')
     sd.check_output_settings(device=options.speaker, channels=options.speaker_channels, samplerate=RATE, dtype='float32')
     if adb(options, 'get-state').stdout.strip() != 'device':
@@ -200,6 +220,41 @@ def native_live_passed(scenario, played, state, final_reply, instrumentation, fa
 
 
 
+def collect_call_screen(options, directory, run_id):
+    """Copy only this run's private compositor evidence; never print image/caption contents."""
+    destination = directory / 'call-screen'
+    destination.mkdir()
+    remote = f'files/acoustic-screen/{run_id}'
+    command = [options.adb, '-s', options.serial, 'exec-out', 'run-as', TARGET, 'cat']
+    manifest_result = subprocess.run([*command, remote + '/manifest.json'], capture_output=True, timeout=15, check=True)
+    if len(manifest_result.stdout) > 65536:
+        raise ValueError('Oversize private screenshot manifest')
+    manifest = json.loads(manifest_result.stdout)
+    if not isinstance(manifest, dict) or manifest.get('source') != 'production-CallScreen-real-CallService':
+        raise ValueError('Unexpected private screenshot source')
+    allowed = {f'{phase}-{number}.png' for phase, count in
+               (('connecting', 1), ('listening', 2), ('speaking', 2), ('final-captions', 1))
+               for number in range(1, count + 1)}
+    snapshots = manifest.get('snapshots')
+    if not isinstance(snapshots, list) or len(snapshots) > len(allowed):
+        raise ValueError('Invalid private screenshot manifest')
+    copied = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            raise ValueError('Invalid private screenshot entry')
+        name = snapshot.get('file')
+        if not isinstance(name, str) or name not in allowed or name in copied:
+            raise ValueError('Unexpected private screenshot filename')
+        with (destination / name).open('wb') as output:
+            subprocess.run([*command, remote + '/' + name], stdout=output, stderr=subprocess.PIPE, timeout=15, check=True)
+        copied.add(name)
+    (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    complete = copied == allowed
+    return {'status': 'collected' if complete else 'partial', 'coverageComplete': complete,
+            'directory': str(destination), 'manifest': str(destination / 'manifest.json'),
+            'states': manifest.get('states', {}), 'private': True}
+
+
 def run(scenario, directory, audio, options):
     directory.mkdir()
     trace = directory / 'voice.log'
@@ -233,7 +288,36 @@ def run(scenario, directory, audio, options):
     failure = None
     instrumentation = ''
     final_reply = None
+    diagnostics = {'private': True, 'audioEndpoints': options.audio_endpoints, 'waitFailure': None,
+                   'phoneMicBasis': 'Desktop receipt counters sampled before playback and at the first existing monitor poll after playback; maxMicRms is cumulative, not an interval maximum; not handset capture timestamps or ASR proof'}
+
+    def mic_snapshot(observation):
+        return {'observedAt': round(time.time() * 1000),
+                'micFrames': observation['micFrames'], 'hotMicFrames': observation['hotMicFrames'],
+                'maxMicRms': observation['maxMicRms']}
+
+    def observe_playback_mic(observation):
+        if played and played[-1]['finishedAt'] is not None and played[-1]['phoneMic']['after'] is None:
+            window = played[-1]['phoneMic']
+            window['after'] = mic_snapshot(observation)
+            window['delta'] = {key: window['after'][key] - window['before'][key]
+                               for key in ('micFrames', 'hotMicFrames')}
+
+    def record_wait_failure(phase, gates):
+        diagnostics['waitFailure'] = {
+            'phase': phase, 'observedAt': round(time.time() * 1000), 'playedCount': len(played),
+            'gates': gates, 'failedGates': [key for key, passed in gates.items() if not passed],
+            'responseSeq': state['responseSeq'], 'assistantFinals': state['assistantFinals'],
+            'callerTurns': state['callerTurns'], 'userTranscripts': state.get('userTranscripts'),
+            'latestResponse': ({key: state['responses'][-1][key]
+                                for key in ('id', 'callerTurn', 'startedAt', 'finalAt', 'firstAudioAt', 'lastAudioAt', 'category')}
+                               if state['responses'] else None),
+            'lastVoicedAt': state['lastVoicedAt'], 'pcLastLoudAt': round(last_loud[0] * 1000),
+            'instrumentationExited': instrument.poll() is not None}
+
     reverse_owned = False
+    snapshot_run = 'probe-' + os.urandom(12).hex() if options.call_screen_snapshots else None
+    visual_evidence = {'status': 'disabled' if not options.call_screen else 'snapshots-not-requested', 'private': True}
     try:
         deadline = time.monotonic() + 30
         while 'Away: local guest ready' not in ''.join(terminal):
@@ -250,16 +334,20 @@ def run(scenario, directory, audio, options):
         adb(options, 'reverse', '--no-rebind', 'tcp:19583', 'tcp:19583')
         reverse_owned = True
         with sd.InputStream(device=options.mic, samplerate=options.mic_rate, channels=options.mic_channels, dtype='float32', callback=meter):
+            visual_args = ['-e', 'callScreen', 'on'] if options.call_screen else []
+            if snapshot_run:
+                visual_args += ['-e', 'callScreenSnapshots', snapshot_run]
             instrument = subprocess.Popen([options.adb, '-s', options.serial, 'shell', 'am', 'instrument', '-w', '-e', 'class',
                 'ru.eleven.ompaway.CallAudioTest#isolatedDesktopSpeechReachesHardwareWithMicrophoneRunning',
                 '-e', 'desktopAudioPort', '19583', '-e', 'speakerMode', 'on', '-e', 'captions', 'on',
-                RUNNER], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                *visual_args, RUNNER], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             previous_response = previous_finals = previous_caller = 0
             previous_playback_started = 0
             for step in scenario['steps']:
                 deadline = time.monotonic() + (90 if 'taskContext' in scenario else 55)
                 while True:
                     state = monitor()
+                    observe_playback_mic(state)
                     native_failure = next((error for error in state['errors'] if error in ('native-model-capacity', 'native-model-failed')), None)
                     if native_failure:
                         raise RuntimeError(native_failure)
@@ -286,6 +374,20 @@ def run(scenario, directory, audio, options):
                     if ready and quiet and heard:
                         break
                     if time.monotonic() > deadline or instrument.poll() is not None:
+                        record_wait_failure(step['after'], {
+                            'eligibleResponse': response is not None, 'freshResponse': fresh,
+                            'finalized': bool(response and response['finalAt']),
+                            'uninterrupted': bool(response and not response['interrupted']),
+                            'minimumWords': bool(response and response['wordCount'] >= 3),
+                            'assistantFinalAdvanced': state['assistantFinals'] > previous_finals,
+                            'expectedCategory': bool(response and response['category'] == ('opening' if step['after'] == 'opening' else 'answer')),
+                            'openingRequiredWords': step['after'] != 'opening' or set(scenario['openingWords']) <= observed,
+                            'openingAlternativeWords': step['after'] != 'opening' or not scenario['openingAny'] or bool(set(scenario['openingAny']) & observed),
+                            'spokenWords': all(set(group) & observed for group in step.get('spokenWords', [])),
+                            'firstAudioObserved': bool(response and response['firstAudioAt']),
+                            'lastAudioObserved': bool(response and response['lastAudioAt']),
+                            'providerQuiet': now - state['lastVoicedAt'] / 1000 >= .8,
+                            'pcQuiet': now - last_loud[0] >= .8, 'heard': heard, 'ready': ready})
                         raise RuntimeError('expected-complete-spoken-turn-not-heard')
                     time.sleep(.05)
                 previous_response = state['responseSeq']
@@ -296,13 +398,15 @@ def run(scenario, directory, audio, options):
                             'submittedBefore': state['submitted'], 'responseAfter': previous_response,
                             'assistantFinals': state['assistantFinals'], 'spokenWords': response['words'] if response else [],
                             'callerBefore': previous_caller, 'assistantVoicedAt': state['lastVoicedAt'],
-                            'speakerLoudAt': round(last_loud[0] * 1000)}
+                            'speakerLoudAt': round(last_loud[0] * 1000),
+                            'phoneMic': {'before': mic_snapshot(state), 'after': None, 'delta': None}}
                 played.append(playback)
                 sd.play(audio[step['say']], RATE, device=options.speaker, blocking=True)
                 playback['finishedAt'] = round(time.time() * 1000)
             deadline = time.monotonic() + 55
             while True:
                 state = monitor()
+                observe_playback_mic(state)
                 if state['errors'] or state['submitted'] or state['ended']:
                     raise RuntimeError('native-conversation-ended-before-final-reply')
                 reply = response_for_step(state, 'answer', previous_playback_started, previous_caller)
@@ -316,6 +420,20 @@ def run(scenario, directory, audio, options):
                     final_reply = reply
                     break
                 if time.monotonic() > deadline or instrument.poll() is not None:
+                    record_wait_failure('final-reply', {
+                        'eligibleResponse': reply is not None,
+                        'finalized': bool(reply and reply['finalAt']),
+                        'uninterrupted': bool(reply and not reply['interrupted']),
+                        'minimumWords': bool(reply and reply['wordCount'] >= 3),
+                        'responseAdvanced': bool(reply and reply['id'] > previous_response),
+                        'assistantFinalAdvanced': state['assistantFinals'] > previous_finals,
+                        'callerAdvanced': bool(reply and reply['callerTurn'] > previous_caller),
+                        'firstAudioObserved': bool(reply and reply['firstAudioAt']),
+                        'lastAudioObserved': bool(reply and reply['lastAudioAt']),
+                        'heard': bool(reply and reply['firstAudioAt'] and last_loud[0] >= reply['firstAudioAt'] / 1000 - .1),
+                        'providerQuiet': now - state['lastVoicedAt'] / 1000 >= .8,
+                        'pcQuiet': now - last_loud[0] >= .8,
+                        'finalWords': bool(reply and all(set(group) & set(reply['words']) for group in scenario['finalWords']))})
                     raise RuntimeError('final-native-spoken-reply-not-heard')
                 time.sleep(.05)
             monitor(stop=True)
@@ -359,6 +477,12 @@ def run(scenario, directory, audio, options):
                         adb(options, 'reverse', '--remove', 'tcp:19583')
                     except (OSError, subprocess.SubprocessError):
                         failure = failure or 'reverse-cleanup-failed'
+    if snapshot_run:
+        try:
+            visual_evidence = collect_call_screen(options, directory, snapshot_run)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            visual_evidence = {'status': 'unavailable', 'coverageComplete': False, 'private': True}
+            failure = failure or 'private-call-screen-evidence-unavailable'
     result = Path(str(trace) + '.result')
     if result.exists():
         state = json.loads(result.read_text())
@@ -379,6 +503,8 @@ def run(scenario, directory, audio, options):
                         'overlappedCallerPlayback': delay < 0 if delay is not None else None})
     report = {'scenario': scenario['name'], 'mode': 'native-live', 'passed': bool(passed), 'failure': failure,
               'played': played, 'finalReply': final_reply, 'state': state,
+              'callScreen': options.call_screen, 'visualEvidence': visual_evidence,
+              'diagnostics': diagnostics,
               'responseLatency': latency, 'latencyBasis': 'observed desktop-to-phone PCM minus synthetic speaker playback completion; not handset ASR or end-to-end network latency',
               'instrumentation': instrumentation, 'peakRms': peak[0], 'transcripts': [str(p) for p in Path(str(trace) + '.state/calls').glob('*.jsonl')]}
     (directory / 'result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
@@ -391,12 +517,16 @@ def main():
     parser.add_argument('--all', action='store_true')
     parser.add_argument('--scenarios', type=Path, default=ROOT / 'test/acoustic.json', help='Native-live discussion scenarios; not canonical scripted acceptance')
     parser.add_argument('--list-audio', action='store_true', help='Discover audio indices without operating on a phone')
-    parser.add_argument('--mic', type=int, default=os.environ.get('OMP_AWAY_ACOUSTIC_MIC'), help='Explicit sounddevice input index')
-    parser.add_argument('--speaker', type=int, default=os.environ.get('OMP_AWAY_ACOUSTIC_SPEAKER'), help='Explicit sounddevice output index')
+    parser.add_argument('--mic', default=os.environ.get('OMP_AWAY_ACOUSTIC_MIC'), help='Explicit input index or unique device name, optionally including host API')
+    parser.add_argument('--speaker', default=os.environ.get('OMP_AWAY_ACOUSTIC_SPEAKER'), help='Explicit output index or unique device name, optionally including host API; prefer names because indices can change')
+    parser.add_argument('--call-screen', action='store_true', help='Render production CallScreen using the real isolated call and assert audio-driven listening/speaking waves')
+    parser.add_argument('--call-screen-snapshots', action='store_true', help='With --call-screen, privately capture compositor frames/captions and extract them to the temporary scenario directory; never publish these files')
     args = parser.parse_args()
     if args.list_audio:
         print(sd.query_devices())
         return
+    if args.call_screen_snapshots and not args.call_screen:
+        parser.error('--call-screen-snapshots requires --call-screen')
     try:
         scenarios = load_scenarios(args.scenarios)
     except (OSError, ValueError):

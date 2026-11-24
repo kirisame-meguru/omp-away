@@ -2,6 +2,7 @@ import type { Socket } from 'bun';
 import type { ExtensionAPI } from '@oh-my-pi/pi-coding-agent';
 import { connectRuntime, type AskContext, type MobileRuntime } from '../../src/runtime/routing';
 import { openVoice } from '../../src/media';
+import { spawnPeer } from '../../src/media/peer';
 import type { SecureDesktopOptions } from '../../src/secure-channel';
 import type { PendingAsk } from '../../src/index';
 import type { Preferences } from '../../src/decisions';
@@ -60,11 +61,14 @@ export default function acoustic(pi:ExtensionAPI) {
     }
     const state={mode:'native-live',messages:0,messageAt:0,lastVoicedAt:0,micFrames:0,outFrames:0,marks:0,drains:0,
       responseSeq:0,assistantFinals:0,callerTurns:0,lastCallerFinalAt:0,responses:[] as ResponseObservation[],
+      userTranscripts:{partials:0,finals:0,firstPartialAt:0,lastPartialAt:0,firstFinalAt:0,lastFinalAt:0},
+      providerEvents:{} as Record<string,number>,
       hotMicFrames:0,maxMicRms:0,submitted:0,delivery:'',values:{} as Record<string,unknown>,
       offers:0,takeoverAttempts:0,takeovers:0,withdrawals:0,nativeEnds:0,contextMatched:false,contextAckAt:0,firstAudioAt:0,
       liveStarted:false,liveStops:0,closed:false,resumed:false,nativeEnded:false,ended:false,stop:false,errors:[] as string[]};
     let originatingAsk:PendingAsk|undefined,expectedContext:string|undefined;
     let response:ResponseObservation|undefined;
+    let callerPending=false;
     function beginResponse():ResponseObservation|undefined {
       if(response)return response;
       if(state.responses.length>=64){
@@ -72,7 +76,7 @@ export default function acoustic(pi:ExtensionAPI) {
         return;
       }
       const now=Date.now();
-      response={id:++state.responseSeq,callerTurn:state.callerTurns,startedAt:now,finalAt:0,firstAudioAt:0,lastAudioAt:0,
+      response={id:++state.responseSeq,callerTurn:state.callerTurns+(callerPending?1:0),startedAt:now,finalAt:0,firstAudioAt:0,lastAudioAt:0,
         words:[],wordCount:0,interrupted:false,
         category:state.responses.length===0?'opening':'pending'};
       state.responses.push(response);
@@ -138,10 +142,21 @@ export default function acoustic(pi:ExtensionAPI) {
         async voice(options){
           return openVoice({...options,
             onCaption(role,text,final){
+              // Counts and timestamps only; never retain caller transcript content for diagnostics.
+              if(role==='user'){
+                const now=Date.now(),transcripts=state.userTranscripts;
+                // Caller finals may arrive after the assistant has already begun replying.
+                // Only the start of caller speech can interrupt the preceding response.
+                if(!callerPending){
+                  if(response&&!response.finalAt)response.interrupted=true;
+                  else response=undefined;
+                  callerPending=true;
+                }
+                if(final){transcripts.finals++;transcripts.firstFinalAt||=now;transcripts.lastFinalAt=now}
+                else{transcripts.partials++;transcripts.firstPartialAt||=now;transcripts.lastPartialAt=now}
+              }
               if(role==='user'&&final){
-                state.callerTurns++;state.lastCallerFinalAt=Date.now();
-                if(response&&!response.finalAt)response.interrupted=true;
-                else response=undefined;
+                state.callerTurns++;state.lastCallerFinalAt=Date.now();callerPending=false;
               }
               if(role==='assistant'){
                 // Observe native transcripts; these are not scripted readback proofs.
@@ -158,7 +173,9 @@ export default function acoustic(pi:ExtensionAPI) {
               }
               options.onCaption?.(role,text,final);
             },
-          });
+          },(audio,failed)=>spawnPeer(audio,failed,category=>{
+            if(typeof category==='string')state.providerEvents[category]=(state.providerEvents[category]??0)+1;
+          }));
         },
         async gateway(options){wire=options;let prefs:Preferences={away:false,delayMs:null};options.onRouting?.(prefs);return {
           async routing(patch={}){prefs={...prefs,...patch};options.onRouting?.(prefs);return prefs},

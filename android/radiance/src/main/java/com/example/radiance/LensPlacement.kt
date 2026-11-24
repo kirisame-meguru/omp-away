@@ -12,6 +12,7 @@ class LensPlacement(private val topAnchored: Boolean = false, private val densit
         private set
     var topInset = 0f
         private set
+    var compact = false
     private var anchorLift = 0f
     private var retractLift = 0f
 
@@ -19,9 +20,10 @@ class LensPlacement(private val topAnchored: Boolean = false, private val densit
         this.topInset = topInset
         if (width <= 0 || height <= 0) return
         baseRadius = min(width, height) * .40f
-        val radius = if (topAnchored) min(92f * density, min(width * .26f, height * .17f)) else baseRadius
+        val radius = if (topAnchored && !compact) min(92f * density, min(width * .26f, height * .17f)) else baseRadius
         scale = radius / baseRadius
-        val center = if (topAnchored) topInset + 12f * density + radius * .744f else height * .33f
+        val center = if (compact) height * .5f
+            else if (topAnchored) topInset + 12f * density + radius * .744f else height * .33f
         restingBottom = center + radius * .744f
         anchorLift = (height * .33f - center) / baseRadius
         retractLift = if (topAnchored) (topInset + radius * .45f) / baseRadius else 0f
