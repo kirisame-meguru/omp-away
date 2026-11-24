@@ -1,13 +1,12 @@
-import { readFileSync } from 'node:fs';
-import { type as schema } from '@oh-my-pi/pi-ai';
 import type { AgentSession, ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
-import { LiveSessionController } from '@oh-my-pi/pi-coding-agent/live/controller';
-import { resolveLiveVoice } from '@oh-my-pi/pi-coding-agent/live/settings';
+import { LiveSessionController, resolveLiveVoice, nativeInstructions } from './native-live.generated.mjs';
 import type { QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
 
-const nativeInstructions = readFileSync(new URL('./prompts/live-instructions.md', import.meta.resolve('@oh-my-pi/pi-coding-agent/live/controller')), 'utf8');
-export type VoiceContext=ExtensionContext & {awaySdk?:Pick<ExtensionAPI['pi'],'createAgentSession'|'SessionManager'|'settings'>};
+export type VoiceContext=ExtensionContext & {
+	awaySdk?:Pick<ExtensionAPI['pi'],'createAgentSession'|'SessionManager'|'settings'>;
+	awaySchema?:ExtensionAPI['arktype'];
+};
 export interface VoiceOptions {
 	ctx: VoiceContext;
 	call: QuestionCall;
@@ -24,7 +23,8 @@ export async function openVoice(options:VoiceOptions):Promise<VoiceCall> {
 	const {ctx,call}=options;
 	call.signal.throwIfAborted();
 	if (!ctx.model) throw Error('No active model for the voice conversation');
-	if (!ctx.awaySdk) throw Error('The host SDK is unavailable for the voice conversation');
+	if (!ctx.awaySdk || !ctx.awaySchema) throw Error('The host SDK is unavailable for the voice conversation');
+	const schema=ctx.awaySchema;
 	const {createAgentSession,SessionManager,settings}=ctx.awaySdk;
 	const manager=SessionManager.inMemory(ctx.cwd);
 	const snapshot=manager.captureState();

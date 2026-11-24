@@ -75,7 +75,7 @@ export default function away(pi: ExtensionAPI): void {
 	const approvals = new Set<string>();
 	const calls = new Map<string, Call>();
 	const owns = (ctx: ExtensionContext) => ctx.agent.kind === "main" && session === ctx.sessionManager.getSessionId();
-	const voiceContext = (ctx: ExtensionContext) => Object.assign(Object.create(ctx) as ExtensionContext, { awaySdk: pi.pi });
+	const voiceContext = (ctx: ExtensionContext) => Object.assign(Object.create(ctx) as ExtensionContext, { awaySdk: pi.pi, awaySchema: pi.arktype });
 
 	function finish(key: string, data?: unknown) {
 		const call = calls.get(key);
