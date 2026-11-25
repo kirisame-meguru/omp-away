@@ -27,6 +27,7 @@ internal enum class DiagnosticEvent {
     CAPTURE_SILENCED, CAPTURE_IN_CALL, CAPTURE_READ_FAILED,
     PLAYBACK_CREATED, PLAYBACK_STARTED, PLAYBACK_READY, PLAYBACK_CAPTURE_TIMEOUT,
     PLAYBACK_TIMESTAMP_TIMEOUT, PLAYBACK_WRITE_FAILED, AUDIO_INVALIDATED, AUDIO_CLOSED,
+    DEBUG_CAPTURE_FAILED, DEBUG_CAPTURE_LIMIT,
 }
 
 
@@ -89,11 +90,15 @@ internal class DiagnosticJournal(
 
 internal object DebugDiagnostics {
     @Volatile private var journal: DiagnosticJournal? = null
+    @Volatile private var captureRoot: File? = null
+
+    fun beginCall(): DebugCallCapture? = captureRoot?.let { DebugCallCapture.open(it) }
 
     fun initialize(context: Context) {
         if (!BuildConfig.DEBUG || journal != null) return
         try {
             journal = DiagnosticJournal(File(context.noBackupFilesDir, "diagnostics"))
+            captureRoot = File(context.noBackupFilesDir, "diagnostics/voice")
             record(DiagnosticEvent.APP_STARTED, BuildConfig.VERSION_CODE)
             val previous = Thread.getDefaultUncaughtExceptionHandler()
             if (previous != null) Thread.setDefaultUncaughtExceptionHandler { thread, error ->
@@ -103,6 +108,7 @@ internal object DebugDiagnostics {
         } catch (_: Exception) {
             // A restricted files directory or handler policy must not prevent application startup.
             journal = null
+            captureRoot = null
         }
     }
 

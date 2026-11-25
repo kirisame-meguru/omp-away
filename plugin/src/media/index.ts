@@ -1,6 +1,6 @@
 import type { ExtensionContext, ExtensionLiveSession } from '@oh-my-pi/pi-coding-agent';
 import { logger } from '@oh-my-pi/pi-utils';
-import type { QuestionCall } from '../decisions';
+import type { Clock, QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
 
 export type VoiceContext=Pick<ExtensionContext,'cwd'|'startLive'> & {
@@ -18,8 +18,12 @@ export interface VoiceCall {
 	sendPcm(pcm:Uint8Array):void;
 	close():Promise<void>;
 }
+const audioClock:Clock={
+	now:()=>performance.now(),
+	after(ms,callback){const timer=setTimeout(callback,Math.ceil(ms)).unref();return ()=>clearTimeout(timer)},
+};
 
-export async function openVoice(options:VoiceOptions,peerFactory:typeof spawnPeer=spawnPeer):Promise<VoiceCall> {
+export async function openVoice(options:VoiceOptions,peerFactory:typeof spawnPeer=spawnPeer,clock:Clock=audioClock):Promise<VoiceCall> {
 	const {ctx,call}=options;
 	call.signal.throwIfAborted();
 	if (typeof ctx.startLive !== 'function' || typeof ctx.awayContext !== 'function') throw Error('This host does not expose native remote live mode');
@@ -38,6 +42,7 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 	let live:ExtensionLiveSession|undefined,peer:MediaPeer|undefined;
 	let closed=false,muted=false,cleanup:Promise<void>|undefined;
 	let output=Promise.resolve(),queued=0;
+	let nextOutputAt:number|undefined,cancelOutputWait:(()=>void)|undefined;
 	let stage='peer-offer';
 	const started=Date.now();
 	const ended=Promise.withResolvers<never>();
@@ -58,6 +63,7 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 				:call.signal.aborted?'question-aborted':'close-requested',
 		});
 		closed=true;clearTimeout(timer);call.signal.removeEventListener('abort',abort);
+		cancelOutputWait?.();cancelOutputWait=undefined;
 		ended.reject(reason??Error('Voice call ended'));
 		cleanup=Promise.resolve().then(async()=>{
 			await Promise.allSettled([live?.stop(),peer?.close()]);
@@ -67,11 +73,27 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 	}
 	const timer=setTimeout(()=>{void close(Error('Voice setup timed out'))},60000).unref();
 	call.signal.addEventListener('abort',abort,{once:true});
+	async function sendOutput(pcm:Uint8Array) {
+		if(closed) return;
+		while(nextOutputAt!==undefined && nextOutputAt>clock.now()) {
+			const wait=Promise.withResolvers<void>();
+			const cancel=clock.after(nextOutputAt-clock.now(),wait.resolve);
+			cancelOutputWait=()=>{cancel();wait.resolve()};
+			await wait.promise;
+			cancelOutputWait=undefined;
+			if(closed) return;
+		}
+		const now=clock.now();
+		// Preserve the sample clock across small wakeup delays, but never dump a
+		// backlog after a missed frame. Pace here: stdout can itself deliver bursts.
+		nextOutputAt=nextOutputAt===undefined||now-nextOutputAt>=20?now+20:nextOutputAt+20;
+		await options.onAudio(pcm);
+	}
 	async function start() {
 		peer=peerFactory(pcm=>{
 			if(closed) return;
 			if(++queued>250) {void close(Error('Phone audio transport stalled'));return}
-			output=output.then(()=>closed?undefined:options.onAudio(pcm)).catch(()=>{void close(Error('Phone audio unavailable'))}).finally(()=>{--queued});
+			output=output.then(()=>sendOutput(pcm)).catch(()=>{void close(Error('Phone audio unavailable'))}).finally(()=>{--queued});
 		},()=>{void close(Error('Media peer unavailable'))});
 		const sdpOffer=await peer.offer;
 		if(closed) return;
@@ -94,6 +116,7 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 		stage='peer-answer';
 		await peer.answer(live.sdpAnswer,context);
 		stage='active';
+		logger.debug('Away voice media active',{audioFrameMs:20});
 		clearTimeout(timer);
 	}
 	try {await Promise.race([start(),ended.promise]);call.signal.throwIfAborted();if(closed) throw Error('Voice call ended')}

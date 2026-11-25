@@ -12,6 +12,16 @@ let startOptions:ExtensionLiveStartOptions|undefined;
 let emitAudio:((pcm:Uint8Array)=>void)|undefined;
 let audio=0;
 const diagnostics:unknown[]=[];
+let now=0,initialAudio=0,maxStartupBuffer=0;
+const sent:number[]=[],sentAt:number[]=[];
+const timers=new Map<()=>void,number>();
+const clock={now:()=>now,after(ms:number,callback:()=>void){timers.set(callback,now+ms);return ()=>{timers.delete(callback)}}};
+async function flush(){for(let i=0;i<1500;i++) await Promise.resolve()}
+async function advance(ms:number) {
+	now+=ms;
+	for(const [callback,due] of timers) if(due<=now){timers.delete(callback);callback()}
+	await flush();
+}
 mock.module('@oh-my-pi/pi-utils',()=>({...utils,VERSION:version,logger:{
 	...utils.logger,debug(message:string,fields:unknown){if(message==='Away voice lifecycle ended') diagnostics.push(fields)},
 }}));
@@ -64,7 +74,10 @@ if(scenario==='missing-context') Object.assign(ctx,{awayContext:undefined});
 if(scenario==='noncallable-context') Object.assign(ctx,{awayContext:true});
 let error:string|undefined;
 try {
-	const opening=openVoice({ctx,call,onAudio(){++audio},onCaption(...caption){captions.push(caption)},onEnd(){++ended}});
+	const opening=openVoice({ctx,call,onAudio(frame){
+		++audio;sent.push(frame[0]);sentAt.push(now);
+		if(now<100) maxStartupBuffer=audio;
+	},onCaption(...caption){captions.push(caption)},onEnd(){++ended}},undefined,scenario.startsWith('audio-')?clock:undefined);
 	if(scenario==='abort-during-start') {
 		await opening.catch(reason=>{error=reason instanceof Error?reason.message:'Unknown failure'});
 		release.resolve();
@@ -76,12 +89,22 @@ try {
 			startOptions?.onPhase?.('muted');voice.sendPcm(new Uint8Array(960));
 			startOptions?.onPhase?.('listening');voice.sendPcm(new Uint8Array(960));
 			startOptions?.onTranscript?.({role:'user',text:'Coffee',turn:1,final:true});
-			emitAudio?.(new Uint8Array(960));
-			for(let i=0;i<5;i++) await Promise.resolve();
+			if(scenario.startsWith('audio-')) {
+				const count=scenario==='audio-overflow'?251:80;
+				for(let i=0;i<count;i++){const frame=new Uint8Array(960);frame[0]=i;emitAudio?.(frame)}
+				await flush();initialAudio=audio;
+				if(scenario!=='audio-overflow') voice.sendPcm(new Uint8Array(960));
+				if(scenario==='audio-burst') for(let i=1;i<80;i++) await advance(20);
+				if(scenario==='audio-late') {await advance(200);await advance(19);await advance(1)}
+				if(scenario==='audio-cancel') {await voice.close();await advance(200)}
+			} else {
+				emitAudio?.(new Uint8Array(960));
+				for(let i=0;i<5;i++) await Promise.resolve();
+			}
 		} finally {await voice.close();await voice.close()}
 		startOptions?.onTranscript?.({role:'assistant',text:'Late',turn:1,final:true});
 		emitAudio?.(new Uint8Array(960));
 	}
 } catch(reason) {error=reason instanceof Error?reason.message:'Unknown failure'}
 finally {release.resolve()}
-console.log(JSON.stringify({error,peers,answers,pcm,closedPeers,closedTransports,ended,takeovers,order,contexts,captions,audio,diagnostics}));
+console.log(JSON.stringify({error,peers,answers,pcm,closedPeers,closedTransports,ended,takeovers,order,contexts,captions,audio,diagnostics,initialAudio,maxStartupBuffer,sent,sentAt,pendingTimers:timers.size}));

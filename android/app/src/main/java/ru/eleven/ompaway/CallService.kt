@@ -57,6 +57,7 @@ internal class CallService(
     private var routedSpeaker = false
     private var previousSpeakerphone: Boolean? = null
     private val visualLevels = AudioVisualLevels()
+    private val diagnostics = DebugDiagnostics.beginCall()
     override val active get() = live.get()
     @Volatile override var connected = false
         private set
@@ -77,9 +78,13 @@ internal class CallService(
     fun receive(pcm: ByteArray) {
         if (!live.get()) return
         if (pcm.size != BYTES) fail(DiagnosticEvent.AUDIO_INVALID_FRAME, pcm.size)
-        else if (!queue.offer(pcm)) fail(DiagnosticEvent.AUDIO_QUEUE_FULL, queue.size)
+        else {
+            diagnostics?.pcm(microphone = false, pcm)
+            if (!queue.offer(pcm)) fail(DiagnosticEvent.AUDIO_QUEUE_FULL, queue.size)
+        }
     }
     fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail(DiagnosticEvent.AUDIO_MARK_QUEUE_FULL, queue.size) }
+    fun transcript(role: String, text: String, final: Boolean) { diagnostics?.transcript(role, text, final) }
 
     fun invalidate() {
         DebugDiagnostics.record(DiagnosticEvent.AUDIO_INVALIDATED)
@@ -200,7 +205,12 @@ internal class CallService(
                 offset += n
                 if (offset == BYTES) {
                     visualLevels.capture(buffer, SystemClock.elapsedRealtime())
-                    synchronized(gate) { if (live.get()) send(buffer) } // channel takes its own snapshot synchronously
+                    synchronized(gate) {
+                        if (live.get()) {
+                            diagnostics?.pcm(microphone = true, buffer)
+                            send(buffer) // channel takes its own snapshot synchronously
+                        }
+                    }
                     if (first) {
                         first = false; captureReady.countDown()
                         DebugDiagnostics.record(DiagnosticEvent.CAPTURE_READY)
@@ -328,6 +338,7 @@ internal class CallService(
             output?.let { runCatching { it.pause(); it.flush() } }
         }
         queue.clear()
+        diagnostics?.close()
         if (Build.VERSION.SDK_INT >= 31) {
             if (routedSpeaker) runCatching { audio.clearCommunicationDevice() }
         } else if (audio.mode == AudioManager.MODE_IN_COMMUNICATION) {

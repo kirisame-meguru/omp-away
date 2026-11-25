@@ -72,3 +72,28 @@ test('context delivery timeout is retained categorically without logging call co
 	expect(JSON.stringify(result.diagnostics)).not.toContain('Choose a drink');
 	expect(result.order).not.toContain('live');
 });
+test('startup bursts are paced without filling the handset buffer or blocking microphone traffic',async()=>{
+	const result=await startup('19.1.1','audio-burst');
+	expect(result.error).toBeUndefined();
+	expect(result.initialAudio).toBe(1);
+	expect(result.maxStartupBuffer).toBeLessThanOrEqual(5);
+	expect(result.sent).toEqual(Array.from({length:80},(_,i)=>i));
+	expect(result.sentAt).toEqual(Array.from({length:80},(_,i)=>i*20));
+	expect(result.pcm).toBe(2880);
+});
+test('a delayed audio clock does not dump catch-up frames',async()=>{
+	const result=await startup('19.1.1','audio-late');
+	expect(result.sentAt).toEqual([0,200,220]);
+});
+test('closing cancels the pacing wait and never sends queued audio',async()=>{
+	const result=await startup('19.1.1','audio-cancel');
+	expect(result.audio).toBe(1);
+	expect(result.pendingTimers).toBe(0);
+	expect(result.ended).toBe(1);
+});
+test('audio output retains its existing bounded backlog failure',async()=>{
+	const result=await startup('19.1.1','audio-overflow');
+	expect(result.audio).toBe(0);
+	expect(result.diagnostics[0].reason).toBe('Phone audio transport stalled');
+	expect(result.pendingTimers).toBe(0);
+});

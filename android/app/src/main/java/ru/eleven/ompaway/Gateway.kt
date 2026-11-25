@@ -521,6 +521,7 @@ class Gateway : Application() {
         override fun onMark(requestId: String, mark: String) { stream?.takeIf { it.id == requestId }?.mark(mark) }
         override fun onTranscript(requestId: String, role: String, text: String, final: Boolean) = ui {
             if (callId != requestId) return@ui
+            call?.transcript(role, text, final)
             if (role == "user") { callerCaption = text; callerCaptionFinal = final }
             else { assistantCaption = text; assistantCaptionFinal = final }
             voiceObserver?.invoke()
