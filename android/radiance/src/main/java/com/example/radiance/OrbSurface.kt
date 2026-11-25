@@ -4,6 +4,8 @@ import android.content.Context
 import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
+import android.view.TextureView
+import android.widget.FrameLayout
 import com.google.android.filament.*
 import com.google.android.filament.android.UiHelper
 import java.nio.ByteBuffer
@@ -19,7 +21,7 @@ class OrbSurface(
     private val energySource: EnergySource,
     private val placement: LensPlacement = LensPlacement(),
     val layer: OrbLayer = OrbLayer.COMPOSITE,
-) : SurfaceView(context), Choreographer.FrameCallback {
+) : FrameLayout(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
     private val engine = Engine.create()
@@ -59,7 +61,7 @@ class OrbSurface(
         instance.setParameter("backdrop", 1f)
         instance.setParameter("layer", layer.materialValue)
         if (layer == OrbLayer.LENS) {
-            // UiHelper creates a translucent, on-top SurfaceView and matching swap chain.
+            // Preserve alpha in both Filament's output and the foreground texture.
             helper.isOpaque = false
             view.blendMode = com.google.android.filament.View.BlendMode.TRANSLUCENT
             renderer.clearOptions = Renderer.ClearOptions().apply { clear = true }
@@ -106,7 +108,17 @@ class OrbSurface(
                 requestFrame()
             }
         }
-        helper.attachTo(this)
+        if (layer == OrbLayer.LENS) {
+            // Composite the orb with ordinary Views, not a separate on-top
+            // SurfaceControl that can occlude UI outside the transparent lens.
+            val texture = TextureView(context).apply { isOpaque = false }
+            addView(texture, LayoutParams(-1, -1))
+            helper.attachTo(texture)
+        } else {
+            val surface = SurfaceView(context)
+            addView(surface, LayoutParams(-1, -1))
+            helper.attachTo(surface)
+        }
     }
 
     fun update(mode: Int, still: Boolean, light: Boolean, enabled: Boolean, auto: Boolean) {

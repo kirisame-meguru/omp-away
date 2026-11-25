@@ -187,17 +187,25 @@ internal class CallScreen(
         heading.visibility = if (panelOpen || source == null) GONE else VISIBLE
         controls.visibility = if (panelOpen || source == null) INVISIBLE else VISIBLE
         settingsButton.visibility = if (panelOpen) GONE else VISIBLE
-        if (panelOpen && source == null) voiceOverlay.visibility = INVISIBLE
+        if (panelOpen && source == null) setVoiceOverlayVisible(false)
         content.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
+    }
+
+    private fun setVoiceOverlayVisible(visible: Boolean) {
+        val next = if (visible) VISIBLE else INVISIBLE
+        if (voiceOverlay.visibility == next) return
+        voiceOverlay.visibility = next
+        // Stop hidden foreground rendering as well as hiding its View.
+        applyPose()
     }
 
     fun setPanelOpen(open: Boolean) {
         if (panelOpen != open) {
             panelOpen = open
-            voiceOverlay.visibility = if (open) INVISIBLE else VISIBLE
             if (!open) voiceOverlay.layoutParams = LayoutParams(-1, -1)
             updatePlacement()
             layoutControls()
+            setVoiceOverlayVisible(!open)
         }
         showActions()
         importantForAccessibility = if (open) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
@@ -217,7 +225,7 @@ internal class CallScreen(
             params.leftMargin = left; params.topMargin = top
             voiceOverlay.layoutParams = params
         }
-        voiceOverlay.visibility = VISIBLE
+        setVoiceOverlayVisible(true)
     }
 
     private fun updatePlacement() {
@@ -319,12 +327,13 @@ internal class CallScreen(
         val reduced = still()
         val mode = if (source?.active != true || ending) 4 else if (source?.connected != true) 0 else state.mode
         shell.target(mode, reduced)
-        fallback.visibility = if (flat) VISIBLE else INVISIBLE
+        val lensVisible = voiceOverlay.visibility == VISIBLE
+        fallback.visibility = if (flat && lensVisible) VISIBLE else INVISIBLE
         backgroundFallback.visibility = if (flat) VISIBLE else INVISIBLE
         backgroundSurface?.update(4, true, light, !flat, false)
         backgroundFallback.update(false, light, 4)
-        surface?.update(mode, reduced, light, !flat, quality == 0)
-        fallback.update(!reduced && flat, light, mode)
+        surface?.update(mode, reduced, light, !flat && lensVisible, quality == 0)
+        fallback.update(!reduced && flat && lensVisible, light, mode)
     }
 
     override fun doFrame(frameTimeNanos: Long) {
