@@ -148,8 +148,9 @@ class HostAPI:
         return matches[0] if matches else None
 
     def create(self, tag, commit, body):
+        version_code(tag)
         return self.json('POST', '/releases', {'tag_name': tag, 'target_commitish': commit,
-                         'name': tag, 'body': body, 'draft': True, 'prerelease': False})
+                         'name': tag, 'body': body, 'draft': True, 'prerelease': '-beta.' in tag})
 
     @staticmethod
     def identifier(value):
@@ -260,7 +261,8 @@ def publish(directory, host, finalize=False):
     if release is None:
         host.assert_increasing(manifest['tag'])
         release = host.create(manifest['tag'], manifest['commit'], body)
-    if release.get('tag_name') != manifest['tag'] or release.get('body') != body:
+    if (release.get('tag_name') != manifest['tag'] or release.get('body') != body
+            or bool(release.get('prerelease')) != ('-beta.' in manifest['tag'])):
         raise ValueError('existing release metadata differs; refusing replacement')
 
     def check_remote(complete):

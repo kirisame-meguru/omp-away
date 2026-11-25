@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing protected canonical vMAJOR.MINOR.PATCH tag
+        description: Existing protected canonical release or beta tag
         required: true
         type: string
       publication:
@@ -60,7 +60,7 @@ jobs:
               or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo)
               or any(x in ('.', '..') for x in repo.split('/'))
               or server != env.get('AWAY_EVENT_SERVER', '').rstrip('/') or repo != env.get('AWAY_EVENT_REPO')
-              or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)):
+              or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-beta\.([1-9][0-9]?))?', tag)):
               raise SystemExit('Configured repository/host/tag does not match the authorized workflow event')
           token = env.get('AWAY_CHECKOUT_TOKEN', '')
           user = env.get('AWAY_CHECKOUT_USER', '')

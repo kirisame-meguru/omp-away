@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from publish import HostAPI, HostConfig
 
@@ -26,6 +27,15 @@ class FixtureAPI(HostAPI):
 
 
 class HostAPITests(unittest.TestCase):
+    def test_beta_is_created_as_prerelease_but_stable_is_not(self):
+        api = FixtureAPI(host='github')
+        for tag, prerelease in (('v1.0.23-beta.1', True), ('v1.0.23', False)):
+            with self.subTest(tag=tag), patch.object(api, 'json') as request:
+                api.create(tag, 'a' * 40, 'release body')
+                payload = request.call_args.args[2]
+                self.assertEqual(payload['prerelease'], prerelease)
+                self.assertTrue(payload['draft'])
+
     @staticmethod
     def forgejo_asset():
         # Forgejo v15.0.11 Attachment JSON; reserved host and synthetic identity.

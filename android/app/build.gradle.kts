@@ -10,14 +10,17 @@ if (!isolatedIntegration) apply(plugin = "com.google.gms.google-services")
 
 val releaseTag = providers.environmentVariable("AWAY_RELEASE_TAG").orNull
 val releaseVersionCode = releaseTag?.let { tag ->
-    require(Regex("v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matches(tag)) {
-        "AWAY_RELEASE_TAG must be canonical vMAJOR.MINOR.PATCH"
-    }
-    val parts = tag.drop(1).split(".").map { it.toLong() }
+    val match = Regex("v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-beta\\.([1-9][0-9]?))?").matchEntire(tag)
+    require(match != null) { "AWAY_RELEASE_TAG must be canonical vMAJOR.MINOR.PATCH[-beta.N]" }
+    val parts = match.groupValues.slice(1..3).map { it.toLong() }
+    val beta = match.groupValues[4].takeIf { it.isNotEmpty() }?.toLong()
     require(parts[0] <= 2099 && parts[1] <= 999 && parts[2] <= 999)
-    (parts[0] * 1_000_000 + parts[1] * 1_000 + parts[2]).also {
-        require(it > 5) { "Release versionCode must exceed the legacy versionCode 5" }
-    }.toInt()
+    val base = parts[0] * 1_000_000 + parts[1] * 1_000 + parts[2]
+    val code = if (base <= 1_000_022) base else base * 100 + (beta ?: 99)
+    require(code in 6..2_100_000_000L && (beta == null || (base > 1_000_022 && beta <= 98))) {
+        "Release version is outside Android monotonic release range"
+    }
+    code.toInt()
 }
 val signingInputs = listOf("AWAY_KEYSTORE", "AWAY_KEY_ALIAS", "AWAY_STORE_PASSWORD", "AWAY_KEY_PASSWORD")
     .associateWith { providers.environmentVariable(it).orNull }

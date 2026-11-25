@@ -20,6 +20,18 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(tag=tag), self.assertRaises(ValueError):
                 release.version_code(tag)
 
+    def test_beta_android_updates_remain_ordered_through_stable(self):
+        tags = ['v1.0.22', 'v1.0.23-beta.1', 'v1.0.23-beta.2',
+                'v1.0.23-beta.98', 'v1.0.23', 'v1.0.24-beta.1']
+        codes = [release.version_code(tag) for tag in tags]
+        self.assertEqual(codes[0], 1000022)
+        self.assertEqual(codes[1], 100002301)
+        self.assertTrue(all(a < b for a, b in zip(codes, codes[1:])))
+        for tag in ('v1.0.22-beta.1', 'v1.0.23-beta.0', 'v1.0.23-beta.01',
+                    'v1.0.23-beta.99', 'v21.0.0'):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release.version_code(tag)
+
     def test_expected_set_includes_every_component_and_armv7(self):
         self.assertEqual(set(release.expected_assets('v1.0.5')), {
             'away-relay-v1.0.5-linux-amd64.tar.gz', 'away-relay-v1.0.5-linux-arm64.tar.gz',

@@ -22,12 +22,17 @@ ANDROID_INPUTS = ('AWAY_FIREBASE_CONFIG', 'AWAY_KEYSTORE', 'AWAY_KEY_ALIAS',
 
 
 def version_code(tag):
-    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)
+    match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-beta\.([1-9][0-9]?))?', tag)
     if not match:
-        raise ValueError('tag must be canonical vMAJOR.MINOR.PATCH (no prerelease suffix)')
-    major, minor, patch = map(int, match.groups())
-    code = major * 1000000 + minor * 1000 + patch
-    if major > 2099 or minor > 999 or patch > 999 or code <= 5:
+        raise ValueError('tag must be canonical vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N')
+    major, minor, patch = map(int, match.groups()[:3])
+    beta = int(match[4]) if match[4] else None
+    base = major * 1000000 + minor * 1000 + patch
+    # Preserve published version codes through v1.0.22; reserve beta slots
+    # before each stable release from v1.0.23 onward.
+    code = base if base <= 1000022 else base * 100 + (beta if beta else 99)
+    if (minor > 999 or patch > 999 or not 5 < code <= 2100000000
+            or beta is not None and (base <= 1000022 or beta > 98)):
         raise ValueError('version is outside Android monotonic release range')
     return code
 
