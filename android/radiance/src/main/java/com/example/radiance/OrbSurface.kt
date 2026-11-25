@@ -3,9 +3,7 @@ package com.example.radiance
 import android.content.Context
 import android.view.Choreographer
 import android.view.Surface
-import android.view.SurfaceView
 import android.view.TextureView
-import android.widget.FrameLayout
 import com.google.android.filament.*
 import com.google.android.filament.android.UiHelper
 import java.nio.ByteBuffer
@@ -21,7 +19,7 @@ class OrbSurface(
     private val energySource: EnergySource,
     private val placement: LensPlacement = LensPlacement(),
     val layer: OrbLayer = OrbLayer.COMPOSITE,
-) : FrameLayout(context), Choreographer.FrameCallback {
+) : TextureView(context), Choreographer.FrameCallback {
     companion object { init { Filament.init() } }
 
     private val engine = Engine.create()
@@ -108,17 +106,10 @@ class OrbSurface(
                 requestFrame()
             }
         }
-        if (layer == OrbLayer.LENS) {
-            // Composite the orb with ordinary Views, not a separate on-top
-            // SurfaceControl that can occlude UI outside the transparent lens.
-            val texture = TextureView(context).apply { isOpaque = false }
-            addView(texture, LayoutParams(-1, -1))
-            helper.attachTo(texture)
-        } else {
-            val surface = SurfaceView(context)
-            addView(surface, LayoutParams(-1, -1))
-            helper.attachTo(surface)
-        }
+        // Keep both scene and lens in the View compositor. A native backdrop
+        // SurfaceView can also punch through moving cards above it.
+        isOpaque = layer != OrbLayer.LENS
+        helper.attachTo(this)
     }
 
     fun update(mode: Int, still: Boolean, light: Boolean, enabled: Boolean, auto: Boolean) {
