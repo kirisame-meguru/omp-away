@@ -7,6 +7,7 @@ import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
 import { awayHelp, awaySuggestions } from "./runtime/commands";
 import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
+import { AwayNotifications } from "./runtime/notifications";
 import { CallMessage, clean, endCallRenderers } from "./presentation";
 
 export type Values = Record<string, string | number | boolean | string[]>;
@@ -92,6 +93,7 @@ export default function away(pi: ExtensionAPI): void {
 	let admin: Admin | undefined;
 	let opening: Promise<void> | undefined;
 	let asyncQuestions: AsyncAskConnection | undefined;
+	let notifications: AwayNotifications | undefined;
 	let mobileConfigured = false;
 	let ready = false;
 	let activeId: string | undefined;
@@ -133,6 +135,7 @@ export default function away(pi: ExtensionAPI): void {
 		generation++;
 		session = undefined;
 		ready = false;
+		notifications?.close(); notifications = undefined;
 		for (const delivery of contextDeliveries.values()) delivery.cancel();
 		asyncQuestions?.close(); asyncQuestions = undefined;
 		approvals.clear();
@@ -194,8 +197,10 @@ export default function away(pi: ExtensionAPI): void {
 				} finally { call.submitting = false; }
 			},
 		};
-		if (mobileConfigured) admin?.offer(pending, voiceContext(call.ctx));
-		else pi.events.emit("omp-away:pending-ask", pending); // isolated local-gate integration only
+		if (mobileConfigured) {
+			if(admin) admin.offer(pending, voiceContext(call.ctx));
+			else notifications?.warn("mobile-outage","This question could not be forwarded to the phone. Answer on the desktop; inspect /away status.");
+		} else pi.events.emit("omp-away:pending-ask", pending); // isolated local-gate integration only
 		// Observe only after delivery; no capability, question, or session context crosses this boundary.
 		queueMicrotask(() => {
 			try { pi.events.emit("omp-away:offer-observed", Object.freeze({ toolCallId, requestId })); }
@@ -212,11 +217,18 @@ export default function away(pi: ExtensionAPI): void {
 		const sessionId = ctx.sessionManager.getSessionId();
 		session = sessionId;
 		mobileConfigured = gatewayConfigured();
-		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle()).then(async mobile => {
+		const feedback = new AwayNotifications((text,type)=>{if(epoch===generation) ctx.ui.notify(text,type)});
+		notifications = feedback;
+		feedback.health("Mobile gateway",mobileConfigured?"Starting":"Not configured");
+		feedback.health("Native Ask","Connecting");
+		feedback.health("Async inbox",mobileConfigured?"Waiting for question source":"Mobile forwarding not configured");
+		if (mobileConfigured) opening = openAdmin(ctx, () => epoch === generation, () => !calls.size && !approvals.size && ctx.isIdle(), undefined, feedback).then(async mobile => {
 			if (epoch === generation && mobile) {
 				admin = mobile;
-				asyncQuestions = connectAsyncQuestions(pi.events, sessionId, mobile, voiceContext(ctx), code => {
+				asyncQuestions = connectAsyncQuestions(pi.events, sessionId, mobile, voiceContext(ctx), (code,requestId) => {
 					if (epoch !== generation) return;
+					feedback.diagnostic(code);
+					if(code==="async-source-invalid") {feedback.health("Async inbox","Unavailable; use /questions");return}
 					const message = code === "async-answer-saved"
 						? "Async answer saved, but delivery was not confirmed. Review /questions; nothing was resent."
 						: code === "async-answer-uncertain"
@@ -224,19 +236,27 @@ export default function away(pi: ExtensionAPI): void {
 							: code === "async-answer-invalid"
 								? "Async answer was rejected. Complete this question in /questions."
 								: "Async inbox integration unavailable. Continue in /questions.";
-					ctx.ui.notify(`Away: ${message}`, "warning");
+					feedback.warn(code==="async-forwarding-unavailable"?"async-forwarding":`answer:${requestId}`,message);
+				}, state => {
+					if(epoch!==generation) return;
+					feedback.health("Async inbox",state==="ready"?"Connected":"Disconnected; waiting for question source");
+					if(state==="ready") feedback.recover("async-forwarding");
 				});
 			} else await mobile?.close();
 		}).catch(error => {
 			if (epoch !== generation) return;
-			if (error instanceof Error && error.message==="shared-routing-upgrade-required") {
-				ctx.ui.notify("Away shared routing needs a gateway upgrade: close all Away-enabled desktops, wait 10 seconds, then reopen them with the updated plugin. Pairing is preserved; Desktop Ask remains available.", "warning");
-			} else ctx.ui.notify("Away mobile unavailable: check the HTTPS gateway, private token/state paths, routing preferences and tunnel Python. Desktop Ask remains available.", "error");
+			const code=error instanceof Error && error.message==="shared-routing-upgrade-required" ? error.message : "secure_helper_failed";
+			feedback.diagnostic(code);
+			feedback.health("Mobile gateway",code==="shared-routing-upgrade-required"
+				? "Upgrade required: close Away-enabled desktops, wait 10 seconds, then reopen with the updated plugin. Pairing is preserved."
+				: "Unavailable: check gateway settings and private token/state paths, then restart Away. Desktop Ask remains available.");
+			feedback.health("Async inbox","Mobile forwarding unavailable; use /questions");
+			feedback.cancel("mobile-outage");
 		});
 		const port = configuredPort(pi);
 		if (!port) {
 			logger.info("Away native bridge", { stage:"configuration-unavailable" });
-			ctx.ui.notify("Away native Ask forwarding unavailable: set collab.relayUrl=ws://127.0.0.1:<port>, collab.autoStart=control and ask.timeout=0. Async inbox forwarding does not require Collab.", "warning");
+			feedback.health("Native Ask","Not configured: set collab.relayUrl=ws://127.0.0.1:<port>, collab.autoStart=control and ask.timeout=0. Async inbox does not require Collab.");
 			return;
 		}
 		try {
@@ -244,17 +264,23 @@ export default function away(pi: ExtensionAPI): void {
 				ready() {
 					if (epoch === generation) {
 						ready = true; logger.info("Away native bridge", { stage:"adapter-ready" });
-						ctx.ui.notify("Away: local guest ready", "info");
+						feedback.health("Native Ask","Available");feedback.recover("native-forwarding");
 					}
 				},
 				unavailable(reason: string) {
 					if (epoch === generation) {
 						logger.info("Away native bridge", { stage:"adapter-unavailable" });
-						ctx.ui.notify(`Away unavailable: ${clean(reason)}`, "error");
+						feedback.diagnostic("native-unavailable");
+						feedback.health("Native Ask",`Unavailable: ${clean(reason)}`);
 					}
 				},
 				lost() {
-					if (epoch === generation) { ready = false; discard(); }
+					if (epoch === generation) {
+						const affected=[...calls.values()].some(call=>call.offered);
+						ready = false; discard();
+						feedback.health("Native Ask","Disconnected");
+						if(affected && admin?.ringing) feedback.warn("native-forwarding","Native Ask forwarding stopped for a pending question. Answer on the desktop; inspect /away status.");
+					}
 				},
 				request(request) {
 					if (epoch !== generation || !ready || approvals.size || !activeId) return;
@@ -281,7 +307,8 @@ export default function away(pi: ExtensionAPI): void {
 			if (epoch === generation) {
 				ready = false;
 				discard();
-				ctx.ui.notify("Away unavailable: could not open the configured loopback adapter. Check port ownership.", "error");
+				feedback.diagnostic("native-unavailable");
+				feedback.health("Native Ask","Unavailable: could not open the loopback adapter; check port ownership.");
 			}
 		}
 	}
@@ -312,6 +339,14 @@ export default function away(pi: ExtensionAPI): void {
 			if (ctx.agent.kind !== "main" || ctx.mode !== "tui") return;
 			if (args.trim()==="help") { ctx.ui.notify(awayHelp,"info"); return; }
 			if (!owns(ctx)) return;
+			if(args.trim()==="status") {
+				const epoch=generation;
+				await opening;
+				if(epoch!==generation || !owns(ctx)) return;
+				if(admin) await admin.command("status");
+				else ctx.ui.notify(clean(`Away status\n${notifications?.status() ?? "Not initialized"}`),"info");
+				return;
+			}
 			if (!admin) { ctx.ui.notify("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide.", "error"); return; }
 			await admin.command(args);
 		},
@@ -336,9 +371,13 @@ export default function away(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName === "ask") logger.info("Away native bridge", { stage:"ask-seen", owned:owns(ctx), ready, adapter:!!adapter });
-		if (!owns(ctx) || event.toolName !== "ask" || !ready || !adapter || typeof event.input.html !== "string") return;
+		if (!owns(ctx) || event.toolName !== "ask" || typeof event.input.html !== "string") return;
 		const source = pi.getAllTools().filter(tool => tool.name === "ask");
 		if (source.length !== 1 || source[0].sourceInfo.source !== "builtin" || source[0].sourceInfo.path !== "<builtin:ask>") return;
+		if(!ready || !adapter) {
+			if(mobileConfigured && (!admin || admin.ringing)) notifications?.warn("native-forwarding","This question cannot be forwarded through native Ask right now. Answer on the desktop; inspect /away status.");
+			return;
+		}
 		const key = event.toolCallId;
 		if (calls.has(key)) { finish(key); return; }
 		const html = event.input.html;

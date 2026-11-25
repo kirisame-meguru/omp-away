@@ -47,11 +47,16 @@ export function connectAsyncQuestions(
 	sessionId: string,
 	admin: Pick<Admin, "offer" | "end">,
 	ctx: AskContext,
-	report: (code: string) => void,
+	report: (code: string, requestId?: string) => void,
+	onStatus?: (state: "ready" | "detached") => void,
 ): AsyncAskConnection {
 	let live = true, generation = 0, binding: Binding | undefined;
 	const current = () => live && ctx.sessionManager.getSessionId() === sessionId;
-	function warn(code: string) { if (current()) { try { report(code); } catch { /* UI failure cannot authorize or repeat a submission. */ } } }
+	function warn(code: string, requestId?: string) { if (current()) { try { report(code, requestId); } catch { /* UI failure cannot authorize or repeat a submission. */ } } }
+	function status(state: "ready" | "detached") {
+		if (!current()) return;
+		try { onStatus?.(state); } catch { /* Status presentation is not question authority. */ }
+	}
 	function retire(offer: Offer) {
 		if (!offer.active) return;
 		offer.active = false;
@@ -65,6 +70,13 @@ export function connectAsyncQuestions(
 		try { old.unsubscribe?.(); } catch { warn("async-source-invalid"); }
 		for (const offer of old.offers.values()) retire(offer);
 		old.offers.clear();
+		status("detached");
+	}
+	function sourceFailure() {
+		const affected = binding && [...binding.offers.values()].some(offer => offer.active);
+		detach();
+		warn("async-source-invalid");
+		if (affected) warn("async-forwarding-unavailable");
 	}
 	function accept(value: unknown) {
 		if (!current() || !isRecord(value) || value.version !== 1 || value.sessionId !== sessionId ||
@@ -123,7 +135,7 @@ export function connectAsyncQuestions(
 									// Canonical submission may synchronously remove this offer; keep its own receipt.
 									const receipt: QuestionSubmission = outcome(result) ? result : { kind: "uncertain" };
 									if (receipt.kind === "accepted" && (receipt.delivery === "queued" || receipt.delivery === "recorded")) return "accepted";
-									if (owned() && receipt.kind !== "stale") warn(`async-answer-${receipt.kind === "accepted" ? "uncertain" : receipt.kind}`);
+									if (current() && receipt.kind !== "stale") warn(`async-answer-${receipt.kind === "accepted" ? "uncertain" : receipt.kind}`,requestId);
 									return "stale";
 								},
 							},
@@ -131,12 +143,13 @@ export function connectAsyncQuestions(
 						next.offers.set(item.id, offer);
 						admin.offer(offer.pending, ctx);
 					}
-				} catch { if (binding === next) detach(); warn("async-source-invalid"); }
+					if (owned() && next.revision === revision) status("ready");
+				} catch { if (binding === next) sourceFailure(); }
 			});
 			if (typeof unsubscribe !== "function") throw Error("invalid-subscription");
 			if (binding === next) next.unsubscribe = unsubscribe;
 			else unsubscribe();
-		} catch { if (binding === next) detach(); warn("async-source-invalid"); }
+		} catch { if (binding === next) sourceFailure(); }
 	}
 	function request() {
 		if (!current()) return;

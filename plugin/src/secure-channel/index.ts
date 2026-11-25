@@ -35,7 +35,8 @@ export interface SecureDesktopOptions {
   onPcm(deviceId: string, pcm: Uint8Array): void;
   onLoss(deviceId: string): void;
   onConnect?(deviceId: string): void;
-  onError?(code: string): void;
+  onError?(code: string, fatal?: boolean): void;
+  onRelay?(connected: boolean): void;
   onRouting?(next: Preferences): void;
 }
 
@@ -80,14 +81,14 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
     cwd: import.meta.dir, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: helperEnv(),
   });
   let closing = false, stopped = false, seq = 0;
-  let routingVersion = 0, routingReceived = false;
+  let routingVersion = 0, routingReceived = false, healthVersion = 0;
   let retirementQueue: Promise<unknown> = Promise.resolve();
   const connected = new Map<string, string>();
   const pending = new Map<number, { resolve(value: unknown): void; reject(err: Error): void; timer: ReturnType<typeof setTimeout> }>();
   const ready = Promise.withResolvers<void>();
   const exited = Promise.withResolvers<void>();
-  function notice(code: string) {
-    try { opts.onError?.(code); } catch { /* The error callback must not prevent cleanup. */ }
+  function notice(code: string, fatal = false) {
+    try { opts.onError?.(code, fatal); } catch { /* The error callback must not prevent cleanup. */ }
   }
   function stop(code: string) {
     if (stopped) return;
@@ -100,7 +101,7 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
       try { void Promise.resolve(opts.onLoss(device)).catch(() => notice('callback_failed')); } catch { notice('callback_failed'); }
     }
     connected.clear();
-    if (!closing) notice(code);
+    if (!closing) notice(code, true);
     child.kill();
   }
   child.once('error', () => stop('secure_helper_launch_failed'));
@@ -146,7 +147,10 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
     }
     const msg = JSON.parse(decoder.decode(data));
     switch (msg.event) {
-      case 'ready': routingVersion = msg.routingVersion; ready.resolve(); return;
+      case 'ready': routingVersion = msg.routingVersion; healthVersion = msg.healthVersion; ready.resolve(); return;
+      case 'health':
+        if (healthVersion !== 1 || typeof msg.relayConnected !== 'boolean') throw new Error('Invalid gateway health');
+        deliver(() => opts.onRelay?.(msg.relayConnected)); return;
       case 'routing': {
         const next = preferences(msg.preferences);
         routingReceived = true;
@@ -196,6 +200,8 @@ export async function startSecureDesktop(opts: SecureDesktopOptions): Promise<Se
       await routing();
       if (!routingReceived || stopped) throw new Error('shared-routing-snapshot-unavailable');
     }
+    // Opt in only when advertised. Older brokers and clients keep their existing wire contract.
+    if (opts.onRelay && healthVersion === 1) await command('health');
   } catch (err) {
     stop('secure_helper_failed');
     throw err;

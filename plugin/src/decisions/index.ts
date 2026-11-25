@@ -21,7 +21,7 @@ interface Options {
 	invite(requestId:string):void|Promise<void>;
 	changed?():void;
 	retired?(requestId:string):void;
-	error?(code:string):void;
+	error?(code:string, requestId?:string):void;
 	preferences?:Preferences;
 	clock?:Clock;
 }
@@ -54,7 +54,7 @@ export class DecisionCoordinator {
 		this.#seen.add(ask.requestId);this.#tools.add(key);
 		let form:DecisionForm|undefined;
 		try {form=prepare(ask.html,ask.context)} catch {}
-		if(!form) {this.#opt.error?.("unsupported-form");return false}
+		if(!form) {this.#opt.error?.("unsupported-form",ask.requestId);return false}
 		const item:InboxItem={requestId:ask.requestId,project:displayExcerpt(project,128),question:form.question,createdAt,...(session?{session:displayExcerpt(session,128)}:{})};
 		const entry:Entry={item,ask,form,silenced:false,rang:false,withdrawing:false,submitted:false};
 		this.#pending.set(ask.requestId,entry);this.#route(entry);this.#opt.changed?.();return true;
@@ -68,13 +68,23 @@ export class DecisionCoordinator {
 			e.cancelTimer=undefined;
 			if(this.#closed||this.#pending.get(e.item.requestId)!==e||e.rang||e.silenced||e.withdrawing||e.submitted) return;
 			e.rang=true;
-			const failed=()=>{if(this.#pending.get(e.item.requestId)===e&&!e.silenced) this.#opt.error?.("invite-unavailable")};
+			const failed=()=>{if(this.#pending.get(e.item.requestId)===e&&!e.silenced) this.#opt.error?.("invite-unavailable",e.item.requestId)};
 			try {Promise.resolve(this.#opt.invite(e.item.requestId)).catch(failed)} catch {failed()}
 		};
 		const wait=away?0:Math.max(0,e.item.createdAt+delayMs!-this.#clock.now());
 		if(wait===0) ring();else e.cancelTimer=this.#clock.after(wait,ring);
 	}
 	list():InboxItem[] {return Array.from(this.#pending.values(),e=>({...e.item}))}
+	get pendingCount():number {return this.#pending.size}
+	expectsMobile():boolean {
+		if(this.#closed) return false;
+		const {away,delayMs}=this.#prefs;
+		for(const entry of this.#pending.values()) {
+			if(!entry.silenced&&!entry.submitted&&!entry.withdrawing &&
+				(away || delayMs!==null && this.#clock.now()>=entry.item.createdAt+delayMs)) return true;
+		}
+		return false;
+	}
 	form(id:string):TouchForm|null {
 		const entry=this.#pending.get(id);
 		if(!entry||entry.submitted||entry.withdrawing||this.#closed) return null;

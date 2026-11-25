@@ -53,6 +53,7 @@ class Client:
         self.pending = set()
         self.confirmations = set()
         self.routing = False
+        self.health = False
 
     def event(self, **msg):
         self.send(1, encode(msg))
@@ -84,6 +85,7 @@ class Broker:
         self.pair_pending = False
         self.sequence = 0
         self.ready = False
+        self.relay_connected = False
         self.stopping = False
         self.idle = None
         self.tasks = set()
@@ -208,7 +210,7 @@ class Broker:
         if not isinstance(cmd, dict) or type(cmd.get('id')) is not int or not 0 < cmd['id'] < 2**32:
             raise ProtocolError('invalid command id')
         op = cmd.get('op')
-        if op not in ('devices', 'pair', 'ring', 'invalidate', 'confirm', 'control', 'pcm', 'routing'):
+        if op not in ('devices', 'pair', 'ring', 'invalidate', 'confirm', 'control', 'pcm', 'routing', 'health'):
             raise ProtocolError('invalid session operation')
         if cmd['id'] in client.pending:
             raise ProtocolError('duplicate local command')
@@ -216,6 +218,13 @@ class Broker:
             replay = None
             if self.commands.full() or len(client.pending) >= MAX_PENDING:
                 raise ProtocolError('local gateway busy')
+            if op == 'health':
+                if cmd.keys() != {'op', 'id'}:
+                    raise ProtocolError('invalid health command')
+                client.health = True
+                client.event(event='health', relayConnected=self.relay_connected)
+                client.event(event='reply', id=cmd['id'], ok=True, value=None)
+                return
             if op == 'routing':
                 await self.routing(client, cmd)
                 return
@@ -358,7 +367,14 @@ class Broker:
             return
         if event == 'ready':
             self.ready = True
-            msg = {**msg, 'routingVersion': 1}
+            self.relay_connected = True
+            msg = {**msg, 'routingVersion': 1, 'healthVersion': 1}
+        elif event == 'relay':
+            self.relay_connected = msg['connected']
+            for client in tuple(self.clients):
+                if client.health:
+                    client.event(event='health', relayConnected=self.relay_connected)
+            return
         elif event == 'connected':
             await self.begin_snapshot(msg['deviceId'], msg['ref'])
         elif event == 'confirm':
@@ -486,7 +502,7 @@ class Broker:
                 self.idle = None
             self.clients.add(client)
             if self.ready:
-                client.event(event='ready', routingVersion=1)
+                client.event(event='ready', routingVersion=1, healthVersion=1)
                 for device, phone in self.service.phones.items():
                     client.event(event='connected', deviceId=device, ref=phone.ref)
             while True:

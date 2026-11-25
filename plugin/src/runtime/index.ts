@@ -9,16 +9,9 @@ import { Enrollment } from "./enrollment";
 import { connectRuntime, type MobileRuntime } from "./routing";
 import { PairingQr } from "./pairing-qr";
 import { clean, PairingComparison } from "../presentation";
+import { AwayNotifications } from "./notifications";
 
-const runtimeWarnings: Readonly<Record<string,string>> = {
-	phone_disconnected: "Phone connection was interrupted",
-	relay_disconnected: "Relay disconnected; reconnecting",
-	"phone-control-unavailable": "Could not update the phone",
-	"unsupported-form": "This form is not supported by Away voice",
-	"invite-unavailable": "Push notifications could not be sent; open the phone inbox or use the desktop",
-};
-
-export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"close"> {
+export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"close"|"ringing"> {
 	readonly comparisonCode?: string;
 	command(args:string):Promise<void>;
 	cancelEnrollment():void;
@@ -52,12 +45,13 @@ async function copyEnrollment(json:string,python:string|undefined) {
 interface AdminResources { env:NodeJS.ProcessEnv; copy:typeof copyEnrollment; connect:typeof connectRuntime }
 export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idle:()=>boolean, resources:AdminResources={
 	env:process.env,copy:copyEnrollment,connect:connectRuntime,
-}):Promise<Admin|undefined> {
+}, notifications = new AwayNotifications((text,type)=>{if(isCurrent()) ctx.ui.notify(text,type)})):Promise<Admin|undefined> {
 	const {OMP_AWAY_URL:url,OMP_AWAY_TOKEN_FILE:tokenFile,OMP_AWAY_STATE_DIR:stateDir,OMP_AWAY_TUNNEL_PYTHON:python}=resources.env;
 	if (!url || !tokenFile || !isAbsolute(tokenFile) || !stateDir || !isAbsolute(stateDir) || (python!==undefined && !isAbsolute(python))) throw Error("incomplete-gateway-settings");
 	const token=await tokenFromFile(tokenFile);
 	if (!isCurrent()) return;
-	let live=true, commands=Promise.resolve(), nextPair=0, expires=0, pairing=false, routingReady=false;
+	let live=true, commands=Promise.resolve(), nextPair=0, expires=0, pairing=false;
+	let preferences:Preferences={away:false,delayMs:null};
 	const current=()=>live && isCurrent();
 	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(clean(text),type)};
 	const status=(prefs:Preferences)=>`Away · All sessions · Ring immediately: ${prefs.away?"on":"off"} · Fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}`;
@@ -79,11 +73,11 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		cancelEnrollment();
 		notify("Away pairing cancelled; no new device approved.");
 	}
-	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,
+	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,notifications,
 		onRouting(next) {
 			if (!current()) return;
-			if (routingReady) notify(status(next));
-			routingReady=true;
+			preferences=next;
+			notifications.health("Routing",`All sessions · Ring immediately: ${next.away?"on":"off"} · Fallback: ${next.delayMs===null?"off":`${next.delayMs/1000}s`}`);
 		},
 		confirmPair:async (_device,emoji)=>{
 			if (!current() || !idle() || Date.now()>=expires) return false;
@@ -92,13 +86,31 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			const accepted=await enrollment.compare(emoji);
 			return accepted && current() && idle();
 		},
-	},code=>{
-		const warning=Object.hasOwn(runtimeWarnings,code) ? runtimeWarnings[code] : undefined;
-		notify(`Away: ${warning ?? (code==="phone_protocol_error" ? "Invalid phone data; the connection was closed" : "Connection unavailable; check the gateway and try again")}.`,warning===undefined?"error":"warning");
+	},(code,requestId)=>{
+		if(!current()) return;
+		notifications.diagnostic(code);
+		if(code==="invite-unavailable") {
+			notifications.warn("invite","A phone invitation could not be sent. Open the phone inbox, or answer on the desktop. See /away status.");
+			notifications.suppress("mobile-outage");
+		}
+		else if(code==="unsupported-form" && (preferences.away || preferences.delayMs!==null))
+			notifications.warn(`form:${requestId}`,"This question cannot be forwarded by Away. Answer on the desktop or in /questions.");
+		else if(code==="call-interrupted" || code==="voice-unavailable") {
+			notifications.warn(`call:${requestId}`,code==="call-interrupted"
+				? "The active phone call disconnected. Disconnection does not confirm an answer; continue on the desktop or reconnect from the phone."
+				: "The phone call could not start or continue. Continue on the desktop or retry from the phone.");
+		} else if(code==="answer-receipt-unavailable") {
+			notifications.warn(`answer:${requestId}`,"The phone's answer receipt could not be delivered. Check the desktop or /questions before retrying; nothing was resent.");
+		} else if(code==="answer-uncertain") {
+			notifications.warn(`answer:${requestId}`,"Answer submission could not be confirmed. Check the desktop or /questions before retrying; nothing was resent.");
+		} else if(code==="confirmation_failed") {
+			cancelEnrollment();
+			notifications.warn("pairing-failed","Pairing confirmation could not be completed. Check the phone and /away status before trying again.");
+		}
 	});
 	if (!current()) {await runtime.close();return}
-	notify("Away: secure mobile gateway ready");
 	return {
+		get ringing() { return runtime.ringing },
 		get comparisonCode() { return enrollment.comparisonCode },
 		offer:runtime.offer,end:runtime.end,endCall:runtime.endCall,cancelEnrollment,
 		async command(raw) {
@@ -112,6 +124,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 			if (args==="pair" || args==="pair clipboard") {
 				if (!idle() || pairing) {notify("Pair only from the idle desktop composer.","warning");return}
 				cancelEnrollment();const epoch=nextPair;pairing=true;
+				notifications.recover("pairing-failed");
 				try {
 					const payload=await runtime.pair();
 					if (!current() || !idle() || epoch!==nextPair) return;
@@ -148,18 +161,20 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				return;
 			}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
-			if (args!=="" && args!=="on" && args!=="off" && args!=="status" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
+			if(args==="status") {await commands;if(current()) notify(`Away status\n${notifications.status()}`);return}
+			if (args!=="" && args!=="on" && args!=="off" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
 				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair [clipboard|cancel]]", "warning");return;
 			}
 			// Preserve this session's command order; the broker serializes patches
 			// across all sessions and broadcasts the committed state back to us.
 			commands=commands.then(async()=>{
 				if (!current()) return;
-				const patch:Partial<Preferences>=args==="status" ? {} : fallback ? {delayMs:fallback[1]==="off"?null:Number(fallback[1])*1000} : {away:args!=="off"};
+				const patch:Partial<Preferences>=fallback ? {delayMs:fallback[1]==="off"?null:Number(fallback[1])*1000} : {away:args!=="off"};
 				await runtime.configure(patch);
+				notify(status(preferences));
 			}).catch(()=>notify("Away shared routing could not be updated; no local-only change was applied.","error"));
 			await commands;
 		},
-		async close() {live=false;cancelEnrollment();await Promise.all([runtime.close(),commands])},
+		async close() {live=false;notifications.close();cancelEnrollment();await Promise.all([runtime.close(),commands])},
 	};
 }

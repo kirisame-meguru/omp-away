@@ -361,12 +361,14 @@ class Service:
             except Exception:
                 pass  # Reconnect only to the configured, CA-verified relay.
             await self.drop_all()
+            await self.ipc.event(event='relay', connected=False)
             await self.ipc.event(event='error', code='relay_disconnected')
             delay = 1
             while True:
                 await asyncio.sleep(delay)
                 try:
                     socket = await self.connect('/v1/control')
+                    await self.ipc.event(event='relay', connected=True)
                     break
                 except Exception:
                     delay = min(delay * 2, 30)

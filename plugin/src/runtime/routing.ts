@@ -3,9 +3,11 @@ import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type QuestionCall, type Preferences } from "../decisions";
 import { openVoice, type VoiceCall, type VoiceContext } from "../media";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
+import type { AwayNotifications } from "./notifications";
 
 export type AskContext = VoiceContext;
 export interface MobileRuntime {
+	readonly ringing?:boolean;
 	offer(ask:PendingAsk,ctx:AskContext):void;
 	end(requestId:string):void;
 	endCall(requestId:string):Promise<boolean>;
@@ -13,36 +15,62 @@ export interface MobileRuntime {
 	pair():Promise<string>;
 	close():Promise<void>;
 }
-type Settings=Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"python"|"confirmPair"|"onRouting">;
+type Settings=Pick<SecureDesktopOptions,"url"|"desktopToken"|"stateDir"|"python"|"confirmPair"|"onRouting"> & {notifications?:AwayNotifications};
 interface Transports {gateway:typeof startSecureDesktop;voice:typeof openVoice}
 interface Joined {device:string;id:string;question:QuestionCall;voice?:VoiceCall;streaming:boolean}
 
-export async function connectRuntime(settings:Settings,report:(code:string)=>void,transports:Transports={gateway:startSecureDesktop,voice:openVoice}):Promise<MobileRuntime> {
-	let gateway:SecureDesktop|undefined,active:Joined|undefined,closed=false;
+export async function connectRuntime(settings:Settings,report:(code:string,requestId?:string)=>void,transports:Transports={gateway:startSecureDesktop,voice:openVoice}):Promise<MobileRuntime> {
+	let gateway:SecureDesktop|undefined,active:Joined|undefined,closed=false,helperAvailable=true;
+	let relay:"unknown"|"connected"|"reconnecting"="unknown";
+	let relayHealth=false,legacyRelayInterrupted=false;
+	let prefs:Preferences={away:false,delayMs:null};
+	const feedback=settings.notifications;
 	const devices=new Set<string>(),online=new Set<string>(),details=new Set<string>();
 	const connections=new Map<string,symbol>();
 	const invalidations=new Set<Promise<void>>(),closing=new Set<Promise<void>>();
 	const requests=new Map<string,{ctx:AskContext;audience:Set<string>}>();
 	const core=new DecisionCoordinator({
-		error:report,
+		error(code,id){if(code!=="unsupported-form" || prefs.away || prefs.delayMs!==null) report(code,id)},
 		async invite(id) {
 			const audience=requests.get(id)?.audience;
-			if(audience?.size&&!closed) await Promise.any(Array.from(audience,device=>gateway!.ring(device,id)));
+			state();
+			if(audience?.size&&!closed) {
+				await Promise.any(Array.from(audience,device=>gateway!.ring(device,id)));
+				if(!closed) feedback?.recover("invite");
+			}
 		},
 		retired(id) {
 			const audience=requests.get(id)?.audience;
 			if(!audience||!gateway) return;
 			for(const device of audience) {
-				const pending=gateway.invalidate(device,id).catch(()=>report("invalidation-unavailable"));
+				const pending=gateway.invalidate(device,id).catch(()=>{if(!closed) report("invalidation-unavailable")});
 				invalidations.add(pending);void pending.finally(()=>invalidations.delete(pending));
 			}
 			requests.delete(id);
 		},
-		changed(){for(const device of online) inbox(device)},
+		changed(){for(const device of online) inbox(device);state()},
 	});
+	function impairedWork() {
+		return !closed && (!helperAvailable || relay==="reconnecting") && core.expectsMobile();
+	}
+	function state() {
+		if(closed) return;
+		feedback?.health("Mobile gateway",helperAvailable?"Available":"Unavailable; restart Away after checking gateway settings");
+		feedback?.health("Relay",!helperAvailable?"Unavailable (gateway stopped)":relay==="unknown"
+			? legacyRelayInterrupted?"Last connection interrupted; recovery reporting unavailable (older gateway)":"Health reporting unavailable (older gateway)"
+			: relay==="connected"?"Connected":"Reconnecting");
+		feedback?.health("Phones",`${online.size} connected, ${devices.size} known paired; idle disconnection is normal`);
+		feedback?.health("This session",`${core.pendingCount} pending mobile questions; ${active?"call active":"no active call"}`);
+		if(impairedWork()) feedback?.defer("mobile-outage","Mobile forwarding is unavailable for pending questions. Use the desktop or /questions; inspect /away status.",impairedWork);
+		else feedback?.cancel("mobile-outage");
+	}
 	function control(device:string,message:DesktopControl) {
 		if(!gateway||closed||!online.has(device)) return;
-		void gateway.sendControl(device,message).catch(()=>{if(!closed) report("phone-control-unavailable")});
+		void gateway.sendControl(device,message).catch(()=>{
+			if(closed) return;
+			report("phone-control-unavailable");
+			if(message.type==="answer" && (message.status==="accepted" || message.status==="uncertain")) report("answer-receipt-unavailable",message.requestId);
+		});
 	}
 	function inbox(device:string) {
 		const items=core.list().filter(item=>requests.get(item.requestId)?.audience.has(device));
@@ -56,11 +84,12 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 	}
 	function current(call:Joined) {return !closed&&active===call&&online.has(call.device)&&!call.question.signal.aborted}
 	function closeVoice(voice:VoiceCall) {
-		const pending=voice.close().catch(()=>report("voice-close-unavailable"));
+		const pending=voice.close().catch(()=>{if(!closed) report("voice-close-unavailable")});
 		closing.add(pending);void pending.finally(()=>closing.delete(pending));
 	}
 	function fail(call:Joined) {
 		if(!current(call)) return;
+		report("voice-unavailable",call.id);
 		call.question.close();control(call.device,{type:"error",code:"voice-unavailable"});
 	}
 	async function join(device:string,id:string,captions=false) {
@@ -68,12 +97,14 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 		if(entry?.audience.has(device)&&!core.voiceAvailable(id)) {control(device,{type:"error",code:"voice-unavailable"});return}
 		const question=!active&&entry?.audience.has(device)?core.join(id):undefined;
 		if(!entry||!question||!gateway) {control(device,{type:"error",code:"request-unavailable"});return}
-		const call:Joined={device,id,question,streaming:false};active=call;
+		feedback?.recover(`call:${id}`);
+		const call:Joined={device,id,question,streaming:false};active=call;state();
 		question.signal.addEventListener("abort",()=>{
 			if(active!==call) return;
 			active=undefined;call.streaming=false;
 			control(device,{type:"ended",requestId:id});
 			if(call.voice) closeVoice(call.voice);
+			state();
 		},{once:true});
 		try {
 			const voice=await transports.voice({
@@ -88,10 +119,35 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 			if(current(call)) call.streaming=true;
 		} catch {fail(call)}
 	}
-	gateway=await transports.gateway({...settings,onError:report,
-		onRouting(next){if(!closed){core.configure(next);settings.onRouting?.(next)}},
-		onConnect(device){if(!closed){devices.add(device);online.add(device);connections.set(device,Symbol());inbox(device)}},
-		onLoss(device){online.delete(device);connections.delete(device);details.delete(device);if(active?.device===device) active.question.close()},
+	gateway=await transports.gateway({...settings,
+		onError(code,fatal){
+			if(closed) return;
+			if(fatal) helperAvailable=false;
+			if(code==="relay_disconnected" && !relayHealth) legacyRelayInterrupted=true;
+			report(code);state();
+		},
+		onRelay(connected){
+			if(closed) return;
+			relayHealth=true;
+			relay=connected?"connected":"reconnecting";
+			if(connected) feedback?.recover("mobile-outage");
+			state();
+		},
+		onRouting(next){if(!closed){prefs=next;core.configure(next);settings.onRouting?.(next);state()}},
+		onConnect(device){
+			if(closed) return;
+			legacyRelayInterrupted=false;
+			devices.add(device);online.add(device);connections.set(device,Symbol());
+			inbox(device);state();
+		},
+		onLoss(device){
+			online.delete(device);connections.delete(device);details.delete(device);
+			if(!closed && active?.device===device) {
+				report("call-interrupted",active.id);
+				active.question.close();
+			}
+			state();
+		},
 		onPcm(device,pcm){
 			const call=active;
 			if(call?.device===device&&current(call)&&call.streaming) {
@@ -111,8 +167,10 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 					const result=requests.get(message.requestId)?.audience.has(device)
 						? await core.answer(message.requestId,message.values,message.notes)
 						: {status:"stale" as const,message:"This request is no longer available."};
+					if(!closed && result.status==="uncertain") report("answer-uncertain",message.requestId);
 					// A delayed receipt belongs only to the authenticated connection that submitted.
 					if(connections.get(device)===connection) control(device,{type:"answer",requestId:message.requestId,...result});
+					else if(!closed && (result.status==="accepted" || result.status==="uncertain")) report("answer-receipt-unavailable",message.requestId);
 					break;
 				}
 				case "silence":if(requests.get(message.requestId)?.audience.has(device)) core.silence(message.requestId);break;
@@ -125,7 +183,9 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 	try {for(const device of await gateway.devices()) devices.add(device)}
 	catch {closed=true;await gateway.close();throw Error("paired-devices-unavailable")}
 	for(const device of online) inbox(device);
+	state();
 	return {
+		get ringing(){return prefs.away || prefs.delayMs!==null},
 		offer(ask,ctx){
 			if(closed||!devices.size||requests.has(ask.requestId)) return;
 			requests.set(ask.requestId,{ctx,audience:new Set(devices)});
@@ -148,7 +208,8 @@ export async function connectRuntime(settings:Settings,report:(code:string)=>voi
 		pair:()=>gateway!.pair(),
 		async close(){
 			if(closed) return;
-			closed=true;connections.clear();core.close();online.clear();details.clear();requests.clear();devices.clear();
+			closed=true;feedback?.cancel("mobile-outage");
+			connections.clear();core.close();online.clear();details.clear();requests.clear();devices.clear();
 			await Promise.all(invalidations);await gateway!.close();await Promise.all(closing);
 		},
 	};
