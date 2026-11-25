@@ -110,7 +110,7 @@ test("malformed snapshots fail closed instead of partially offering questions", 
 		s.publish([s.question, { ...s.question, id: "malformed", createdAt: NaN }]);
 		expect(f.offered).toHaveLength(1);
 		expect(f.ended).toEqual([f.offered[0]!.requestId]);
-		expect(f.errors).toEqual(["async-source-invalid"]);
+		expect(f.errors).toEqual(["async-source-invalid", "async-forwarding-unavailable"]);
 	} finally { f.connection.close(); off(); }
 });
 
