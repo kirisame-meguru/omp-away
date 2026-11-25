@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { FormBlock, FormField, FormSpan } from "@oh-my-pi/pi-tui/html-form/parse";
+import type { FormBlock, FormField, FormSpan } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import type { QuestionDisplay } from "./decisions/display";
 import type { TouchForm } from "./decisions/touch";
 import type { Language } from "./language";

@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { choiceValue, fieldError, fieldQuestions, isArrayChoice, textValue } from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, type ChoiceOption, type FormField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/key-hint-format";
-import { SYMBOL_PRESETS } from "@oh-my-pi/pi-tui/theme/symbols";
+import { choiceValue, fieldError, fieldQuestions, isArrayChoice, textValue } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { type ChoiceField, type ChoiceOption, type FormField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-coding-agent";
+import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { SYMBOL_PRESET_NAMES } from "@oh-my-pi/pi-tui/theme/schema";
 import { type Element, parseHTML, serializeNode } from "@oh-my-pi/pi-utils/dom";
 import type { CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
 
@@ -110,7 +111,7 @@ export function tagForm(source: string): PreparedForm | undefined {
 
 // The extension may have its own copy of pi-tui rather than the host's active theme singleton.
 // Accept entire, exact hint strings from stock glyph presets or the local active theme, not arbitrary prose.
-const keys = Object.values(SYMBOL_PRESETS).map(s => [ `${s["key.up"]}/${s["key.down"]}`, s["key.enter"], s["key.esc"] ] as const);
+const keys = SYMBOL_PRESET_NAMES.map(presetSymbols).map(s => [ `${s["key.up"]}/${s["key.down"]}`, s["key.enter"], s["key.esc"] ] as const);
 function helpVariants(action: string, continuation: boolean): string[] {
 	const active = [formatKeyHints(["up", "down"]), formatKeyHint("enter"), formatKeyHint("escape")];
 	return [active, ...keys].map(([nav, enter, esc]) => `${nav} navigate  ${enter} ${action}  ${continuation ? `${NEXT} continue  ` : ""}${esc} cancel`);
@@ -124,8 +125,7 @@ function prompt(field: Field, checked?: Set<number>, other = false): Expected {
 	if (!field.field.multi) return { draft: { kind: "select", title, selectionMarker: "radio", options: field.rows, initialIndex: field.checked.at(-1) ?? 0 }, hints: helpVariants("select", false) };
 	const indices = checked ? [...checked].sort((a, b) => a - b) : [...field.checked];
 	if (other) indices.push(field.enabled.length);
-	const canSubmit = !field.field.required || indices.length > 0;
-	return { draft: { kind: "select", title, selectionMarker: "checkbox", checkedIndices: indices, markableCount: field.rows.length, options: canSubmit ? [...field.rows, NEXT] : field.rows }, hints: helpVariants("toggle", canSubmit) };
+	return { draft: { kind: "select", title, selectionMarker: "checkbox", checkedIndices: indices, markableCount: field.rows.length, options: [...field.rows, NEXT] }, hints: helpVariants("toggle", true) };
 }
 
 export function firstPrompt(form: PreparedForm): Expected {

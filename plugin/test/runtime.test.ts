@@ -14,7 +14,7 @@ import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
 import { awaySuggestions } from "../src/runtime/commands";
 import type { Preferences } from "../src/decisions";
-import type { ExtensionWidgetContent } from "@oh-my-pi/pi-tui/chat/extension-types";
+import type { ExtensionWidgetContent } from "@oh-my-pi/pi-coding-agent";
 
 const pcm=new Uint8Array(960);
 interface RoutingBus {current:Preferences;clients:Set<SecureDesktopOptions>}

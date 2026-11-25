@@ -10,8 +10,8 @@ import * as runtime from "../src/runtime";
 import type { QuestionSource } from "../src/runtime/async-ask";
 import * as adapter from "../src/collab/adapter";
 import { connectRuntime } from "../src/runtime/routing";
-import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
+import { fieldQuestions } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import type { DesktopControl, SecureDesktopOptions } from "../src/secure-channel";
 

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+import { spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import type { PendingAsk } from "../index";
 import { DecisionCoordinator, type QuestionCall, type Preferences } from "../decisions";
 import { displayExcerpt } from "../decisions/display";

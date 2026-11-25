@@ -1,5 +1,5 @@
-import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-tui/html-form/data";
-import { spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+import { fieldQuestions, formContext, isArrayChoice } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import { type FormValues, planAnswers, tagForm, type PreparedForm } from "../collab/form";
 import type { QuestionContext } from "../index";
 import { displayExcerpt, questionDisplay, type QuestionDisplay } from "./display";

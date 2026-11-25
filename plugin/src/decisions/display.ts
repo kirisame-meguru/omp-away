@@ -1,5 +1,5 @@
-import { fieldContexts, fieldQuestions, formContext } from "@oh-my-pi/pi-tui/html-form/data";
-import { type FormField, type HtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+import { fieldContexts, fieldQuestions, formContext } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { type FormField, type HtmlForm, spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 
 /** Read-only presentation; positional IDs never authorize or encode a submission. */
 export interface QuestionDisplay {

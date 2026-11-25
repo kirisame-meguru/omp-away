@@ -60,7 +60,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		? ()=>new PairingComparison(comparison.emoji,comparison.code,(accept,code)=>{
 			if (!current()) return;
 			if (!idle() || !enrollment.decide(accept,code)) notify("No matching idle local comparison.","warning");
-		},notifications.language)
+		},notifications.language).view
 		: text?.split("\n")));
 	let expiryTimer: NodeJS.Timeout | undefined;
 	function clearQr() {
@@ -143,8 +143,8 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 							if (epoch===nextPair) cancelPairing();
 						},notifications.language);
 						ctx.ui.setWidget("omp-away-pairing-qr",tui=>{
-							availableRows=()=>tui.terminal.rows;
-							return qr;
+							availableRows=()=>tui.size().rows;
+							return qr.view;
 						});
 					}
 					expires=Date.now()+600_000;

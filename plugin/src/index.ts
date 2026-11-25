@@ -74,7 +74,7 @@ export default function away(pi: ExtensionAPI): void {
 	const language = () => notifications?.language ?? "en";
 	const t = (english: string) => message(language(), english);
 	for (const customType of ["omp-away:call", "omp-away:call-result"]) {
-		// Keep the component's local disclosure across host/theme invalidation.
+		// Keep local disclosure state across host/theme invalidation.
 		const views = new WeakMap<object, { view: CallMessage; expanded: boolean }>();
 		pi.registerMessageRenderer(customType, (message, options) => {
 			let cached = views.get(message);
@@ -87,7 +87,7 @@ export default function away(pi: ExtensionAPI): void {
 				cached.expanded = options.expanded;
 				cached.view.setExpanded(options.expanded);
 			}
-			return cached.view;
+			return cached.view.view;
 		});
 	}
 	let session: string | undefined;

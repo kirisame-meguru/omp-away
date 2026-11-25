@@ -2,7 +2,7 @@
 import { isBuiltin } from 'node:module';
 import { join } from 'node:path';
 
-const version = '19.1.0';
+const version = '19.2.1';
 const root = join(import.meta.dir, '..');
 const licenses: string[] = [];
 for (const name of ['pi-coding-agent', 'pi-ai', 'pi-catalog', 'pi-utils', 'pi-natives']) {
@@ -12,7 +12,7 @@ for (const name of ['pi-coding-agent', 'pi-ai', 'pi-catalog', 'pi-utils', 'pi-na
 	const license = (await Bun.file(join(dir, 'LICENSE')).text()).trim().replaceAll('\r\n', '\n');
 	if (!licenses.includes(license)) licenses.push(license);
 }
-// The 19.1 packaged host exposes these exact keys in its virtual module registry. Do not
+// The 19.2.1 packaged host exposes these exact keys in its virtual module registry. Do not
 // use --external '@oh-my-pi/*': the coding-agent and pi-ai root wildcards aren't expanded.
 // Leave native bindings and authStorage/OAuth helpers on the host's own module instances.
 const external = ['@oh-my-pi/pi-ai', '@oh-my-pi/pi-natives', '@oh-my-pi/pi-utils',

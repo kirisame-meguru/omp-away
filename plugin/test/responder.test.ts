@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/key-hint-format";
+import { fieldQuestions } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-coding-agent";
 import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import { createResponder } from "../src/collab/responder";
 
@@ -60,7 +60,7 @@ describe("confirmed native form replies", () => {
 		const form = `<form><p>Teams?</p><label><input type="checkbox" name="teams" value="ops" checked required>Operations</label>
 		<label><input type="checkbox" name="teams" value="qa">Quality</label></form>`;
 		const { first, r, writes } = setup(form);
-		const checkbox = (reqId: number, checkedIndices: number[]): CollabUiRequest => ({reqId, title: first, kind:"select", selectionMarker: "checkbox", checkedIndices, markableCount: 3, options: ["Operations", "Quality", other, ...(checkedIndices.length ? [next] : [])], helpText: help("toggle", checkedIndices.length ? `${next} continue  ` : "") });
+		const checkbox = (reqId: number, checkedIndices: number[]): CollabUiRequest => ({reqId, title: first, kind:"select", selectionMarker: "checkbox", checkedIndices, markableCount: 3, options: ["Operations", "Quality", other, next], helpText: help("toggle", `${next} continue  `) });
 		r.accept(checkbox(1, [0]));
 		const result = r.submitConfirmed("A", {teams: ["qa", "Design"]});
 		for (const request of [checkbox(2, []), checkbox(3, [1]), { kind: "editor", title: first, reqId: 4 } as const, checkbox(5, [1, 2])]) {

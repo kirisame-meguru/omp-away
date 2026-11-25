@@ -5,7 +5,7 @@ import type { PendingAsk } from "../src";
 import { createCall } from "../src/decisions/call";
 import { prepare } from "../src/decisions/form";
 import scriptedScenarios from "./acoustic-scripted.json";
-import { spansText } from "@oh-my-pi/pi-tui/html-form/parse";
+import { spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 
 const html = `<form><input type="hidden" name="rev" value="r4"><label for="target">Release lane</label><select name="lane" id="target" required><option value="d" selected>Development</option><option value="p">Production</option><option value="x" disabled>Retired</option></select><label for="n">Replicas</label><input id="n" name="count" type="number" value="1" min="1" max="4" required></form>`;
 const extraction = (lane: unknown = "p", count: unknown = 3) => JSON.stringify({fields:[{name:"lane",value:lane,evidence:"Production"},{name:"count",value:count,evidence:"three"}]});

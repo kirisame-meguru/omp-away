@@ -1,4 +1,4 @@
-import type { FormField } from "@oh-my-pi/pi-tui/html-form/parse";
+import type { FormField } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import type { Language } from "./language";
 
 /** Only plugin-owned literals belong here; unknown text, identifiers and user content pass through. */

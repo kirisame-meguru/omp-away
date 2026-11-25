@@ -1,5 +1,5 @@
-import { fieldError, fieldQuestions, isArrayChoice, textValue } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm, spansText, type FormSection } from "@oh-my-pi/pi-tui/html-form/parse";
+import { fieldError, fieldQuestions, isArrayChoice, textValue } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { parseHtmlForm, spansText, type FormSection } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import { planAnswers, type FormValues } from "../collab/form";
 import type { DecisionForm } from "./form";
 import type { AnswerNote } from "../index";

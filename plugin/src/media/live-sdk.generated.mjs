@@ -1,4 +1,4 @@
-/* Generated with bun media/build-sdk.ts from omp 19.1.0. Do not hand edit.
+/* Generated with bun media/build-sdk.ts from omp 19.2.1. Do not hand edit.
 MIT License
 
 Copyright (c) 2025 Mario Zechner
