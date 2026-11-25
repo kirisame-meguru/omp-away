@@ -5,10 +5,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { type Adapter, startAdapter } from "./collab/adapter";
 import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
-import { awayHelp, awaySuggestions } from "./runtime/commands";
+import { awaySuggestions } from "./runtime/commands";
 import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
 import { AwayNotifications } from "./runtime/notifications";
-import { CallMessage, clean, endCallRenderers } from "./presentation";
+import { CallMessage, clean, createEndCallRenderers } from "./presentation";
+import { message } from "./messages";
 
 export type Values = Record<string, string | number | boolean | string[]>;
 export interface AnswerNote { name: string; question: string; option: string; value: string; text: string }
@@ -70,15 +71,17 @@ function configuredPort(pi: ExtensionAPI): number | undefined {
 
 /** Each factory owns exactly one host session. Room loss invalidates even a same-session Ask. */
 export default function away(pi: ExtensionAPI): void {
+	const language = () => notifications?.language ?? "en";
+	const t = (english: string) => message(language(), english);
 	for (const customType of ["omp-away:call", "omp-away:call-result"]) {
 		// Keep the component's local disclosure across host/theme invalidation.
 		const views = new WeakMap<object, { view: CallMessage; expanded: boolean }>();
 		pi.registerMessageRenderer(customType, (message, options) => {
 			let cached = views.get(message);
-			if (!cached) {
+			if (!cached || cached.view.language !== language()) {
 				const content = typeof message.content === "string" ? message.content
 					: message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n");
-				cached = { view: new CallMessage(content, customType === "omp-away:call-result", options.expanded), expanded: options.expanded };
+				cached = { view: new CallMessage(content, customType === "omp-away:call-result", options.expanded, language()), expanded: options.expanded };
 				views.set(message, cached);
 			} else if (cached.expanded !== options.expanded) {
 				cached.expanded = options.expanded;
@@ -271,7 +274,7 @@ export default function away(pi: ExtensionAPI): void {
 					if (epoch === generation) {
 						logger.info("Away native bridge", { stage:"adapter-unavailable" });
 						feedback.diagnostic("native-unavailable");
-						feedback.health("Native Ask",`Unavailable: ${clean(reason)}`);
+						feedback.health("Native Ask",language=>`${message(language,"Unavailable")}: ${message(language,clean(reason))}`);
 					}
 				},
 				lost() {
@@ -316,38 +319,41 @@ export default function away(pi: ExtensionAPI): void {
 	const endCallParameters = pi.arktype({ requestId: "string" });
 	pi.registerTool<typeof endCallParameters>({
 		name: "away_end_call",
-		label: "End Away call",
+		get label() { return t("End Away call"); },
 		description: "End this session's Away voice call when realtime voice requests completion of the exchange, or immediately when the user asks to hang up. If the user requested an answer from the coding agent, return a normal final answer first without invoking this tool; native voice must speak it before requesting completion. Terminal text, silent commentary, and handoff acknowledgments do not establish spoken delivery. Use the requestId from the omp-away-plugin call context. This stops handset audio and native live mode; it does not submit an answer or resolve a pending form. Do not add extra confirmations or keep a completed conversation open for implementation work. After ending, apply the spoken outcome and resume interrupted work, or start the authorized work that was waiting for the answer. Honor explicit instructions to stop work; otherwise do not end on a pause or during necessary clarification.",
 		parameters: endCallParameters,
 		loadMode: "essential",
 		approval: "write",
-		...endCallRenderers,
+		...createEndCallRenderers(language),
 		async execute(_id, params, signal, _update, ctx) {
 			signal?.throwIfAborted();
 			const ended = owns(ctx) && !!admin && await admin.endCall(params.requestId);
 			return {
-				content: [{ type: "text", text: ended ? "Away call ended." : "No matching active Away call in this session." }],
+				content: [{ type: "text", text: t(ended ? "Away call ended." : "No matching active Away call in this session.") }],
 				details: { ended },
 			};
 		},
 	});
 
 	pi.registerCommand("away", {
-		description: "Enable Away for all connected sessions; /away off disables immediate ringing",
-		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode),
+		get description() { return t("Enable Away for all connected sessions; /away off disables immediate ringing"); },
+		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode)?.map(item=>({...item,description:t(item.description)})) ?? null,
 		handler: async (args, ctx) => {
 			if (ctx.agent.kind !== "main" || ctx.mode !== "tui") return;
-			if (args.trim()==="help") { ctx.ui.notify(awayHelp,"info"); return; }
+			if (args.trim()==="help") {
+				const help=(awaySuggestions("") ?? []).filter(item=>item.value!=="help").map(item=>`/away ${item.label} — ${t(item.description)}`).join("\n");
+				ctx.ui.notify(help,"info"); return;
+			}
 			if (!owns(ctx)) return;
 			if(args.trim()==="status") {
 				const epoch=generation;
 				await opening;
 				if(epoch!==generation || !owns(ctx)) return;
 				if(admin) await admin.command("status");
-				else ctx.ui.notify(clean(`Away status\n${notifications?.status() ?? "Not initialized"}`),"info");
+				else ctx.ui.notify(clean(`${t("Away status")}\n${notifications?.status() ?? t("Not initialized")}`),"info");
 				return;
 			}
-			if (!admin) { ctx.ui.notify("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide.", "error"); return; }
+			if (!admin) { ctx.ui.notify(t("Away mobile unavailable. Check the gateway settings in the plugin DEBUG guide."), "error"); return; }
 			await admin.command(args);
 		},
 	});
@@ -418,7 +424,7 @@ export default function away(pi: ExtensionAPI): void {
 		if (first?.type !== "text") return;
 		answer.notesApplied = true;
 		return {
-			content: [{ ...first, text: first.text + "\nOption notes:\n" + JSON.stringify(answer.notes) }, ...event.content.slice(1)],
+			content: [{ ...first, text: first.text + `\n${t("Option notes")}:\n` + JSON.stringify(answer.notes) }, ...event.content.slice(1)],
 			details: { ...event.details, notes: structuredClone(answer.notes) },
 		};
 	});

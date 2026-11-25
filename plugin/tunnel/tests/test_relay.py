@@ -286,6 +286,10 @@ class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
                         await server.start_server(ssl=tls, access_log=None)
                         listener = next(iter(server.runner.sites))._server
                         descriptors = [sock.fileno() for sock in listener.sockets]
+                        def active_connections():
+                            # asyncio 3.14 replaced the counter with a set of client transports.
+                            clients = getattr(listener, '_clients', None)
+                            return len(clients) if clients is not None else listener._active_count
                         peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         peer.setblocking(False)
                         closing = None
@@ -293,7 +297,7 @@ class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
                             await loop.sock_connect(peer, ('127.0.0.1', server.port))
                             if phase == 'handshake':
                                 async with asyncio.timeout(2):
-                                    while listener._active_count == 0:
+                                    while active_connections() == 0:
                                         await asyncio.sleep(0)
                                 closing = asyncio.create_task(close_tls_server(server))
                                 async with asyncio.timeout(2):
@@ -302,13 +306,13 @@ class TLSFixtureTest(unittest.IsolatedAsyncioTestCase):
                                 done, _ = await asyncio.wait({closing}, timeout=.02)
                                 if done:
                                     await closing
-                                    self.assertEqual(listener._active_count, 0,
+                                    self.assertEqual(active_connections(), 0,
                                                      'Cleanup returned while its accepted TLS socket was still live')
                             peer.close()
                             if closing is None:
                                 closing = asyncio.create_task(close_tls_server(server))
                             await closing
-                            self.assertEqual(listener._active_count, 0)
+                            self.assertEqual(active_connections(), 0)
                             self.assertFalse(listener.is_serving())
                             self.assertEqual(listener.sockets, ())
                             accepts = getattr(loop, '_accept_futures', {})

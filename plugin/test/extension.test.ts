@@ -73,20 +73,21 @@ test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("nativ
 	spyOn(registry,"lookup").mockImplementation(key=>settings.get(key));
 	spyOn(runtime,"gatewayConfigured").mockReturnValue(true);
 	let native!:{request(value:CollabUiRequest):void;end(id:number):void;lost():void}, wire!:SecureDesktopOptions;
+	let mobileOpening:ReturnType<typeof connectRuntime>|undefined;
 	const invalidations:string[][]=[], controls:DesktopControl[]=[];
 	spyOn(adapter,"startAdapter").mockImplementation(async(port,_session,callbacks)=>{
 		native=callbacks; callbacks.ready?.();
 		return {port,async reply(){return true},async close(){}};
 	});
 	spyOn(runtime,"openAdmin").mockImplementation(async()=>{
-		const mobile=await connectRuntime({url:"https://example.invalid",desktopToken:"",stateDir:"",confirmPair:async()=>false},()=>{},{
+		const mobile=await (mobileOpening=connectRuntime({url:"https://example.invalid",desktopToken:"",stateDir:"",confirmPair:async()=>false},()=>{},{
 			async gateway(options) {wire=options;return {
 				async devices(){return ["phone"]},async pair(){throw Error("unexpected pairing")},
 				async routing(){return {away:true,delayMs:null}},async ring(){},async invalidate(device,id){invalidations.push([device,id])},
 				async sendControl(_device,message){controls.push(message)},async sendPcm(){},async close(){},
 			}},
 			async voice(){throw Error("read-only detail must not open voice")},
-		});
+		}));
 		return {...mobile,async command(){},cancelEnrollment(){}};
 	});
 	type Handler=(event:unknown,ctx:ExtensionContext)=>unknown;
@@ -99,7 +100,8 @@ test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("nativ
 	away(api);
 	try {
 		await handlers.get("session_start")!({},ctx);
-		await tick(); // The host opens its mobile runtime independently of the native adapter.
+		await mobileOpening;
+		await tick(); // Finish host registration after asynchronous locale preferences load.
 		const transformed=await handlers.get("tool_call")!({toolName:"ask",toolCallId:"tool",input:{html:'<form><label>Explain<textarea name="answer"></textarea></label></form>'}},ctx);
 		if (!transformed || typeof transformed!=="object" || !("input" in transformed) || !transformed.input || typeof transformed.input!=="object" || !("html" in transformed.input) || typeof transformed.input.html!=="string") throw Error("Native form was not prepared");
 		const html=transformed.input.html;

@@ -1,6 +1,6 @@
 package ru.eleven.ompaway
 
-import android.app.Activity
+import androidx.appcompat.app.AppCompatActivity
 import android.app.KeyguardManager
 import android.content.ComponentName
 import android.content.Intent
@@ -16,7 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 
 /** Full-screen fallback is private even on the lock screen. Unlock and explicit Answer precede audio. */
-class IncomingCallActivity : Activity() {
+class IncomingCallActivity : AppCompatActivity() {
     private val app get() = application as Gateway
     private var id: String? = null
     private val main = Handler(Looper.getMainLooper())
@@ -39,14 +39,14 @@ class IncomingCallActivity : Activity() {
             setPadding(RadianceUi.dp(this@IncomingCallActivity, 20), 0,
                 RadianceUi.dp(this@IncomingCallActivity, 20), RadianceUi.dp(this@IncomingCallActivity, 12))
         }
-        body.addView(RadianceUi.text(this, "Incoming call", 24, heading = true))
+        body.addView(RadianceUi.text(this, uiString(R.string.incoming_call), 24, heading = true))
         body.addView(RadianceUi.text(this,
-            "Unlock to review the question. Answer starts a voice call; it does not submit an answer.", 16))
+            uiString(R.string.unlock_to_review_the_question_answer_starts_a_voice_call), 16))
         val actions = RadianceUi.column(this).apply {
             val padding = RadianceUi.dp(this@IncomingCallActivity, 16)
             setPadding(padding, 0, padding, padding)
         }
-        actions.addView(RadianceUi.button(this, "Answer call", primary = true) {
+        actions.addView(RadianceUi.button(this, uiString(R.string.answer_call), primary = true) {
                 app.acknowledge(request)
                 fun open() {
                     startActivity(Intent().setComponent(ComponentName(packageName, "$packageName.AnswerCall"))
@@ -59,7 +59,7 @@ class IncomingCallActivity : Activity() {
                     object : KeyguardManager.KeyguardDismissCallback() { override fun onDismissSucceeded() { open() } })
                 else open()
         }, RadianceUi.rowParams(this))
-        actions.addView(RadianceUi.button(this, "Decline", destructive = true) {
+        actions.addView(RadianceUi.button(this, uiString(R.string.decline), destructive = true) {
             app.silence(request); finish()
         }, RadianceUi.rowParams(this))
         val sheet = RadianceUi.column(this).apply {

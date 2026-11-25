@@ -68,3 +68,27 @@ class PhoneTest(unittest.TestCase):
         ]:
             with self.subTest(message=message), self.assertRaises(ProtocolError):
                 phone.incoming(message)
+
+    def test_locale_is_optional_and_validated_without_changing_legacy_controls(self):
+        legacy = Phone(None)
+        self.assertTrue(legacy.incoming({'type': 'list'}))
+        self.assertIsNone(legacy.language)
+        for language in ('en', 'ru'):
+            with self.subTest(language=language):
+                phone = Phone(None)
+                self.assertTrue(phone.incoming({'type': 'list', 'details': True, 'language': language}))
+                self.assertEqual(phone.language, language)
+                self.assertTrue(phone.incoming({'type': 'join', 'requestId': 'request_a', 'language': language}))
+        for language in ('fr', '', None, 1):
+            for kind in ('list', 'join'):
+                control = {'type': kind, 'language': language}
+                if kind == 'join':
+                    control['requestId'] = 'request_a'
+                with self.subTest(control=control), self.assertRaises(ProtocolError):
+                    Phone(None).incoming(control)
+
+    def test_locale_does_not_relax_strict_control_shape(self):
+        with self.assertRaises(ProtocolError):
+            Phone(None).incoming({'type': 'list', 'language': 'ru', 'extra': True})
+        with self.assertRaises(ProtocolError):
+            Phone(None).incoming({'type': 'join', 'language': 'ru', 'requestId': 'request_a', 'extra': True})

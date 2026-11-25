@@ -398,8 +398,12 @@ class Broker:
                     if key in self.touch:
                         return
                     if client is None or len(self.touch) >= MAX_CLIENTS * MAX_PENDING:
+                        phone = self.service.phones.get(device)
+                        unavailable = 'Запрос недоступен.' if phone and phone.language == 'ru' else 'Request unavailable.'
                         reply = ({'type': 'form', 'requestId': request, 'form': None} if message['type'] == 'form' else
-                                 {'type': 'answer', 'requestId': request, 'status': 'stale', 'message': 'Request unavailable.'})
+                                 {'type': 'answer', 'requestId': request, 'status': 'stale', 'message': unavailable})
+                        if message['type'] == 'form' and phone and phone.language:
+                            reply['language'] = phone.language
                         await self.enqueue(None, {'op': 'control', 'deviceId': device, 'ref': msg['ref'], 'message': reply})
                         return
                     self.touch[key] = client
@@ -505,6 +509,10 @@ class Broker:
                 client.event(event='ready', routingVersion=1, healthVersion=1)
                 for device, phone in self.service.phones.items():
                     client.event(event='connected', deviceId=device, ref=phone.ref)
+                    preferences = {'type': 'list', 'details': phone.details}
+                    if phone.language:
+                        preferences['language'] = phone.language
+                    client.event(event='message', deviceId=device, ref=phone.ref, message=preferences)
             while True:
                 kind, data = await read_frame(reader)
                 cmd = decode_frame(kind, data)

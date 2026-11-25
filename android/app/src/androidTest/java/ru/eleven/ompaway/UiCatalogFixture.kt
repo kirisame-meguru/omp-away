@@ -203,8 +203,8 @@ internal class UiCatalogFixture(private val instrumentation: Instrumentation, pr
             alerted.clear(); details.clear(); proposals.clear()
         }
         app.forms.clear(); app.drafts.clear(); app.noteDrafts.clear(); app.formMessages.clear(); app.submitting.clear()
-        (get(app, "loadingForms") as MutableSet<*>).clear()
-        put(app, "verifiedInbox", false); put(app, "status", "Offline"); put(app, "pairing", false)
+        (get(app, "loadingForms") as MutableMap<*, *>).clear()
+        put(app, "verifiedInbox", false); put(app, "statusMessage", UiMessage(R.string.offline)); put(app, "pairing", false)
         put(app, "verifyEmoji", null); put(app, "answerReceipt", null); put(app, "endingId", null)
         put(activity, "notice", null); put(activity, "selectedId", null)
         put(activity, "renderedPage", null); put(activity, "renderedId", null)
@@ -222,7 +222,7 @@ internal class UiCatalogFixture(private val instrumentation: Instrumentation, pr
         try { invoke(activity, "render") } finally { put(activity, "resumed", false) }
     }
 
-    fun connected() { paired(); put(app, "verifiedInbox", true); put(app, "status", "Connected to desktop") }
+    fun connected() { paired(); put(app, "verifiedInbox", true); put(app, "statusMessage", UiMessage(R.string.connected_to_desktop)) }
 
     fun activeCall(id: String) {
         check(inertCall == null)
@@ -287,7 +287,13 @@ internal class UiCatalogFixture(private val instrumentation: Instrumentation, pr
     fun preferences() = ScreenPreferences(context)
     fun views(): List<View> = descendants(root)
     fun select(id: String) { put(activity, "selectedId", id) }
-    fun loading(id: String) { @Suppress("UNCHECKED_CAST") val ids = get(app, "loadingForms") as MutableSet<String>; ids.add(id) }
+    fun loading(id: String) {
+        @Suppress("UNCHECKED_CAST")
+        val requests = get(app, "loadingForms") as MutableMap<String, Any>
+        val constructor = Gateway::class.java.declaredClasses.single { it.simpleName == "FormLoad" }
+            .getDeclaredConstructor(String::class.java).apply { isAccessible = true }
+        requests[id] = constructor.newInstance(AppLanguage.effective(app))
+    }
 
     fun voice(name: String, renderer: Int, active: Boolean, connected: Boolean, mic: Float, playback: Float,
               caller: String = "", callerFinal: Boolean = false, assistant: String = "", assistantFinal: Boolean = false,

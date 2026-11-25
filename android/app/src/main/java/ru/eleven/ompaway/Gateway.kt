@@ -22,16 +22,44 @@ class Gateway : Application() {
     internal val needsRelayOrigin get() = current().channel.needsRelayOrigin()
     internal fun migrateRelayOrigin(origin: String) {
         if (observer == null || !idle) return
-        status = "Restoring relay setup without replacing paired keys…"
+        statusMessage = UiMessage(R.string.restoring_relay_setup_without_replacing_paired_keys)
         current().channel.migrateRelayOrigin(origin); changed()
     }
     private var requestedJoin: String? = null
+    private var callLanguage = "en"
+    private var displayedLanguage: String? = null
+    internal var relayDraft = ""
+    private var saveDraftObserver: (() -> Unit)? = null
+    private val staleSubmittedForms = mutableSetOf<String>()
+
+    internal fun languageChanged() {
+        val language = AppLanguage.effective(this)
+        if (displayedLanguage == language) return
+        saveDraftObserver?.invoke()
+        if (displayedLanguage != null) {
+            // Never invalidate submission receipts or silently resubmit after translating a form.
+            staleSubmittedForms.addAll(submitting)
+            forms.keys.retainAll(submitting)
+            formMessages.keys.retainAll(submitting)
+            localFormMessages.keys.retainAll(submitting)
+            store.state.invalidateDetails()
+        }
+        displayedLanguage = language
+        Invites.refreshLanguage(this)
+        if (verifiedInbox) current().channel.list()
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        languageChanged()
+    }
     private var voiceForeground = false
     private var joinSent = false
     private var invitationObserver: (() -> Unit)? = null
     private val tokenState = TokenUpdates()
     @Volatile private var session: Session? = null
     private var observer: (() -> Unit)? = null
+    private var recreatingUi = false
     private var voiceObserver: (() -> Unit)? = null
     internal var speaking = false
         private set
@@ -45,7 +73,7 @@ class Gateway : Application() {
         private set
     private var syncJob: ((Boolean) -> Unit)? = null
     private val timeout = Runnable { finishSync(true) }
-    private val joinTimeout = Runnable { if (call != null && !talking) endCall(DiagnosticEvent.END_JOIN_TIMEOUT, "Voice did not become ready. Request remains pending.") }
+    private val joinTimeout = Runnable { if (call != null && !talking) endCall(DiagnosticEvent.END_JOIN_TIMEOUT, UiMessage(R.string.voice_did_not_become_ready_request_remains_pending)) }
     @Volatile private var call: CallService? = null
     internal val callId: String? get() = call?.id
     internal val callVisual: CallVisualSource? get() = call
@@ -55,8 +83,8 @@ class Gateway : Application() {
         private set
     internal var verifiedInbox = false
         private set
-    internal var status = "Offline"
-        private set
+    private var statusMessage = UiMessage(R.string.offline)
+    internal val status get() = statusMessage.resolve(this)
     internal enum class InboxConnection { CONNECTING, REFRESHING, CONNECTED, DISCONNECTED }
     internal var inboxConnection = InboxConnection.DISCONNECTED
         private set
@@ -67,7 +95,7 @@ class Gateway : Application() {
     private val refreshTimeout = Runnable {
         finishRefresh()
         inboxConnection = InboxConnection.DISCONNECTED
-        status = "Refresh timed out. Pull down to try again."
+        statusMessage = UiMessage(R.string.refresh_timed_out_pull_down_to_try_again)
         changed()
     }
     internal var verifyEmoji: String? = null
@@ -80,6 +108,17 @@ class Gateway : Application() {
     internal val drafts = mutableMapOf<String, JSONObject>()
     internal val noteDrafts = mutableMapOf<String, JSONArray>()
     internal val formMessages = mutableMapOf<String, String>()
+    private val localFormMessages = mutableMapOf<String, Pair<Int, String>>()
+    private fun setFormMessage(id: String, resource: Int) {
+        val rendered = uiString(resource)
+        localFormMessages[id] = resource to rendered
+        formMessages[id] = rendered
+    }
+    internal fun formMessage(id: String): String? {
+        val value = formMessages[id] ?: return null
+        val local = localFormMessages[id]
+        return if (local != null && local.second == value) uiString(local.first) else value
+    }
     internal val submitting = mutableSetOf<String>()
     internal var answerReceipt: String? = null
         private set
@@ -88,16 +127,19 @@ class Gateway : Application() {
         answerReceipt = null
         return receipt
     }
-    private val loadingForms = mutableSetOf<String>()
+    private class FormLoad(val language: String)
+    private val loadingForms = mutableMapOf<String, FormLoad>()
     private val awaitingReceipts = mutableSetOf<String>()
 
     internal fun loadForm(id: String) {
-        if (!verifiedInbox || id !in store.state.pending || id in forms || id in formMessages || !loadingForms.add(id)) return
+        if (!verifiedInbox || id !in store.state.pending || id in forms || id in formMessages || id in loadingForms) return
         val s = current()
+        val load = FormLoad(AppLanguage.effective(this))
+        loadingForms[id] = load
         s.channel.form(id)
         main.postDelayed({
-            if (session === s && loadingForms.remove(id)) {
-                formMessages[id] = "Question did not arrive. Reconnect to refresh."
+            if (session === s && loadingForms[id] === load) {
+                setFormMessage(id, R.string.question_did_not_arrive_reconnect_to_refresh)
                 changed()
             }
         }, 30_000)
@@ -108,19 +150,19 @@ class Gateway : Application() {
             id !in forms || id !in store.state.pending || id in submitting) return
         acknowledge(id)
         answerReceipt = null
-        submitting.add(id); formMessages[id] = "Submitting…"
+        submitting.add(id); setFormMessage(id, R.string.submitting)
         awaitingReceipts.add(id)
         drafts[id] = values; noteDrafts[id] = notes
         val s = current()
         if (!s.channel.answer(id, values, notes)) {
             submitting.remove(id)
             awaitingReceipts.remove(id)
-            formMessages[id] = "Answer was not sent. Check the connection or shorten your text."
+            setFormMessage(id, R.string.answer_was_not_sent_check_the_connection_or_shorten_your)
             changed(); return
         }
         main.postDelayed({
-            if (session === s && id in submitting && formMessages[id] == "Submitting…") {
-                formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
+            if (session === s && id in submitting && localFormMessages[id]?.first == R.string.submitting) {
+                setFormMessage(id, R.string.submission_not_confirmed_check_the_desktop_before_retrying)
                 changed()
             }
         }, 30_000)
@@ -129,13 +171,16 @@ class Gateway : Application() {
 
     private fun invalidateForms() {
         forms.clear(); loadingForms.clear()
+        staleSubmittedForms.clear()
         awaitingReceipts.clear()
         formMessages.keys.retainAll(submitting)
-        for (id in submitting) formMessages[id] = "Submission not confirmed. Check the desktop before retrying."
+        localFormMessages.keys.retainAll(submitting)
+        for (id in submitting) setFormMessage(id, R.string.submission_not_confirmed_check_the_desktop_before_retrying)
     }
 
     override fun onCreate() {
         super.onCreate()
+        AppLanguage.initialize(this)
         DebugDiagnostics.initialize(this)
         store = InboxStore(this)
         Invites.ensureChannel(this)
@@ -168,25 +213,31 @@ class Gateway : Application() {
 
     internal fun setSpeakerEnabled(enabled: Boolean) {
         if (call?.setSpeakerEnabled(enabled) == false) {
-            status = "Audio route could not be changed. Previous setting kept."
+            statusMessage = UiMessage(R.string.audio_route_could_not_be_changed_previous_setting_kept)
         } else {
             audioSettings.speakerEnabled = enabled
         }
         changed()
     }
 
-    internal fun foreground(render: () -> Unit, renderVoice: (() -> Unit)? = null) {
+    internal fun foreground(render: () -> Unit, renderVoice: (() -> Unit)? = null, saveDrafts: (() -> Unit)? = null) {
         DebugDiagnostics.record(DiagnosticEvent.APP_FOREGROUND)
+        recreatingUi = false
         observer = render; voiceObserver = renderVoice
+        saveDraftObserver = saveDrafts
         val s = current()
         if (s.channel.isPaired() && !verifiedInbox && !s.connecting) connect()
+        if (requestedJoin != null && verifiedInbox) s.channel.list()
         refreshToken()
         changed()
     }
 
-    internal fun background() {
+    internal fun background(recreating: Boolean = false) {
         DebugDiagnostics.record(DiagnosticEvent.APP_BACKGROUND)
         observer = null; voiceObserver = null
+        saveDraftObserver = null
+        recreatingUi = recreating
+        if (recreating) return
         requestedJoin = null
         if (!voiceForeground) endCall(DiagnosticEvent.END_BACKGROUND, null)
         if (call == null && (syncJob == null || pairing)) retire()
@@ -198,13 +249,13 @@ class Gateway : Application() {
         DebugDiagnostics.record(DiagnosticEvent.CONNECT_REQUESTED)
         s.connecting = true
         inboxConnection = InboxConnection.CONNECTING
-        status = "Connecting to desktop…"
+        statusMessage = UiMessage(R.string.connecting_to_desktop)
         s.channel.connect(); changed()
     }
 
     internal fun retry() {
         DebugDiagnostics.record(DiagnosticEvent.CONNECT_RETRY)
-        endCall(DiagnosticEvent.END_RECONNECT, null); retire(); status = "Offline"; connect(); refreshToken(); changed()
+        endCall(DiagnosticEvent.END_RECONNECT, null); retire(); statusMessage = UiMessage(R.string.offline); connect(); refreshToken(); changed()
     }
 
     internal fun refreshQuestions() {
@@ -227,32 +278,32 @@ class Gateway : Application() {
         val lookup = tokenState.beginLookup()
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             if (tokenState.isCurrent(lookup)) {
-                pushWarning = null; current().channel.updateFcmToken(token); changed()
+                pushWarningMessage = null; current().channel.updateFcmToken(token); changed()
             }
         }.addOnFailureListener {
-            if (tokenState.isCurrent(lookup)) { pushWarning = "Push registration unavailable. Reopen the inbox to retry."; changed() }
+            if (tokenState.isCurrent(lookup)) { pushWarningMessage = UiMessage(R.string.push_registration_unavailable_reopen_the_inbox_to_retry); changed() }
         }
     }
 
-    internal var pushWarning: String? = null
-        private set
+    private var pushWarningMessage: UiMessage? = null
+    internal val pushWarning get() = pushWarningMessage?.resolve(this)
     internal fun rotatedToken(token: String) {
-        tokenState.rotated(); pushWarning = null
+        tokenState.rotated(); pushWarningMessage = null
         current().channel.updateFcmToken(token)
     }
 
     internal fun pair(raw: String) {
         if (observer == null || paired || pairing) return
-        if (raw.isBlank() || raw.length > 8192) { status = "Invalid pairing code."; changed(); return }
-        pairing = true; status = "Verifying desktop identity…"
-        runCatching { current().channel.pair(raw) }.onFailure { pairing = false; status = "Invalid pairing code." }
+        if (raw.isBlank() || raw.length > 8192) { statusMessage = UiMessage(R.string.invalid_pairing_code); changed(); return }
+        pairing = true; statusMessage = UiMessage(R.string.verifying_desktop_identity)
+        runCatching { current().channel.pair(raw) }.onFailure { pairing = false; statusMessage = UiMessage(R.string.invalid_pairing_code) }
         changed()
     }
 
     internal fun confirm(emoji: String, accept: Boolean) {
         if (observer == null || emoji != verifyEmoji) return
         verifyEmoji = null
-        status = if (accept) "Waiting for desktop approval…" else "Pairing declined."
+        statusMessage = if (accept) UiMessage(R.string.waiting_for_desktop_approval) else UiMessage(R.string.pairing_declined)
         current().channel.confirmPair(emoji, accept)
         if (!accept) pairing = false
         changed()
@@ -312,16 +363,16 @@ class Gateway : Application() {
         if (observer == null || !validId(id)) { DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED); return }
         if (id in submitting || forms[id]?.optBoolean("voice", true) == false) {
             DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED)
-            status = "Voice is unavailable for this question. Review its answer on the home screen."
+            statusMessage = UiMessage(R.string.voice_is_unavailable_for_this_question_review_its_answer_on)
             changed(); return
         }
-        if (!idle) { DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED); status = "End the current call before answering another request."; changed(); return }
+        if (!idle) { DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED); statusMessage = UiMessage(R.string.end_the_current_call_before_answering_another_request); changed(); return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             DebugDiagnostics.record(DiagnosticEvent.JOIN_PERMISSION_DENIED)
-            status = "Microphone permission is required. Nothing was joined."; changed(); return
+            statusMessage = UiMessage(R.string.microphone_permission_is_required_nothing_was_joined); changed(); return
         }
         requestedJoin = id
-        status = "Checking that this request is still pending…"
+        statusMessage = UiMessage(R.string.checking_that_this_request_is_still_pending)
         store.state.invalidateDetails()
         if (verifiedInbox) current().channel.list() else connect()
         changed()
@@ -331,18 +382,18 @@ class Gateway : Application() {
         val microphone = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (observer == null || !canJoin(store.state, id, verifiedInbox, idle, microphone)) {
             DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED)
-            status = "Unable to answer here. Open Away and check microphone permission."; return
+            statusMessage = UiMessage(R.string.unable_to_answer_here_open_away_and_check_microphone_permission); return
         }
         Invites.stopRinging(this)
         DebugDiagnostics.record(DiagnosticEvent.CALL_STARTED)
         val s = current()
         lateinit var media: CallService
         media = CallService(this, id, { pcm -> s.channel.sendPcm(pcm) }, { mark -> s.channel.played(id, mark) }, {
-            main.post { if (call === media) endCall(DiagnosticEvent.END_AUDIO, "Audio interrupted. Request remains pending.") }
+            main.post { if (call === media) endCall(DiagnosticEvent.END_AUDIO, UiMessage(R.string.audio_interrupted_request_remains_pending)) }
         }, {
             main.post {
                 if (call === media && voiceForeground) {
-                    main.removeCallbacks(joinTimeout); talking = true; status = "In call"; changed()
+                    main.removeCallbacks(joinTimeout); talking = true; statusMessage = UiMessage(R.string.in_call); changed()
                     DebugDiagnostics.record(DiagnosticEvent.CALL_READY)
                 }
             }
@@ -351,7 +402,8 @@ class Gateway : Application() {
                 if (call === media && speaking != active) { speaking = active; voiceObserver?.invoke() }
             }
         })
-        call = media; talking = false; voiceForeground = false; joinSent = false; status = "Starting foreground voice call…"
+        callLanguage = AppLanguage.effective(this)
+        call = media; talking = false; voiceForeground = false; joinSent = false; statusMessage = UiMessage(R.string.starting_foreground_voice_call)
         speaking = false; callerCaption = ""; assistantCaption = ""
         callerCaptionFinal = false; assistantCaptionFinal = false
         Invites.cancel(this, id)
@@ -369,16 +421,16 @@ class Gateway : Application() {
         if (callId != id) return
         DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_READY)
         voiceForeground = true; joinSent = true
-        current().channel.join(id)
+        current().channel.join(id, callLanguage)
     }
 
     internal fun voiceForegroundFailed(id: String) {
-        if (callId == id) endCall(DiagnosticEvent.END_FOREGROUND, "Android could not keep microphone access in the foreground. Reopen Away to answer.")
+        if (callId == id) endCall(DiagnosticEvent.END_FOREGROUND, UiMessage(R.string.android_could_not_keep_microphone_access_in_the_foreground_reopen))
     }
 
-    internal fun hangup() = endCall(DiagnosticEvent.END_USER, "Call ended. The desktop controls the pending request.")
+    internal fun hangup() = endCall(DiagnosticEvent.END_USER, UiMessage(R.string.call_ended_the_desktop_controls_the_pending_request))
 
-    private fun endCall(reason: DiagnosticEvent, message: String?, tellDesktop: Boolean = true) {
+    private fun endCall(reason: DiagnosticEvent, message: UiMessage?, tellDesktop: Boolean = true) {
         val media = call ?: return
         DebugDiagnostics.record(reason)
         call = null; talking = false; voiceForeground = false
@@ -395,7 +447,7 @@ class Gateway : Application() {
             DebugDiagnostics.record(DiagnosticEvent.HANGUP_SENT)
             session?.channel?.hangup(media.id)
         }
-        if (message != null) status = message
+        if (message != null) statusMessage = message
         changed()
     }
 
@@ -418,8 +470,9 @@ class Gateway : Application() {
         val channel = current().channel
         val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
         for (id in removed) {
+            staleSubmittedForms.remove(id)
             forms.remove(id); drafts.remove(id); noteDrafts.remove(id)
-            loadingForms.remove(id); formMessages.remove(id)
+            loadingForms.remove(id); formMessages.remove(id); localFormMessages.remove(id)
         }
         submitting.removeAll(removed)
         for (id in removed) Invites.cancel(this, id)
@@ -427,13 +480,13 @@ class Gateway : Application() {
         inboxConnection = InboxConnection.CONNECTED
         val toSilence = store.state.silenced.filter { sentSilences.add(it) }
         toSilence.forEach { channel.silence(it) }
-        if (callId?.let { it !in store.state.pending } == true) endCall(DiagnosticEvent.END_QUESTION_REMOVED, "Request closed on desktop.")
-        else if (call == null) status = "Connected to desktop"
+        if (callId?.let { it !in store.state.pending } == true) endCall(DiagnosticEvent.END_QUESTION_REMOVED, UiMessage(R.string.request_closed_on_desktop))
+        else if (call == null) statusMessage = UiMessage(R.string.connected_to_desktop)
         val answer = requestedJoin
-        if (answer != null) {
+        if (answer != null && observer != null) {
             requestedJoin = null
             if (answer in store.state.pending) startCall(answer)
-            else status = "That request is no longer pending. Nothing was joined."
+            else statusMessage = UiMessage(R.string.that_request_is_no_longer_pending_nothing_was_joined)
         }
         for (item in store.state.pending.values) {
             val alert = store.consumeAlert(item.id)
@@ -455,27 +508,37 @@ class Gateway : Application() {
         private fun ui(action: () -> Unit) { main.post { if (session === this) action() } }
 
         override fun onVerify(emoji: String) = ui {
-            if (observer != null && pairing) { verifyEmoji = emoji; changed() } else retire()
+            if ((observer != null || recreatingUi) && pairing) { verifyEmoji = emoji; changed() } else retire()
         }
 
         override fun onReady() = ui {
             pairing = false; verifyEmoji = null; connecting = false; verifiedInbox = false
             inboxConnection = InboxConnection.REFRESHING
-            status = "Refreshing inbox…"; changed()
+            statusMessage = UiMessage(R.string.refreshing_inbox); changed()
         }
 
         override fun onInbox(items: List<InboxItem>) = ui { reconcileInbox(items) }
 
-        override fun onForm(requestId: String, form: JSONObject?) = ui {
-            loadingForms.remove(requestId)
+        override fun onForm(requestId: String, form: JSONObject?, language: String?) = ui {
+            val load = loadingForms.remove(requestId)
             if (!verifiedInbox || requestId !in store.state.pending) return@ui
+            if ((language ?: load?.language)?.let { it != AppLanguage.effective(this@Gateway) } == true) {
+                // The old reply releases the desktop's outstanding-request correlation.
+                if (localFormMessages[requestId]?.first == R.string.question_did_not_arrive_reconnect_to_refresh) {
+                    localFormMessages.remove(requestId)
+                    formMessages.remove(requestId)
+                }
+                loadForm(requestId)
+                return@ui
+            }
+            staleSubmittedForms.remove(requestId)
             if (form != null) {
                 forms[requestId] = form
                 if (requestId !in submitting) formMessages.remove(requestId)
             } else {
                 forms.remove(requestId)
                 if (requestId !in submitting)
-                    formMessages[requestId] = "Touch answers are unavailable for this question. Review details or use voice."
+                    setFormMessage(requestId, R.string.touch_answers_are_unavailable_for_this_question_review_details_or)
             }
             changed()
         }
@@ -485,11 +548,17 @@ class Gateway : Application() {
             if (!awaitingReceipts.remove(requestId)) return@ui
             // An uncertain delivery is never automatically retried, including across reconnects.
             if (status == "invalid" || status == "busy") submitting.remove(requestId)
+            localFormMessages.remove(requestId)
             if (requestId in store.state.pending) formMessages[requestId] = message
-            this@Gateway.status = message
+            this@Gateway.statusMessage = UiMessage(text = message)
             answerReceipt = message
+            if ((status == "invalid" || status == "busy") && staleSubmittedForms.remove(requestId)) {
+                forms.remove(requestId)
+                formMessages.remove(requestId)
+            }
             if (status == "accepted" || status == "stale") {
                 forms.remove(requestId); drafts.remove(requestId); noteDrafts.remove(requestId)
+                staleSubmittedForms.remove(requestId)
                 channel.list()
             }
             changed()
@@ -509,7 +578,7 @@ class Gateway : Application() {
             stream = media
             ui {
                 if (media != null && call === media && voiceForeground && verifiedInbox && requestId in store.state.pending) {
-                    status = "Waiting for the desktop's voice…"
+                    statusMessage = UiMessage(R.string.waiting_for_the_desktop_s_voice)
                     media.start(); changed()
                 } else {
                     DebugDiagnostics.record(DiagnosticEvent.REMOTE_JOIN_REJECTED)
@@ -530,14 +599,14 @@ class Gateway : Application() {
             stream?.takeIf { it.id == requestId }?.let { stream = null; it.invalidate() }
             ui {
                 if (endingId == requestId) endingId = null
-                if (callId == requestId) endCall(DiagnosticEvent.END_DESKTOP, "Call ended by desktop.", false)
+                if (callId == requestId) endCall(DiagnosticEvent.END_DESKTOP, UiMessage(R.string.call_ended_by_desktop), false)
                 if (observer == null && syncJob == null) retire() else channel.list()
             }
         }
         override fun onError(code: String) = ui {
             DebugDiagnostics.transportFailure(code)
             if (code == "push_token_unavailable" || code == "push_token_rejected") {
-                pushWarning = "Push registration unavailable. Reopen the inbox to retry."
+                pushWarningMessage = UiMessage(R.string.push_registration_unavailable_reopen_the_inbox_to_retry)
                 changed(); return@ui
             }
             finishRefresh()
@@ -546,12 +615,12 @@ class Gateway : Application() {
             verifiedInbox = false; store.state.invalidateDetails()
             invalidateForms()
             endCall(DiagnosticEvent.END_TRANSPORT_ERROR, null); verifyEmoji = null; pairing = false; connecting = false
-            status = when (code) {
-                "relay_origin_required" -> "Relay setup required. Pairing keys have been retained."
-                "relay_origin_rejected" -> "Enter a valid HTTPS relay origin without credentials, path, query or fragment."
-                "inbox-too-large" -> "Desktop inbox is too large to synchronize. Requests remain pending; details are unavailable."
-                "inbox-unavailable" -> "Desktop inbox is not yet available. Pending sync; cached details cannot be used."
-                else -> "Desktop connection error: " + code.takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,64}")) }.orEmpty()
+            statusMessage = when (code) {
+                "relay_origin_required" -> UiMessage(R.string.relay_setup_required_pairing_keys_have_been_retained)
+                "relay_origin_rejected" -> UiMessage(R.string.enter_a_valid_https_relay_origin_without_credentials_path_query)
+                "inbox-too-large" -> UiMessage(R.string.desktop_inbox_is_too_large_to_synchronize_requests_remain_pending)
+                "inbox-unavailable" -> UiMessage(R.string.desktop_inbox_is_not_yet_available_pending_sync_cached_details)
+                else -> UiMessage(R.string.connection_error, argument = code.takeIf { it.matches(Regex("[a-zA-Z0-9_-]{1,64}")) }.orEmpty())
             }
             changed()
         }
@@ -565,7 +634,7 @@ class Gateway : Application() {
                 store.state.invalidateDetails()
                 invalidateForms()
                 endingId = null
-                if (!status.startsWith("Desktop connection error")) status = "Disconnected. Showing cached inbox."
+                if (statusMessage.resource != R.string.connection_error) statusMessage = UiMessage(R.string.disconnected_showing_cached_inbox)
                 changed()
             }
         }

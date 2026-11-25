@@ -34,7 +34,7 @@ internal class PairingView(
         background = RadianceUi.surface(context, RadianceUi.cardColor, 12)
         val padding = RadianceUi.dp(context, 16)
         setPadding(padding, padding, padding, padding)
-        addView(RadianceUi.text(context, "Pair desktop", 20, heading = true))
+        addView(RadianceUi.text(context, context.uiString(R.string.pair_desktop), 20, heading = true))
         addView(status)
         addView(notice)
         addView(body, LayoutParams(-1, -2))
@@ -89,17 +89,17 @@ internal class PairingView(
         if (next != Mode.SCAN) scanning = false
         when (next) {
             Mode.CHOOSE -> {
-                label("Run /away pair on your desktop, then scan its QR here. Compare every emoji on both screens.")
-                button("Scan pairing QR", primary = true, action = requestCamera)
-                button("Pair from clipboard") {
+                label(context.uiString(R.string.run_away_pair_on_your_desktop_then_scan_its_qr))
+                button(context.uiString(R.string.scan_pairing_qr), primary = true, action = requestCamera)
+                button(context.uiString(R.string.pair_from_clipboard)) {
                     val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
                     val raw = if (clip != null && clip.itemCount == 1) clip.getItemAt(0).text?.toString() else null
-                    if (raw == null) message("Copy the desktop pairing JSON first.")
+                    if (raw == null) message(context.uiString(R.string.copy_the_desktop_pairing_json_first))
                     else { message(null); app.pair(raw) }
                 }
             }
             Mode.SCAN -> {
-                label("Point the camera at the QR on your desktop.")
+                label(context.uiString(R.string.point_the_camera_at_the_qr_on_your_desktop))
                 val preview = BarcodeView(context).apply {
                     setUseTextureView(true)
                     decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
@@ -114,7 +114,7 @@ internal class PairingView(
                     override fun cameraError(error: Exception) {
                         if (scanner !== preview) return
                         cancelScan()
-                        message("Camera unavailable. Try again or pair from the clipboard.")
+                        message(context.uiString(R.string.camera_unavailable_try_again_or_pair_from_the_clipboard))
                     }
                 })
                 preview.decodeSingle(object : BarcodeCallback {
@@ -122,37 +122,44 @@ internal class PairingView(
                         if (!active || scanner !== preview) return
                         val raw = result.text
                         cancelScan()
-                        if (raw.isNullOrBlank() || raw.length > 8192) message("Invalid pairing code. Try again.")
+                        if (raw.isNullOrBlank() || raw.length > 8192) message(context.uiString(R.string.invalid_pairing_code_try_again))
                         else { message(null); app.pair(raw) }
                     }
                 })
-                button("Cancel scan") { cancelScan() }
+                button(context.uiString(R.string.cancel_scan)) { cancelScan() }
                 if (active) preview.resume()
             }
-            Mode.WAIT -> button("Cancel pairing") { app.retry() }
+            Mode.WAIT -> button(context.uiString(R.string.cancel_pairing)) { app.retry() }
             Mode.VERIFY -> {
                 val expected = checkNotNull(nextCode)
-                label("Compare all 12 emoji, in order, with the code on the desktop.")
+                label(context.uiString(R.string.compare_all_12_emoji_in_order_with_the_code_on))
                 body.addView(RadianceUi.text(context, expected, 30).apply {
-                    contentDescription = "Verification code: $expected"
+                    contentDescription = context.uiString(R.string.verification_code, expected)
                 })
-                label("Only approve if they match exactly.")
-                button("Codes match", primary = true) { app.confirm(expected, true) }
-                button("Do not match") { app.confirm(expected, false) }
+                label(context.uiString(R.string.only_approve_if_they_match_exactly))
+                button(context.uiString(R.string.codes_match), primary = true) { app.confirm(expected, true) }
+                button(context.uiString(R.string.do_not_match)) { app.confirm(expected, false) }
             }
             Mode.RELAY -> {
-                label("Your pairing keys are retained. Enter the same trusted HTTPS relay as your desktop. Your saved credential is sent there; never enter an unfamiliar address.")
+                label(context.uiString(R.string.your_pairing_keys_are_retained_enter_the_same_trusted_https))
                 val input = EditText(context).apply {
                     hint = "https://relay.example"
+                    isSaveEnabled = false
+                    setText(app.relayDraft)
+                    addTextChangedListener(object : android.text.TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { app.relayDraft = s?.toString().orEmpty() }
+                        override fun afterTextChanged(s: android.text.Editable?) = Unit
+                    })
                     setTextColor(RadianceUi.cream); setHintTextColor(RadianceUi.muted)
                     backgroundTintList = android.content.res.ColorStateList.valueOf(RadianceUi.muted)
                     inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
                     importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-                    contentDescription = "Trusted HTTPS relay address"
+                    contentDescription = context.uiString(R.string.trusted_https_relay_address)
                     minHeight = RadianceUi.dp(context, 56)
                 }
                 body.addView(input, LayoutParams(-1, -2))
-                button("Restore relay", primary = true) { app.migrateRelayOrigin(input.text.toString()) }
+                button(context.uiString(R.string.restore_relay), primary = true) { app.migrateRelayOrigin(input.text.toString()) }
             }
             Mode.PAIRED -> Unit
         }

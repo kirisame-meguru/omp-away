@@ -46,6 +46,15 @@ class Session:
             raise AssertionError(f"expected {event}, got {msg.get('event')}")
         return msg
 
+    async def existing_phone(self):
+        connected = await self.expect('connected')
+        preferences = await self.expect('message')
+        if (preferences.get('deviceId') != connected['deviceId'] or
+                preferences.get('ref') != connected['ref'] or
+                preferences.get('message') != {'type': 'list', 'details': False}):
+            raise AssertionError('existing handset preferences were not replayed on its authenticated route')
+        return connected
+
     async def command(self, op, **args):
         self.seq += 1
         if op == 'pcm':
@@ -99,7 +108,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         await phone.send_json(dict(type='list', details=True))
         for session in (self.host.local, second):
@@ -145,7 +154,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         item = dict(requestId='private-request', project='Private project', question='Private question', createdAt=1)
         await self.host.command('control', **dest, message=dict(type='inbox', items=[item]))
@@ -174,7 +183,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         await phone.send_json(dict(type='list', details=True))
         for session in (self.host.local, second):
@@ -220,7 +229,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         await phone.send_json(dict(type='list', details=True))
         for session in (self.host.local, second):
@@ -239,7 +248,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         a = dict(requestId='a', project='A', question='A?', createdAt=1)
         b = dict(requestId='b', project='B', question='B?', createdAt=2)
@@ -261,7 +270,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = dict(deviceId='phone_1', ref=connected['ref'])
         a = dict(requestId='a', project='A', question='A?', createdAt=1)
         b = dict(requestId='b', project='B', question='B?', createdAt=2)
@@ -426,7 +435,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        self.assertEqual(await second.expect('connected'), connected)
+        self.assertEqual(await second.existing_phone(), connected)
         dest = {'deviceId': 'phone_1', 'ref': connected['ref']}
         a = {'requestId': 'request_a', 'project': 'A', 'question': 'Choose A', 'createdAt': 1}
         b = {'requestId': 'request_b', 'project': 'B', 'question': 'Choose B', 'createdAt': 2}
@@ -454,7 +463,7 @@ class BrokerTest(test_relay.RelayTest):
         self.assertEqual(json.loads((await phone.read_frame())[1]), {'type': 'ended', 'requestId': 'request_b'})
         self.assertEqual(json.loads((await phone.read_frame())[1]), {'type': 'inbox', 'items': []})
         third = await self.session()
-        self.assertEqual(await third.expect('connected'), connected)
+        self.assertEqual(await third.existing_phone(), connected)
         self.assertEqual((await third.command('devices'))['value'], ['phone_1'])
         self.assertTrue(self.control_ready.empty())  # No second relay owner was opened.
 
@@ -492,7 +501,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = {'deviceId': 'phone_1', 'ref': connected['ref']}
         item = {'requestId': 'request_a', 'project': 'A', 'question': 'Choose A', 'createdAt': 1}
         await self.host.command('control', **dest, message={'type': 'inbox', 'items': [item]})
@@ -513,7 +522,7 @@ class BrokerTest(test_relay.RelayTest):
         phone = await self.phone()
         connected = await self.host.expect('connected')
         second = await self.session()
-        await second.expect('connected')
+        await second.existing_phone()
         dest = {'deviceId': 'phone_1', 'ref': connected['ref']}
         items = []
         for session, request in [(self.host.local, 'request_a'), (second, 'request_b')]:
@@ -569,7 +578,7 @@ class BrokerTest(test_relay.RelayTest):
             send_frame(child.stdin, 1, encode(init))
             async with asyncio.timeout(25):
                 kind, data = await read_frame(child.stdout)
-            self.assertEqual((kind, json.loads(data)), (1, {'event': 'ready', 'routingVersion': 1}))
+            self.assertEqual((kind, json.loads(data)), (1, {'event': 'ready', 'routingVersion': 1, 'healthVersion': 1}))
             return child
         try:
             first, second = await asyncio.gather(start(), start())

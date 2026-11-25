@@ -12,6 +12,8 @@ import type {
   ToolRenderResult,
 } from "@oh-my-pi/pi-tui/tools/renderer";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { Language } from "./language";
+import { message } from "./messages";
 
 export const clean = (value: string): string => replaceTabs(sanitizeText(value));
 type Tone = "muted" | "success" | "warning" | "error";
@@ -113,27 +115,29 @@ class EndCallBody implements Component {
     readonly tone: Tone,
     readonly detail: string,
     readonly icon?: string,
+    readonly language: Language = "en",
   ) {}
   render(width: number): readonly string[] {
-    return new Text(`${this.label}\n${this.detail}`, 0, 0).render(width);
+    return new Text(`${message(this.language, this.label)}\n${message(this.language, this.detail)}`, 0, 0).render(width);
   }
   describe(cx: DescribeContext): NativeNode {
     if (!this.#styled) this.#styled = applyAwayStyles(cx);
     return col(
-      [awayStatus(this.label, this.tone, this.icon), text(this.detail, { wrap: "word" })],
+      [awayStatus(message(this.language, this.label), this.tone, this.icon), text(message(this.language, this.detail), { wrap: "word" })],
       { gap: "sm", role: "away.end-call" },
     );
   }
 }
 
-function endCallBody(result: ToolRenderResult, options: RenderResultOptions): EndCallBody {
+function endCallBody(result: ToolRenderResult, options: RenderResultOptions, language: Language = "en"): EndCallBody {
   if (options.isPartial)
-    return new EndCallBody("Ending call", "muted", "Stopping handset audio and live mode…");
+    return new EndCallBody("Ending call", "muted", "Stopping handset audio and live mode…", undefined, language);
   if (result.isError)
     return new EndCallBody(
       "Could not end call",
       "error",
       "The call may still be active. Check live mode before retrying.",
+      undefined, language,
     );
   const ended = isRecord(result.details) && result.details.ended === true;
   return ended
@@ -141,27 +145,30 @@ function endCallBody(result: ToolRenderResult, options: RenderResultOptions): En
         "Call ended",
         "success",
         "Audio stopped. This does not submit an answer or resolve a pending form.",
+        undefined, language,
       )
     : new EndCallBody(
         "No matching active call",
         "muted",
         "Nothing was ended in this session. Pending questions are unchanged.",
         "info",
+        language,
       );
 }
 
-export const endCallRenderers = {
+export function createEndCallRenderers(language: () => Language = () => "en") {
+  return {
   mergeCallAndResult: true,
   renderCall() {
-    return new Text("End call · Away", 0, 0);
+    return new Text(`${message(language(), "End call")} · Away`, 0, 0);
   },
   renderResult(result: ToolRenderResult, options: RenderResultOptions) {
-    return endCallBody(result, options);
+    return endCallBody(result, options, language());
   },
   describeCall(_args: unknown, options: RenderResultOptions): NativeToolView {
     const waiting = options.executionStarted === false;
     return {
-      tool: { title: "End call", target: "Away", targetKind: "text" },
+      tool: { title: message(language(), "End call"), target: "Away", targetKind: "text" },
       inline: false,
       body: [
         new EndCallBody(
@@ -173,6 +180,7 @@ export const endCallRenderers = {
               ? "Waiting for execution. Audio has not been stopped."
               : "Stopping handset audio and live mode…",
           options.cancelled ? "x" : undefined,
+          language(),
         ),
       ],
       preview: "children",
@@ -180,13 +188,16 @@ export const endCallRenderers = {
   },
   describeResult(result: ToolRenderResult, options: RenderResultOptions): NativeToolView {
     return {
-      tool: { title: "End call", target: "Away", targetKind: "text" },
+      tool: { title: message(language(), "End call"), target: "Away", targetKind: "text" },
       inline: false,
-      body: [endCallBody(result, options)],
+      body: [endCallBody(result, options, language())],
       preview: "children",
     };
   },
-};
+  };
+}
+
+export const endCallRenderers = createEndCallRenderers();
 
 /** The context envelope is model input, not a transcript UI. Never display its instructions or HTML by default. */
 export class CallMessage implements Component {
@@ -200,6 +211,7 @@ export class CallMessage implements Component {
     content: string,
     readonly result: boolean,
     private expanded: boolean,
+    readonly language: Language = "en",
   ) {
     let data: Record<string, unknown> = {};
     try {
@@ -213,11 +225,11 @@ export class CallMessage implements Component {
     } catch {
       /* Old or unknown messages get a safe summary, not a raw payload. */
     }
-    this.title = result ? "Voice discussion" : "Continue by voice";
+    this.title = message(language, result ? "Voice discussion" : "Continue by voice");
     this.target = typeof data.title === "string" ? clean(data.title) : "Away";
-    this.summary = result
+    this.summary = message(language, result
       ? "Discussion returned to the agent"
-      : "Phone picked up · pickup is not an answer";
+      : "Phone picked up · pickup is not an answer");
     const detail = result ? data.voiceDiscussion : data.blockedWork;
     if (typeof detail === "string") this.detail = clean(detail);
     const id = result ? data.question : data.requestId;
@@ -232,7 +244,7 @@ export class CallMessage implements Component {
         `${this.title} · ${this.target}`,
         this.summary,
         ...(this.detail ? [this.shownDetail()] : []),
-        ...(this.expanded && this.requestId ? [`Request: ${this.requestId}`] : []),
+        ...(this.expanded && this.requestId ? [`${message(this.language, "Request")}: ${this.requestId}`] : []),
       ].join("\n"),
       0,
       0,
@@ -261,7 +273,7 @@ export class CallMessage implements Component {
             ...(this.detail ? [text(this.shownDetail(), { wrap: "word" })] : []),
             awayStatus(this.summary, "muted", this.result ? "check" : "info"),
             ...(this.expanded && this.requestId
-              ? [text([span(`Request: ${this.requestId}`, "muted")], { wrap: "word" })]
+              ? [text([span(`${message(this.language, "Request")}: ${this.requestId}`, "muted")], { wrap: "word" })]
               : []),
           ],
           { role: "away.receipt", gap: "sm" },
@@ -281,10 +293,11 @@ export class PairingComparison implements Component {
     readonly emoji: string,
     readonly code: string,
     readonly decide: (accept: boolean, code: string) => void,
+    readonly language: Language = "en",
   ) {}
   render(width: number): readonly string[] {
     return new Text(
-      `Pair phone · Away\nCompare all 12 emojis on your phone:\n${clean(this.emoji)}\nOnly approve if every emoji matches. Expires in 2 minutes.\nMatch: /away approve ${this.code}\nMismatch: /away deny ${this.code}`,
+      `${message(this.language, "Pair phone")} · Away\n${message(this.language, "Compare all 12 emojis on your phone:")}\n${clean(this.emoji)}\n${message(this.language, "Only approve if every emoji matches. Expires in 2 minutes.")}\n${message(this.language, "Match")}: /away approve ${this.code}\n${message(this.language, "Mismatch")}: /away deny ${this.code}`,
       0,
       0,
     ).render(width);
@@ -295,30 +308,30 @@ export class PairingComparison implements Component {
       cx,
       {
         role: "away.pairing.compare",
-        title: "Pair phone",
-        target: "Verify device",
+        title: message(this.language, "Pair phone"),
+        target: message(this.language, "Verify device"),
         status: "pending",
       },
       [
         col(
           [
-            text("Compare all 12 emojis, in order, with your phone.", { wrap: "word" }),
+            text(message(this.language, "Compare all 12 emojis, in order, with your phone."), { wrap: "word" }),
             text(clean(this.emoji), { role: "away.comparison", wrap: "word" }),
-            text([span("Only approve if every emoji matches. Expires in 2 minutes.", "muted")], {
+            text([span(message(this.language, "Only approve if every emoji matches. Expires in 2 minutes."), "muted")], {
               wrap: "word",
             }),
             row(
               [
                 node("button", {
                   role: "omp.btn",
-                  text: "Deny",
+                  text: message(this.language, "Deny"),
                   variant: "quiet",
                   size: "sm",
                   actions: { click: "deny" },
                 }),
                 node("button", {
                   role: "omp.btn",
-                  text: "All 12 match",
+                  text: message(this.language, "All 12 match"),
                   variant: "default",
                   size: "sm",
                   actions: { click: "approve" },

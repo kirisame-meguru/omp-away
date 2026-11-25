@@ -2,6 +2,7 @@
 import asyncio
 from collections import deque
 from fractions import Fraction
+from pathlib import Path
 import json
 import struct
 import sys
@@ -16,6 +17,7 @@ PHONE_BYTES = 2 * SAMPLES
 JSON, PCM = 1, 2
 CONTROL_MAX = 65536
 HEADER = struct.Struct('>BI')
+OPENING = Path(__file__).with_name('opening.md').read_text(encoding='utf-8')
 
 
 class MicrophoneTrack(AudioStreamTrack):
@@ -177,10 +179,7 @@ class Peer:
         # Commentary supplies context but native live deliberately keeps it silent.
         self.events.send(json.dumps({
             'type': 'session.context.append', 'channel': 'speakable',
-            'content': [{'type': 'input_text', 'text':
-                "Begin this Away call now. Briefly explain the pending question from the preceding "
-                "context in your own words, then invite the user's answer. Do not recite these "
-                "instructions, routing metadata, or form markup. Do not submit an answer."}],
+            'content': [{'type': 'input_text', 'text': OPENING}],
         }, separators=(',', ':')))
 
     def phone_pcm(self, frame):

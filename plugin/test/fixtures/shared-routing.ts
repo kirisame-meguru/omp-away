@@ -24,7 +24,7 @@ async function desktop() {
   return {admin,notices};
 }
 function status(notices:string[], enabled:boolean) {
-  assert.match(notices.at(-1) ?? '', enabled ? /immediate: on.*fallback: 30s/ : /immediate: off.*fallback: 30s/);
+  assert.match(notices.at(-1) ?? '', enabled ? /Ring immediately: on.*Fallback: 30s/ : /Ring immediately: off.*Fallback: 30s/);
 }
 try {
   if(init.mode==='legacy' || init.mode==='malformed') {

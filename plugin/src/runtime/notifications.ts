@@ -1,4 +1,6 @@
 import { clean } from "../presentation";
+import type { Language } from "../language";
+import { diagnosticCount, message } from "../messages";
 
 const diagnostics: Readonly<Record<string, string>> = {
 	phone_disconnected: "Phone transport interrupted",
@@ -21,6 +23,8 @@ const diagnostics: Readonly<Record<string, string>> = {
 	"async-answer-invalid": "Async answer rejected",
 	"native-unavailable": "Native Ask forwarding unavailable",
 	"shared-routing-upgrade-required": "Shared gateway upgrade required",
+	"translation-unavailable": "Question translation unavailable",
+	"language-preference-unavailable": "Language preference could not be saved",
 	state_permissions_denied: "Private gateway state permissions rejected",
 	relay_connection_failed: "Initial relay connection failed",
 	shared_gateway_disconnected: "Shared gateway stopped",
@@ -38,14 +42,17 @@ const diagnostics: Readonly<Record<string, string>> = {
 
 /** Session-local presentation only. Never changes routing, retries or answer authority. */
 export class AwayNotifications {
-	readonly #health = new Map<string, string>();
+	readonly #health = new Map<string, string | ((language: Language) => string)>();
 	readonly #shown = new Set<string>();
 	readonly #recent = new Map<string, number>();
 	readonly #deferred = new Map<string, NodeJS.Timeout>();
 	#closed = false;
+	#language: Language = "en";
 	constructor(private readonly notify: (text: string, type: "info" | "warning" | "error") => void) {}
 
-	health(area: string, state: string): void { if (!this.#closed) this.#health.set(area, state); }
+	get language(): Language { return this.#language; }
+	setLanguage(language: Language): void { this.#language = language; }
+	health(area: string, state: string | ((language: Language) => string)): void { if (!this.#closed) this.#health.set(area, state); }
 	diagnostic(code: string): void {
 		if (this.#closed) return;
 		const key = Object.hasOwn(diagnostics, code) ? code : "unknown";
@@ -54,13 +61,13 @@ export class AwayNotifications {
 		this.#recent.set(key, count + 1);
 		if (this.#recent.size > 6) this.#recent.delete(this.#recent.keys().next().value!);
 	}
-	warn(key: string, message: string): void {
+	warn(key: string, text: string): void {
 		if (this.#closed || this.#shown.has(key)) return;
 		this.cancel(key);
 		this.#shown.add(key);
 		// Bound request-scoped receipts without retaining question content or identifiers forever.
 		if (this.#shown.size > 128) this.#shown.delete(this.#shown.values().next().value!);
-		try { this.notify(clean(`Away: ${message}`), "warning"); }
+		try { this.notify(clean(`Away: ${message(this.#language, text)}`), "warning"); }
 		catch { /* Presentation failure must never prevent transport cleanup or alter answer authority. */ }
 	}
 	defer(key: string, message: string, relevant: () => boolean): void {
@@ -79,10 +86,10 @@ export class AwayNotifications {
 	recover(key: string): void { this.cancel(key); this.#shown.delete(key); }
 	suppress(key: string): void { if (!this.#closed) { this.cancel(key); this.#shown.add(key); } }
 	status(): string {
-		const lines = [...this.#health].map(([area, state]) => `${area}: ${state}`);
+		const lines = [...this.#health].map(([area, state]) => `${message(this.#language, area)}: ${typeof state === "function" ? state(this.#language) : message(this.#language, state)}`);
 		if (this.#recent.size) {
-			lines.push("Recent diagnostics (not necessarily current failures):");
-			for (const [code, count] of this.#recent) lines.push(`  ${diagnostics[code] ?? "Unclassified gateway failure"}${count > 1 ? ` (${count} occurrences)` : ""}`);
+			lines.push(message(this.#language, "Recent diagnostics (not necessarily current failures):"));
+			for (const [code, count] of this.#recent) lines.push(`  ${message(this.#language, diagnostics[code] ?? "Unclassified gateway failure")}${count > 1 ? diagnosticCount(this.#language, count) : ""}`);
 		}
 		return lines.join("\n");
 	}

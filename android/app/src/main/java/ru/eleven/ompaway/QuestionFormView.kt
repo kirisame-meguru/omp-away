@@ -35,7 +35,7 @@ internal class QuestionFormView(
     private val inputs = mutableListOf<View>()
     private val validators = mutableListOf<() -> String?>()
     private val message = label("")
-    private val send = RadianceUi.button(context, "Submit answer", primary = true) {
+    private val send = RadianceUi.button(context, context.uiString(R.string.submit_answer), primary = true) {
         val error = validators.firstNotNullOfOrNull { it() }
         if (error == null) submit(values(), notes())
         else {
@@ -121,7 +121,7 @@ internal class QuestionFormView(
                             authored(definition.optString("question", definition.getString("name")))
                         field(definition, draft, showCaption = definition !== sharedCaption)
                     }
-                    "image", "svg" -> addView(label(block.optString("alt").ifBlank { "Image" } + " — view on desktop"))
+                    "image", "svg" -> addView(label(block.optString("alt").ifBlank { context.uiString(R.string.image) } + context.uiString(R.string.view_on_desktop)))
                 }
             }
         }
@@ -138,7 +138,7 @@ internal class QuestionFormView(
     fun availability(enabled: Boolean, busy: Boolean, text: String?, canSubmit: Boolean = enabled) {
         send.isEnabled = enabled && canSubmit && !busy
         for (input in inputs) input.isEnabled = enabled && !busy
-        send.text = if (busy) "Awaiting desktop confirmation" else "Submit answer"
+        send.text = if (busy) context.uiString(R.string.awaiting_desktop_confirmation) else context.uiString(R.string.submit_answer)
         message.text = text.orEmpty()
         message.visibility = if (text.isNullOrEmpty()) GONE else VISIBLE
     }
@@ -172,16 +172,16 @@ internal class QuestionFormView(
                 val value = edit.text.toString()
                 val number = if (numeric) value.toDoubleOrNull() else null
                 val error = when {
-                    field.optBoolean("required") && value.isBlank() -> "Enter an answer."
+                    field.optBoolean("required") && value.isBlank() -> context.uiString(R.string.enter_an_answer)
                     value.isNotEmpty() && field.has("minLength") && value.length < field.optInt("minLength") ->
-                        "Use at least ${field.optInt("minLength")} characters."
+                        resources.getQuantityString(R.plurals.minimum_characters, field.optInt("minLength"), field.optInt("minLength"))
                     field.has("maxLength") && value.length > field.optInt("maxLength") ->
-                        "Use at most ${field.optInt("maxLength")} characters."
-                    numeric && value.isNotBlank() && (number == null || !number.isFinite()) -> "Enter a valid number."
+                        resources.getQuantityString(R.plurals.maximum_characters, field.optInt("maxLength"), field.optInt("maxLength"))
+                    numeric && value.isNotBlank() && (number == null || !number.isFinite()) -> context.uiString(R.string.enter_a_valid_number)
                     numeric && number != null && field.has("min") && number < field.optDouble("min") ->
-                        "Enter a number of at least ${field.get("min")}."
+                        context.uiString(R.string.number_minimum, field.get("min"))
                     numeric && number != null && field.has("max") && number > field.optDouble("max") ->
-                        "Enter a number of at most ${field.get("max")}."
+                        context.uiString(R.string.number_maximum, field.get("max"))
                     else -> null
                 }
                 edit.error = error
@@ -220,13 +220,13 @@ internal class QuestionFormView(
         if (field.optBoolean("other")) {
             val custom = values.firstOrNull { value -> controls.none { it.second == value } }
             other = if (multi) CheckBox(context) else RadioButton(context)
-            other.id = View.generateViewId(); other.text = "Other"; other.setTextColor(RadianceUi.textColors)
-            other.contentDescription = "$caption: Other"
+            other.id = View.generateViewId(); other.text = context.uiString(R.string.other); other.setTextColor(RadianceUi.textColors)
+            other.contentDescription = context.uiString(R.string.field_other, caption)
             other.buttonTintList = RadianceUi.tint; other.minHeight = dp(48); other.textSize = 16f
             inputs.add(other)
             group.addView(other, LayoutParams(-1, -2))
             if (multi) other.isChecked = custom != null else if (custom != null) initial = other as RadioButton
-            otherText = editor(false).apply { hint = "Your answer"; contentDescription = "$caption: Other"; setText(custom.orEmpty()) }
+            otherText = editor(false).apply { hint = context.uiString(R.string.your_answer); contentDescription = context.uiString(R.string.field_other, caption); setText(custom.orEmpty()) }
         }
         addView(group, LayoutParams(-1, -2))
         if (!multi) (group as RadioGroup).check(initial?.id ?: -1)
@@ -242,9 +242,9 @@ internal class QuestionFormView(
         }
         validators.add {
             when {
-                other?.isChecked == true && otherText?.text.isNullOrBlank() -> "$caption: Enter your Other answer."
+                other?.isChecked == true && otherText?.text.isNullOrBlank() -> context.uiString(R.string.enter_other_answer, caption)
                 field.optBoolean("required") && controls.none { it.first.isChecked } && other?.isChecked != true ->
-                    "$caption: Select an answer."
+                    context.uiString(R.string.select_answer, caption)
                 else -> null
             }
         }
@@ -257,8 +257,8 @@ internal class QuestionFormView(
                     if (prior.optString("name") == name && prior.optString("value") == value()) saved = prior.optString("text")
                 }
                 val edit = editor(true).apply {
-                    hint = if (multi) "Notes for ${control.text}" else "Notes"
-                    contentDescription = "Notes for ${control.text}"
+                    hint = if (multi) context.uiString(R.string.notes_for, control.text) else context.uiString(R.string.notes)
+                    contentDescription = context.uiString(R.string.notes_for, control.text)
                     minLines = 1
                     minHeight = dp(48)
                     gravity = android.view.Gravity.TOP or android.view.Gravity.START

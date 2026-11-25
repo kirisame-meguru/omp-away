@@ -57,8 +57,8 @@ internal class CallScreen(
         surface?.let { addView(it, LayoutParams(-1, -1)) }
         addView(fallback, LayoutParams(-1, -1))
     }
-    private val title = label("Voice call", 24f)
-    private val callNotice = label("Voice captions · Not a submitted answer", 14f)
+    private val title = label(context.uiString(R.string.voice_call), 24f)
+    private val callNotice = label(context.uiString(R.string.voice_captions_not_a_submitted_answer), 14f)
     private val caller = label("", 16f)
     private val assistant = label("", 16f)
     private val transcript = CallTranscriptViews(title, caller, assistant)
@@ -151,16 +151,16 @@ internal class CallScreen(
         styleButton(speaker)
         speaker.setOnClickListener { if (resumed && !ending) changeSpeaker(!speakerEnabled) }
         RadianceUi.styleButton(end, quiet = true, destructive = true)
-        end.text = "Hang up"
+        end.text = context.uiString(R.string.hang_up)
         end.setOnClickListener { if (resumed && !ending) hangup() }
         callActions.addView(speaker, LinearLayout.LayoutParams(0, -2, 1f))
         callActions.addView(Button(context).apply {
-            styleButton(this); text = "Questions"
-            contentDescription = "View questions and proposed answer"
+            styleButton(this); text = context.uiString(R.string.questions)
+            contentDescription = context.uiString(R.string.view_questions_and_proposed_answer)
             setOnClickListener { if (resumed && !ending) openInbox() }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         callActions.addView(settingsButton.apply {
-            styleButton(this); text = "Settings"
+            styleButton(this); text = context.uiString(R.string.settings)
             setOnClickListener { if (resumed) openSettings() }
         }, LinearLayout.LayoutParams(0, -2, 1f))
         body.addView(callActions, LinearLayout.LayoutParams(-1, -2))
@@ -301,7 +301,7 @@ internal class CallScreen(
 
     fun setSpeaker(enabled: Boolean) {
         speakerEnabled = enabled
-        speaker.text = if (enabled) "Speaker: on" else "Speaker: off"
+        speaker.text = if (enabled) context.uiString(R.string.speaker_on) else context.uiString(R.string.speaker_off)
     }
 
     fun captions(user: String, userFinal: Boolean, reply: String, replyFinal: Boolean) {
@@ -350,7 +350,7 @@ internal class CallScreen(
         }
         if (current != null && lastMode != state.mode) {
             lastMode = state.mode
-            title.text = when (state.mode) { 0 -> "Connecting audio…"; 1 -> "Listening…"; 2 -> "Speaking…"; 3 -> "Thinking…"; else -> "Call ended" }
+            title.text = when (state.mode) { 0 -> context.uiString(R.string.connecting_audio); 1 -> context.uiString(R.string.listening); 2 -> context.uiString(R.string.speaking); 3 -> context.uiString(R.string.thinking); else -> context.uiString(R.string.call_ended) }
         }
         applyPose()
         if (current != null) scheduler.postFrameCallbackDelayed(this, if (still()) 80L else 0L)
