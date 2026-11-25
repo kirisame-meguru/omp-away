@@ -138,7 +138,14 @@ jobs:
       - name: Upload draft and verify every remote byte
         shell: bash
         env:
-          AWAY_RELEASE_TOKEN: ${{ secrets.AWAY_RELEASE_TOKEN }}
+          # Checkout remains bound to the workflow host; publication may target
+          # a separately authorized host without exposing checkout credentials.
+          AWAY_RELEASE_HOST: ${{ vars.AWAY_PUBLISH_HOST || vars.AWAY_RELEASE_HOST }}
+          AWAY_SERVER_URL: ${{ vars.AWAY_PUBLISH_SERVER || vars.AWAY_SERVER_URL }}
+          AWAY_API_URL: ${{ vars.AWAY_PUBLISH_API || vars.AWAY_API_URL }}
+          AWAY_UPLOAD_ORIGIN: ${{ vars.AWAY_PUBLISH_UPLOAD_ORIGIN || vars.AWAY_UPLOAD_ORIGIN }}
+          AWAY_REPOSITORY: ${{ vars.AWAY_PUBLISH_REPOSITORY || vars.AWAY_REPOSITORY }}
+          AWAY_RELEASE_TOKEN: ${{ secrets.AWAY_PUBLISH_TOKEN || secrets.AWAY_RELEASE_TOKEN }}
           AWAY_PUBLICATION: ${{ inputs.publication || 'finalize' }}
         run: |
           set -eu
