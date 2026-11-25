@@ -25,6 +25,18 @@ for (const version of ['19.1.0', '19.1.1', '20.0.0', '99.0.0-dev']) {
 		expect(result.captions).toEqual([['user','Coffee',true]]);
 	});
 }
+test('call guidance returns requested answers through native voice before requesting hangup',async()=>{
+	const result=await startup('19.1.1');
+	expect(result.error).toBeUndefined();
+	const guidance=result.contexts[0];
+	expect(guidance).toContain('return a normal final answer without invoking away_end_call');
+	expect(guidance).toContain('tool-turn commentary is silent context, not a spoken answer');
+	expect(guidance).toContain('after speaking any requested answer');
+	expect(guidance).toContain('Honor an explicit user hangup immediately');
+	expect(guidance).toContain('Do not add a mandatory handoff acknowledgment');
+	expect(guidance).not.toContain('must briefly acknowledge the outcome');
+	expect(guidance).not.toContain('If the coding agent already has the outcome');
+});
 for(const scenario of ['missing-live','noncallable-live','missing-context','noncallable-context']) {
 	test(`native live rejects ${scenario} before opening resources`,async()=>{
 		const result=await startup('19.1.1',scenario);
