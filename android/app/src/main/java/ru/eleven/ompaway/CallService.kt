@@ -43,7 +43,7 @@ internal class CallService(
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         .setAudioAttributes(attributes).setWillPauseWhenDucked(true)
-        .setOnAudioFocusChangeListener({ change -> if (change < 0) fail() }, Handler(Looper.getMainLooper())).build()
+        .setOnAudioFocusChangeListener({ change -> if (change < 0) fail(DiagnosticEvent.AUDIO_FOCUS_LOST, change) }, Handler(Looper.getMainLooper())).build()
     private val queue = ArrayBlockingQueue<Any>(64) // 1.28 seconds; never acknowledge discarded audio
     private val gate = Any()
     private val live = AtomicBoolean(true)
@@ -74,10 +74,17 @@ internal class CallService(
     }
 
     // Serial channel reader owns each PCM array; do not copy or return it to a pool.
-    fun receive(pcm: ByteArray) { if (live.get() && (pcm.size != BYTES || !queue.offer(pcm))) fail() }
-    fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail() }
+    fun receive(pcm: ByteArray) {
+        if (!live.get()) return
+        if (pcm.size != BYTES) fail(DiagnosticEvent.AUDIO_INVALID_FRAME, pcm.size)
+        else if (!queue.offer(pcm)) fail(DiagnosticEvent.AUDIO_QUEUE_FULL, queue.size)
+    }
+    fun mark(mark: String) { if (live.get() && !queue.offer(mark)) fail(DiagnosticEvent.AUDIO_MARK_QUEUE_FULL, queue.size) }
 
-    fun invalidate() { live.set(false); connected = false; visualLevels.close(); captureReady.countDown() }
+    fun invalidate() {
+        DebugDiagnostics.record(DiagnosticEvent.AUDIO_INVALIDATED)
+        live.set(false); connected = false; visualLevels.close(); captureReady.countDown()
+    }
 
     fun setSpeakerEnabled(enabled: Boolean): Boolean {
         if (!live.get()) return false
@@ -112,26 +119,34 @@ internal class CallService(
     fun start() {
         if (started || !live.get()) return
         started = true
-        if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
-            audio.mode == AudioManager.MODE_IN_CALL || audio.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-            fail(); return
+        DebugDiagnostics.record(DiagnosticEvent.AUDIO_START)
+        if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            fail(DiagnosticEvent.AUDIO_PERMISSION_DENIED); return
         }
+        if (audio.mode == AudioManager.MODE_IN_CALL) { fail(DiagnosticEvent.AUDIO_IN_CALL); return }
+        val granted = audio.requestAudioFocus(focus)
+        if (granted != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { fail(DiagnosticEvent.AUDIO_FOCUS_DENIED, granted); return }
         ownsFocus = true
         try {
             previousMode = audio.mode
             audio.mode = AudioManager.MODE_IN_COMMUNICATION
-            check(routeSpeaker(speakerEnabled)) { "Speaker unavailable" }
-            worker("Away playout", ::playback)
-        } catch (_: RuntimeException) { fail() }
+            val routed = routeSpeaker(speakerEnabled)
+            if (!routed) DebugDiagnostics.record(DiagnosticEvent.AUDIO_ROUTE_FAILED)
+            check(routed) { "Speaker unavailable" }
+            worker("Away playout", DiagnosticEvent.AUDIO_PLAYBACK_EXCEPTION, ::playback)
+        } catch (error: RuntimeException) { fail(DiagnosticEvent.AUDIO_START_FAILED, error = error) }
     }
 
-    private fun worker(name: String, body: () -> Unit) = Thread({
+    private fun worker(name: String, failure: DiagnosticEvent, body: () -> Unit) = Thread({
         try { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO); body() }
-        catch (_: Exception) { if (live.get()) fail() }
+        catch (error: Exception) { if (live.get()) fail(failure, error = error) }
     }, name).start()
 
-    private fun fail() {
-        if (live.getAndSet(false)) { connected = false; visualLevels.close(); captureReady.countDown(); failed() }
+    private fun fail(reason: DiagnosticEvent, code: Int = 0, error: Throwable? = null) {
+        if (live.getAndSet(false)) {
+            DebugDiagnostics.record(reason, code, error)
+            connected = false; visualLevels.close(); captureReady.countDown(); failed()
+        }
     }
 
     private fun capture() {
@@ -139,17 +154,18 @@ internal class CallService(
         check(min > 0)
         // Permission can be revoked after start() while the playout worker is opening capture.
         if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            fail(); return
+            fail(DiagnosticEvent.CAPTURE_PERMISSION_REVOKED); return
         }
         val record = try {
             AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(min, BYTES * 4)).build()
         } catch (_: SecurityException) {
             // The permission can also change between the check and the platform allocation.
-            fail(); return
+            fail(DiagnosticEvent.CAPTURE_PERMISSION_REVOKED); return
         }
         var echo: AcousticEchoCanceler? = null
         try {
+            DebugDiagnostics.record(DiagnosticEvent.CAPTURE_CREATED, record.state)
             check(record.state == AudioRecord.STATE_INITIALIZED)
             if (AcousticEchoCanceler.isAvailable()) echo = AcousticEchoCanceler.create(record.audioSessionId)?.also { it.setEnabled(true) }
             synchronized(gate) {
@@ -158,6 +174,7 @@ internal class CallService(
                 record.startRecording()
             }
             check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING)
+            DebugDiagnostics.record(DiagnosticEvent.CAPTURE_STARTED)
             val buffer = ByteArray(BYTES)
             var offset = 0
             var nextPrivacyCheck = 0L
@@ -165,25 +182,34 @@ internal class CallService(
             while (live.get()) {
                 val now = SystemClock.elapsedRealtime()
                 if (now >= nextPrivacyCheck) {
-                    if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
-                        record.activeRecordingConfiguration?.isClientSilenced == true || audio.mode == AudioManager.MODE_IN_CALL) {
-                        fail(); return
+                    if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                        fail(DiagnosticEvent.CAPTURE_PERMISSION_REVOKED); return
                     }
+                    if (record.activeRecordingConfiguration?.isClientSilenced == true) {
+                        fail(DiagnosticEvent.CAPTURE_SILENCED); return
+                    }
+                    if (audio.mode == AudioManager.MODE_IN_CALL) { fail(DiagnosticEvent.CAPTURE_IN_CALL); return }
                     nextPrivacyCheck = now + 200
                 }
                 val n = record.read(buffer, offset, BYTES - offset, AudioRecord.READ_NON_BLOCKING)
-                if (n < 0) throw IOException("Microphone unavailable")
+                if (n < 0) {
+                    DebugDiagnostics.record(DiagnosticEvent.CAPTURE_READ_FAILED, n)
+                    throw IOException("Microphone unavailable")
+                }
                 if (n == 0) { Thread.sleep(4); continue }
                 offset += n
                 if (offset == BYTES) {
                     visualLevels.capture(buffer, SystemClock.elapsedRealtime())
                     synchronized(gate) { if (live.get()) send(buffer) } // channel takes its own snapshot synchronously
-                    if (first) { first = false; captureReady.countDown() }
+                    if (first) {
+                        first = false; captureReady.countDown()
+                        DebugDiagnostics.record(DiagnosticEvent.CAPTURE_READY)
+                    }
                     offset = 0
                 }
             }
         } catch (_: SecurityException) {
-            fail()
+            fail(DiagnosticEvent.CAPTURE_PERMISSION_REVOKED)
         } finally {
             synchronized(gate) {
                 recording = null
@@ -199,6 +225,7 @@ internal class CallService(
         val track = AudioTrack.Builder().setAudioAttributes(attributes).setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
             .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(maxOf(min, BYTES * 4)).build()
         try {
+            DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_CREATED, track.state)
             check(track.state == AudioTrack.STATE_INITIALIZED)
             synchronized(gate) {
                 if (!live.get()) return
@@ -217,11 +244,15 @@ internal class CallService(
                         if (framesWritten == 0L) {
                             // Opening the microphone can reconfigure the phone's voice route.
                             // Finish that before playing any of the question.
-                            worker("Away capture", ::capture)
-                            if (!captureReady.await(1500, TimeUnit.MILLISECONDS)) throw IOException("Microphone not ready")
+                            worker("Away capture", DiagnosticEvent.AUDIO_CAPTURE_EXCEPTION, ::capture)
+                            if (!captureReady.await(1500, TimeUnit.MILLISECONDS)) {
+                                DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_CAPTURE_TIMEOUT)
+                                throw IOException("Microphone not ready")
+                            }
                             synchronized(gate) {
                                 if (!live.get()) return
                                 track.play()
+                                DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_STARTED)
                             }
                         }
                         val energy = AudioVisualLevels.power(next)
@@ -234,6 +265,7 @@ internal class CallService(
                         }
                         if (framesWritten == BYTES / 2L && live.get()) {
                             connected = true
+                            DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_READY)
                             ready()
                         }
                         receivedAudio = true
@@ -247,7 +279,10 @@ internal class CallService(
                         var padding = 0
                         while (live.get()) {
                             if (track.getTimestamp(stamp) && presented(target, stamp.framePosition, stamp.nanoTime, System.nanoTime())) break
-                            if (SystemClock.elapsedRealtime() >= deadline) throw IOException("No playout timestamp")
+                            if (SystemClock.elapsedRealtime() >= deadline) {
+                                DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_TIMESTAMP_TIMEOUT)
+                                throw IOException("No playout timestamp")
+                            }
                             if (padding < track.bufferSizeInFrames + RATE / 4) {
                                 write(track, silence); padding += BYTES / 2; framesWritten += BYTES / 2
                             } else Thread.sleep(5)
@@ -276,13 +311,17 @@ internal class CallService(
         val deadline = SystemClock.elapsedRealtime() + 1500
         while (live.get() && offset < pcm.size) {
             val n = track.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_NON_BLOCKING)
-            if (n < 0 || SystemClock.elapsedRealtime() > deadline) throw IOException("Playback unavailable")
+            if (n < 0 || SystemClock.elapsedRealtime() > deadline) {
+                DebugDiagnostics.record(DiagnosticEvent.PLAYBACK_WRITE_FAILED, n)
+                throw IOException("Playback unavailable")
+            }
             if (n == 0) Thread.sleep(3) else offset += n
         }
     }
 
     @Suppress("DEPRECATION")
     override fun close() {
+        DebugDiagnostics.record(DiagnosticEvent.AUDIO_CLOSED)
         invalidate()
         synchronized(gate) {
             recording?.let { if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) runCatching { it.stop() } }

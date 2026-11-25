@@ -60,6 +60,13 @@ android {
         }
     }
     buildTypes {
+        getByName("debug") {
+            // Supplied protected credentials permit an in-place diagnostic upgrade.
+            // Ordinary local debug builds retain Android's default debug signer.
+            if (signingInputs.values.all { !it.isNullOrBlank() }) {
+                signingConfig = signingConfigs.getByName("protectedRelease")
+            }
+        }
         getByName("release") {
             signingConfig = signingConfigs.getByName("protectedRelease")
         }

@@ -1,6 +1,8 @@
 package ru.eleven.ompaway.security
 
 import android.content.Context
+import ru.eleven.ompaway.DebugDiagnostics
+import ru.eleven.ompaway.DiagnosticEvent
 import java.io.Closeable
 import java.io.EOFException
 import java.io.IOException
@@ -96,8 +98,14 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     private fun current(s: Session, block: () -> Unit) {
         if (s !== session || closed.get()) return
         try { block() }
-        catch (_: EOFException) { loss(s, "tunnel_closed", true) }
-        catch (_: Exception) { loss(s, "secure_channel_rejected", false) }
+        catch (error: EOFException) {
+            DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_CLOSED, error = error)
+            loss(s, "tunnel_closed", true)
+        }
+        catch (error: Exception) {
+            DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_PROTOCOL_FAILURE, error = error)
+            loss(s, "secure_channel_rejected", false)
+        }
     }
     private fun timeout(s: Session, seconds: Long, retryable: Boolean) {
         s.timeout?.cancel(false)
@@ -112,6 +120,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     }
     private fun loss(s: Session, code: String, retryable: Boolean) {
         if (s !== session) return
+        DebugDiagnostics.transportFailure(code)
         val fallback = details.retryLegacy(ready === s)
         val reconnect = (retryable || fallback) && wanted && s.invite == null && vault.paired()
         if (!reconnect) wanted = false
@@ -189,6 +198,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                 if (stopped.compareAndSet(false, true)) { post { loss(s, "invalid_tunnel", false) }; ws.cancel() }
             }
             override fun onOpen(webSocket: WebSocket, response: Response) = post { current(s) {
+                DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_OPEN, response.code)
                 val decoder = FrameDecoder { kind, bytes -> incoming(s, kind, bytes) }
                 val tls = TlsPipe(s.identity, route.desktopPin, { bytes ->
                     check(webSocket.queueSize() + bytes.remaining() <= 24 * 1024 && webSocket.send(bytes.toByteString()))
@@ -211,12 +221,17 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                 }
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_CLOSED, code)
                 webSocket.close(1000, null); post { loss(s, "tunnel_closed", true) }
             }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = post { loss(s, "tunnel_closed", true) }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = post {
+                DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_CLOSED, code)
+                loss(s, "tunnel_closed", true)
+            }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (stopped.get()) return
                 val status = response?.code
+                DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_FAILURE, status ?: 0, t)
                 val retryable = t !is SSLException && t !is CertificateException && (status == null || status >= 500 || status == 429)
                 post { loss(s, if (retryable) "tunnel_unavailable" else "relay_rejected", retryable) }
             }
@@ -335,6 +350,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         val bytes = JSONObject().put("type", "answer").put("requestId", requestId)
             .put("values", values).put("notes", notes).toString().toByteArray()
         if (bytes.size > 60_000) return false
+        DebugDiagnostics.record(DiagnosticEvent.ANSWER_SENT)
         val packet = frame(1, bytes)
         post { current(s) { if (s === ready) checkNotNull(s.tls).send(packet) } }
         return true

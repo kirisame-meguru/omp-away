@@ -45,7 +45,7 @@ class Gateway : Application() {
         private set
     private var syncJob: ((Boolean) -> Unit)? = null
     private val timeout = Runnable { finishSync(true) }
-    private val joinTimeout = Runnable { if (call != null && !talking) endCall("Voice did not become ready. Request remains pending.") }
+    private val joinTimeout = Runnable { if (call != null && !talking) endCall(DiagnosticEvent.END_JOIN_TIMEOUT, "Voice did not become ready. Request remains pending.") }
     @Volatile private var call: CallService? = null
     internal val callId: String? get() = call?.id
     internal val callVisual: CallVisualSource? get() = call
@@ -136,6 +136,7 @@ class Gateway : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        DebugDiagnostics.initialize(this)
         store = InboxStore(this)
         Invites.ensureChannel(this)
         if (store.needsSync) SilenceJob.schedule(this)
@@ -175,6 +176,7 @@ class Gateway : Application() {
     }
 
     internal fun foreground(render: () -> Unit, renderVoice: (() -> Unit)? = null) {
+        DebugDiagnostics.record(DiagnosticEvent.APP_FOREGROUND)
         observer = render; voiceObserver = renderVoice
         val s = current()
         if (s.channel.isPaired() && !verifiedInbox && !s.connecting) connect()
@@ -183,15 +185,17 @@ class Gateway : Application() {
     }
 
     internal fun background() {
+        DebugDiagnostics.record(DiagnosticEvent.APP_BACKGROUND)
         observer = null; voiceObserver = null
         requestedJoin = null
-        if (!voiceForeground) endCall(null)
+        if (!voiceForeground) endCall(DiagnosticEvent.END_BACKGROUND, null)
         if (call == null && (syncJob == null || pairing)) retire()
     }
 
     internal fun connect() {
         val s = current()
         if (!s.channel.isPaired()) return
+        DebugDiagnostics.record(DiagnosticEvent.CONNECT_REQUESTED)
         s.connecting = true
         inboxConnection = InboxConnection.CONNECTING
         status = "Connecting to desktop…"
@@ -199,7 +203,8 @@ class Gateway : Application() {
     }
 
     internal fun retry() {
-        endCall(null); retire(); status = "Offline"; connect(); refreshToken(); changed()
+        DebugDiagnostics.record(DiagnosticEvent.CONNECT_RETRY)
+        endCall(DiagnosticEvent.END_RECONNECT, null); retire(); status = "Offline"; connect(); refreshToken(); changed()
     }
 
     internal fun refreshQuestions() {
@@ -302,14 +307,17 @@ class Gateway : Application() {
     }
 
     internal fun join(id: String) {
+        DebugDiagnostics.record(DiagnosticEvent.JOIN_REQUESTED)
         acknowledge(id)
-        if (observer == null || !validId(id)) return
+        if (observer == null || !validId(id)) { DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED); return }
         if (id in submitting || forms[id]?.optBoolean("voice", true) == false) {
+            DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED)
             status = "Voice is unavailable for this question. Review its answer on the home screen."
             changed(); return
         }
-        if (!idle) { status = "End the current call before answering another request."; changed(); return }
+        if (!idle) { DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED); status = "End the current call before answering another request."; changed(); return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            DebugDiagnostics.record(DiagnosticEvent.JOIN_PERMISSION_DENIED)
             status = "Microphone permission is required. Nothing was joined."; changed(); return
         }
         requestedJoin = id
@@ -322,17 +330,20 @@ class Gateway : Application() {
     private fun startCall(id: String) {
         val microphone = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (observer == null || !canJoin(store.state, id, verifiedInbox, idle, microphone)) {
+            DebugDiagnostics.record(DiagnosticEvent.JOIN_REJECTED)
             status = "Unable to answer here. Open Away and check microphone permission."; return
         }
         Invites.stopRinging(this)
+        DebugDiagnostics.record(DiagnosticEvent.CALL_STARTED)
         val s = current()
         lateinit var media: CallService
         media = CallService(this, id, { pcm -> s.channel.sendPcm(pcm) }, { mark -> s.channel.played(id, mark) }, {
-            main.post { if (call === media) endCall("Audio interrupted. Request remains pending.") }
+            main.post { if (call === media) endCall(DiagnosticEvent.END_AUDIO, "Audio interrupted. Request remains pending.") }
         }, {
             main.post {
                 if (call === media && voiceForeground) {
                     main.removeCallbacks(joinTimeout); talking = true; status = "In call"; changed()
+                    DebugDiagnostics.record(DiagnosticEvent.CALL_READY)
                 }
             }
         }, { active ->
@@ -345,25 +356,31 @@ class Gateway : Application() {
         callerCaptionFinal = false; assistantCaptionFinal = false
         Invites.cancel(this, id)
         main.postDelayed(joinTimeout, 90_000)
+        DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_REQUESTED)
         try { VoiceForegroundService.start(this, id) }
-        catch (_: RuntimeException) { voiceForegroundFailed(id) }
+        catch (error: RuntimeException) {
+            DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_FAILED, error = error)
+            voiceForegroundFailed(id)
+        }
         changed()
     }
 
     internal fun voiceForegroundReady(id: String) {
         if (callId != id) return
+        DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_READY)
         voiceForeground = true; joinSent = true
         current().channel.join(id)
     }
 
     internal fun voiceForegroundFailed(id: String) {
-        if (callId == id) endCall("Android could not keep microphone access in the foreground. Reopen Away to answer.")
+        if (callId == id) endCall(DiagnosticEvent.END_FOREGROUND, "Android could not keep microphone access in the foreground. Reopen Away to answer.")
     }
 
-    internal fun hangup() = endCall("Call ended. The desktop controls the pending request.")
+    internal fun hangup() = endCall(DiagnosticEvent.END_USER, "Call ended. The desktop controls the pending request.")
 
-    private fun endCall(message: String?, tellDesktop: Boolean = true) {
+    private fun endCall(reason: DiagnosticEvent, message: String?, tellDesktop: Boolean = true) {
         val media = call ?: return
+        DebugDiagnostics.record(reason)
         call = null; talking = false; voiceForeground = false
         VoiceForegroundService.stop(this)
         speaking = false; callerCaption = ""; assistantCaption = ""
@@ -375,6 +392,7 @@ class Gateway : Application() {
         joinSent = false
         if (notifyDesktop) {
             endingId = media.id
+            DebugDiagnostics.record(DiagnosticEvent.HANGUP_SENT)
             session?.channel?.hangup(media.id)
         }
         if (message != null) status = message
@@ -395,6 +413,7 @@ class Gateway : Application() {
     /** Main-thread authoritative snapshot handler; the live transport invokes it only after pinned TLS. */
     internal fun reconcileInbox(items: List<InboxItem>) {
         check(Looper.myLooper() == Looper.getMainLooper())
+        DebugDiagnostics.record(DiagnosticEvent.INBOX_RECEIVED, items.size)
         finishRefresh()
         val channel = current().channel
         val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
@@ -408,7 +427,7 @@ class Gateway : Application() {
         inboxConnection = InboxConnection.CONNECTED
         val toSilence = store.state.silenced.filter { sentSilences.add(it) }
         toSilence.forEach { channel.silence(it) }
-        if (callId?.let { it !in store.state.pending } == true) endCall("Request closed on desktop.")
+        if (callId?.let { it !in store.state.pending } == true) endCall(DiagnosticEvent.END_QUESTION_REMOVED, "Request closed on desktop.")
         else if (call == null) status = "Connected to desktop"
         val answer = requestedJoin
         if (answer != null) {
@@ -462,6 +481,7 @@ class Gateway : Application() {
         }
 
         override fun onAnswer(requestId: String, status: String, message: String) = ui {
+            DebugDiagnostics.record(DiagnosticEvent.ANSWER_RECEIVED)
             if (!awaitingReceipts.remove(requestId)) return@ui
             // An uncertain delivery is never automatically retried, including across reconnects.
             if (status == "invalid" || status == "busy") submitting.remove(requestId)
@@ -484,13 +504,17 @@ class Gateway : Application() {
         }
 
         override fun onJoined(requestId: String) {
+            DebugDiagnostics.record(DiagnosticEvent.REMOTE_JOINED)
             val media = call?.takeIf { it.id == requestId && session === this }
             stream = media
             ui {
                 if (media != null && call === media && voiceForeground && verifiedInbox && requestId in store.state.pending) {
                     status = "Waiting for the desktop's voice…"
                     media.start(); changed()
-                } else channel.hangup(requestId)
+                } else {
+                    DebugDiagnostics.record(DiagnosticEvent.REMOTE_JOIN_REJECTED)
+                    channel.hangup(requestId)
+                }
             }
         }
         override fun onPcm(pcm: ByteArray) { stream?.receive(pcm) }
@@ -505,11 +529,12 @@ class Gateway : Application() {
             stream?.takeIf { it.id == requestId }?.let { stream = null; it.invalidate() }
             ui {
                 if (endingId == requestId) endingId = null
-                if (callId == requestId) endCall("Call ended by desktop.", false)
+                if (callId == requestId) endCall(DiagnosticEvent.END_DESKTOP, "Call ended by desktop.", false)
                 if (observer == null && syncJob == null) retire() else channel.list()
             }
         }
         override fun onError(code: String) = ui {
+            DebugDiagnostics.transportFailure(code)
             if (code == "push_token_unavailable" || code == "push_token_rejected") {
                 pushWarning = "Push registration unavailable. Reopen the inbox to retry."
                 changed(); return@ui
@@ -519,7 +544,7 @@ class Gateway : Application() {
             requestedJoin = null
             verifiedInbox = false; store.state.invalidateDetails()
             invalidateForms()
-            endCall(null); verifyEmoji = null; pairing = false; connecting = false
+            endCall(DiagnosticEvent.END_TRANSPORT_ERROR, null); verifyEmoji = null; pairing = false; connecting = false
             status = when (code) {
                 "relay_origin_required" -> "Relay setup required. Pairing keys have been retained."
                 "relay_origin_rejected" -> "Enter a valid HTTPS relay origin without credentials, path, query or fragment."
@@ -530,11 +555,12 @@ class Gateway : Application() {
             changed()
         }
         override fun onDisconnected() {
+            DebugDiagnostics.record(DiagnosticEvent.TRANSPORT_CLOSED)
             val media = stream; stream = null; media?.invalidate()
             ui {
                 finishRefresh()
                 inboxConnection = InboxConnection.DISCONNECTED
-                endCall(null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
+                endCall(DiagnosticEvent.END_TRANSPORT_LOST, null, false); verifiedInbox = false; verifyEmoji = null; pairing = false; connecting = false; sentSilences.clear()
                 store.state.invalidateDetails()
                 invalidateForms()
                 endingId = null

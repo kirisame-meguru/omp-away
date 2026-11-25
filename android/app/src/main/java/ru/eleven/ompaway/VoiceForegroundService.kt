@@ -19,13 +19,15 @@ class VoiceForegroundService : Service() {
             startForeground(NOTIFICATION_ID, Invites.notification(this, id, app.store.state.pending[id], ongoing = true),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             app.voiceForegroundReady(id)
-        } catch (_: RuntimeException) {
+        } catch (error: RuntimeException) {
+            DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_FAILED, error = error)
             app.voiceForegroundFailed(id)
             stopSelf(startId)
         }
         return START_NOT_STICKY
     }
     override fun onDestroy() {
+        DebugDiagnostics.record(DiagnosticEvent.FOREGROUND_DESTROYED)
         val id = requestId; requestId = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (id != null) (application as Gateway).voiceForegroundFailed(id)
