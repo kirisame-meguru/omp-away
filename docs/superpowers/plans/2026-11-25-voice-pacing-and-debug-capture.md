@@ -15,5 +15,5 @@
 - [x] Implement private per-call capture, retention, release-disabled behavior, and storage-failure tests.
 - [x] Build and install the signed debug update; Android tests passed.
 - [x] Complete integrated plugin checks and privacy review.
-- [ ] Load the desktop fix and verify actual voice startup with saved handset evidence.
-- [ ] Commit changes and report remaining release blockers; do not infer release readiness from unit tests.
+- [x] Load the desktop fix and verify actual voice startup with saved handset evidence.
+- [x] Commit changes and report remaining release blockers; do not infer release readiness from unit tests.
