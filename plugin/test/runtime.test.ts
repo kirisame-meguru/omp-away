@@ -459,7 +459,7 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 	} finally {await rm(dir,{recursive:true,force:true})}
 });
 
-test("recoverable mobile conditions and command guidance warn, while protocol failures remain errors",async()=>{
+test("idle transport diagnostics stay quiet while actionable failures and command guidance remain visible",async()=>{
 	const dir=await mkdtemp(join(tmpdir(),"away-notices-")), tokenFile=join(dir,"token");
 	const notices:{text:string;type:string}[]=[];
 	const ctx={ui:{notify:(text:string,type:string)=>notices.push({text,type}),setWidget(){}}} as unknown as ExtensionContext;
@@ -476,10 +476,19 @@ test("recoverable mobile conditions and command guidance warn, while protocol fa
 		});
 		try {
 			notices.length=0;
-			for (const code of ["phone_disconnected","relay_disconnected","unsupported-form","invite-unavailable","phone-control-unavailable"]) report(code);
-			expect(notices.map(n=>n.type)).toEqual(["warning","warning","warning","warning","warning"]);
+			for (const code of ["phone_disconnected","relay_disconnected","unsupported-form","phone-control-unavailable"]) report(code);
+			expect(notices).toEqual([]);
+			report("invite-unavailable");
+			expect(notices.map(n=>n.type)).toEqual(["warning"]);
+			expect(notices[0].text).toContain("A phone invitation could not be sent");
 			report("phone_protocol_error"); report("secure_helper_protocol_error"); report("unexpected-failure");
-			expect(notices.slice(-3).map(n=>n.type)).toEqual(["error","error","error"]);
+			expect(notices.map(n=>n.type)).toEqual(["warning"]);
+			await admin!.command("status");
+			expect(notices.at(-1)?.type).toBe("info");
+			expect(notices.at(-1)?.text).toContain("Phone authentication or protocol rejected");
+			expect(notices.at(-1)?.text).toContain("Gateway helper protocol rejected");
+			expect(notices.at(-1)?.text).toContain("Unclassified gateway failure");
+			expect(notices.at(-1)?.text).not.toContain("unexpected-failure");
 			expect(notices.every(n=>!n.text.includes("The desktop form stays available"))).toBe(true);
 			await admin!.command("pair");
 			expect(notices.at(-1)?.type).toBe("warning");
