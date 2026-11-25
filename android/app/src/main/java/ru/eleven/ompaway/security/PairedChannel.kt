@@ -3,6 +3,7 @@ package ru.eleven.ompaway.security
 import android.content.Context
 import ru.eleven.ompaway.DebugDiagnostics
 import ru.eleven.ompaway.DiagnosticEvent
+import ru.eleven.ompaway.AppLanguage
 import java.io.Closeable
 import java.io.EOFException
 import java.io.IOException
@@ -38,7 +39,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         fun onVerify(emoji: String) {}
         fun onReady() {}
         fun onInbox(items: List<InboxItem>) {}
-        fun onForm(requestId: String, form: JSONObject?) {}
+        fun onForm(requestId: String, form: JSONObject?, language: String? = null) {}
         fun onAnswer(requestId: String, status: String, message: String) {}
         fun onQuestion(requestId: String, display: QuestionDisplay?) {}
         fun onProposal(requestId: String, text: String) {}
@@ -67,6 +68,7 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
     }
 
     private val vault = Vault(context.applicationContext)
+    private val appContext = context.applicationContext
     private val worker = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "away-channel") }.apply { removeOnCancelPolicy = true }
     private val http = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .retryOnConnectionFailure(false).callTimeout(25, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
@@ -274,10 +276,12 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
                 listener.onInbox(snapshot)
             }
             "form" -> {
-                msg.fields("type", "requestId", "form")
+                if (msg.has("language")) msg.fields("type", "requestId", "form", "language")
+                else msg.fields("type", "requestId", "form")
+                val language = if (msg.has("language")) msg.text("language").also { require(it == "en" || it == "ru") } else null
                 val id = msg.text("requestId")
                 if (id in s.pendingIds)
-                    listener.onForm(id, if (msg.isNull("form")) null else msg.getJSONObject("form"))
+                    listener.onForm(id, if (msg.isNull("form")) null else msg.getJSONObject("form"), language)
             }
             "answer" -> {
                 msg.fields("type", "requestId", "status", "message")
@@ -340,7 +344,9 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         val s = ready ?: return
         post { current(s) { if (s === ready) block(s) } }
     }
-    private fun listMessage() = JSONObject().put("type", "list").apply { if (details.enabled) put("details", true) }
+    private fun listMessage() = JSONObject().put("type", "list").put("language", AppLanguage.effective(appContext)).apply {
+        if (details.enabled) put("details", true)
+    }
     fun list() = action { sendJson(it, listMessage()) }
     fun form(requestId: String) = action { s -> if (requestId in s.pendingIds) command(s, "form", requestId) }
     fun answer(requestId: String, values: JSONObject, notes: JSONArray): Boolean {
@@ -355,17 +361,20 @@ class PairedChannel(context: Context, private val listener: Listener) : Closeabl
         post { current(s) { if (s === ready) checkNotNull(s.tls).send(packet) } }
         return true
     }
-    fun join(requestId: String) = action { s ->
-        if (requestId.isNotEmpty() && s.voice == null) { s.voice = Voice(requestId); command(s, "join", requestId, captions = true) }
+    fun join(requestId: String, language: String = AppLanguage.effective(appContext)) = action { s ->
+        if (requestId.isNotEmpty() && s.voice == null) {
+            s.voice = Voice(requestId)
+            sendJson(s, JSONObject().put("type", "join").put("requestId", requestId)
+                .put("captions", true).put("language", language))
+        }
     }
     fun silence(requestId: String) = action { s -> if (requestId.isNotEmpty()) command(s, "silence", requestId) }
     fun hangup(requestId: String) = action { s ->
         val v = s.voice
         if (v != null && v.id == requestId && !v.stopping) { recording = null; v.stopping = true; command(s, "hangup", requestId) }
     }
-    private fun command(s: Session, type: String, id: String, captions: Boolean = false) = sendJson(s, JSONObject().put("type", type).put("requestId", id).apply {
-        if (captions) put("captions", true)
-    })
+    private fun command(s: Session, type: String, id: String) =
+        sendJson(s, JSONObject().put("type", type).put("requestId", id))
     fun played(requestId: String, mark: String) {
         val v = recording ?: return
         action { s -> if (v === recording && v.id == requestId && v.marks.firstOrNull() == mark) {

@@ -1,7 +1,7 @@
 package ru.eleven.ompaway
 
 import android.Manifest
-import android.app.Activity
+import androidx.appcompat.app.AppCompatActivity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -33,7 +33,7 @@ import android.widget.ImageButton
 import java.text.DateFormat
 import java.util.Date
 
-class InboxActivity : Activity() {
+class InboxActivity : AppCompatActivity() {
     private val app get() = application as Gateway
     private val titleIconFont by lazy(LazyThreadSafetyMode.NONE) { resources.getFont(R.font.title_symbols) }
     private lateinit var scroll: ScrollView
@@ -49,6 +49,7 @@ class InboxActivity : Activity() {
     private var scanRequested = false
     private lateinit var callScreen: CallScreen
     private var callSource: CallVisualSource? = null
+    private var restoreCallPage = false
     private lateinit var panel: LinearLayout
     private lateinit var panelHangup: Button
     private lateinit var screenPreferences: ScreenPreferences
@@ -68,6 +69,7 @@ class InboxActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        restoreCallPage = savedInstanceState != null && app.callId != null
         screenPreferences = ScreenPreferences(this)
         screenPreferences.apply(window)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
@@ -87,6 +89,7 @@ class InboxActivity : Activity() {
         settingsReturn = Page.values().firstOrNull { it.name == savedInstanceState?.getString("settingsReturn") } ?: Page.REQUESTS
         answerRequested = savedInstanceState?.getString("answerRequested")?.takeIf(::validId)
         permissionAnswer = savedInstanceState?.getString("permissionAnswer")?.takeIf(::validId)
+        scanRequested = savedInstanceState?.getBoolean("scanRequested") == true
         scroll = ScrollView(this).apply {
             isFillViewport = true
             clipToPadding = false
@@ -113,7 +116,7 @@ class InboxActivity : Activity() {
             override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                 super.onInitializeAccessibilityNodeInfo(host, info)
                 if (page == Page.REQUESTS && app.canRefresh && !app.refreshing)
-                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.refresh_questions, "Refresh questions"))
+                    info.addAction(AccessibilityNodeInfo.AccessibilityAction(R.id.refresh_questions, uiString(R.string.refresh_questions)))
             }
             override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
                 if (action == R.id.refresh_questions && resumed && page == Page.REQUESTS && app.canRefresh && !app.refreshing) {
@@ -132,26 +135,26 @@ class InboxActivity : Activity() {
         panelBack = ImageButton(this).apply {
             setImageResource(R.drawable.ic_arrow_back)
             imageTintList = ColorStateList.valueOf(RadianceUi.cream)
-            contentDescription = "Back"
-            tooltipText = "Back"
+            contentDescription = uiString(R.string.back)
+            tooltipText = uiString(R.string.back)
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = RippleDrawable(ColorStateList.valueOf(0x33f4f1eb), null,
                 RadianceUi.surface(this@InboxActivity))
             setOnClickListener { if (resumed) navigateBack() }
         }
         panelToolbar.addView(panelBack, LinearLayout.LayoutParams(dp(48), dp(48)))
-        panelTitle = RadianceUi.text(this, "Questions", 24, heading = true).apply {
+        panelTitle = RadianceUi.text(this, uiString(R.string.questions), 24, heading = true).apply {
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
         panelToolbar.addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
-        panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
+        panelHangup = RadianceUi.button(this, uiString(R.string.hang_up), destructive = true) { if (resumed) app.hangup() }
         panelToolbar.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
         panelHeader.addView(panelToolbar, LinearLayout.LayoutParams(-1, -2))
         panelSettings = ImageButton(this).apply {
             setImageResource(R.drawable.ic_settings)
             imageTintList = ColorStateList.valueOf(RadianceUi.cream)
-            contentDescription = "Settings"
-            tooltipText = "Settings"
+            contentDescription = uiString(R.string.settings)
+            tooltipText = uiString(R.string.settings)
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = RippleDrawable(ColorStateList.valueOf(0x33f4f1eb), null,
                 RadianceUi.surface(this@InboxActivity))
@@ -245,12 +248,12 @@ class InboxActivity : Activity() {
         if (!resumed) return
         val id = answerRequested ?: return
         answerRequested = null
-        if (!app.idle) { notice = "Hang up the current call before answering another request."; render(); return }
+        if (!app.idle) { notice = uiString(R.string.hang_up_the_current_call_before_answering_another_request); render(); return }
         app.acknowledge(id)
         if (granted(Manifest.permission.RECORD_AUDIO)) app.join(id)
         else {
             permissionAnswer = id
-            notice = "Microphone permission is optional. You can still answer by touch."
+            notice = uiString(R.string.microphone_permission_is_optional_you_can_still_answer_by_touch)
             if (askedAndDenied(Manifest.permission.RECORD_AUDIO)) { permissionAnswer = null; appSettings() }
             else ask(Manifest.permission.RECORD_AUDIO, MIC)
         }
@@ -259,10 +262,11 @@ class InboxActivity : Activity() {
     override fun onResume() {
         super.onResume(); resumed = true
         applyScreenPrivacy()
+        app.languageChanged()
         if (page == Page.SETTINGS) renderedPage = null
         if (app.callId == null) { callScreen.bind(null); callSource = null }
         callScreen.resume()
-        app.foreground(::render, ::renderVoice)
+        app.foreground(::render, ::renderVoice, ::saveDrafts)
         pairingView.setActive(page == Page.REQUESTS)
         continueAnswer()
         if (scanRequested) {
@@ -277,8 +281,13 @@ class InboxActivity : Activity() {
         receiptToast.dismiss()
         saveDrafts()
         callScreen.pause()
-        app.background()
+        app.background(recreating = true)
         super.onPause()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) app.background()
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -293,6 +302,7 @@ class InboxActivity : Activity() {
         outState.putString("settingsReturn", settingsReturn.name)
         outState.putString("answerRequested", answerRequested)
         outState.putString("permissionAnswer", permissionAnswer)
+        outState.putBoolean("scanRequested", scanRequested)
         super.onSaveInstanceState(outState)
     }
 
@@ -343,23 +353,48 @@ class InboxActivity : Activity() {
 
     private fun renderSettings() {
         card {
-            text("Appearance", 20, bold = true)
-            toggle("Animations", screenPreferences.animations) {
+            text(uiString(R.string.language_title), 20, bold = true)
+            val languages = arrayOf("", "en", "ru")
+            val labels = intArrayOf(R.string.language_system, R.string.language_english, R.string.language_russian)
+            val choices = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+            val selected = AppLanguage.selected(this)
+            for (index in languages.indices) {
+                choices.addView(RadioButton(this).apply {
+                    id = View.generateViewId()
+                    text = uiString(labels[index])
+                    setTextColor(RadianceUi.textColors)
+                    buttonTintList = RadianceUi.tint
+                    minHeight = dp(48); textSize = 16f
+                    isChecked = languages[index] == selected
+                    setOnClickListener {
+                        if (resumed && AppLanguage.selected(this@InboxActivity) != languages[index]) {
+                            saveDrafts()
+                            AppLanguage.select(languages[index])
+                        }
+                    }
+                }, RadioGroup.LayoutParams(-1, -2))
+            }
+            contentTarget.addView(choices)
+            text(uiString(R.string.language_explanation), 14)
+        }
+        card {
+            text(uiString(R.string.appearance), 20, bold = true)
+            toggle(uiString(R.string.animations), screenPreferences.animations) {
                 screenPreferences.animations = it; callScreen.refreshAppearance()
             }
-            text("Animate the scene independently of system motion settings.", 14)
-            toggle("Reference backdrop", screenPreferences.lightBackdrop) {
+            text(uiString(R.string.animate_the_scene_independently_of_system_motion_settings), 14)
+            toggle(uiString(R.string.reference_backdrop), screenPreferences.lightBackdrop) {
                 screenPreferences.lightBackdrop = it; callScreen.refreshAppearance()
             }
-            text("Rendering", 16, bold = true)
+            text(uiString(R.string.rendering), 16, bold = true)
             val quality = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
             val ids = IntArray(3)
-            for ((index, label) in arrayOf("Auto", "GPU", "2D").withIndex()) {
+            for ((index, label) in arrayOf(uiString(R.string.auto), "GPU", "2D").withIndex()) {
                 val choice = RadioButton(this).apply {
                     id = View.generateViewId(); text = label; setTextColor(RadianceUi.textColors)
                     buttonTintList = RadianceUi.tint
                     minHeight = dp(48); textSize = 16f
-                    contentDescription = "$label rendering"
+                    contentDescription = uiString(R.string.rendering_mode, label)
                 }
                 ids[index] = choice.id
                 quality.addView(choice, RadioGroup.LayoutParams(-1, -2))
@@ -372,27 +407,27 @@ class InboxActivity : Activity() {
             contentTarget.addView(quality)
         }
         card {
-            text("Privacy", 20, bold = true)
-            toggle("Block screenshots", screenPreferences.blockScreenshots) {
+            text(uiString(R.string.privacy), 20, bold = true)
+            toggle(uiString(R.string.block_screenshots), screenPreferences.blockScreenshots) {
                 screenPreferences.blockScreenshots = it; applyScreenPrivacy()
             }
-            text("Hide app content, including captions and pairing details, in screenshots and recordings.", 14)
-            toggle("Notification previews", app.inviteSettings.showPreview) {
+            text(uiString(R.string.hide_app_content_including_captions_and_pairing_details_in_screenshots), 14)
+            toggle(uiString(R.string.notification_previews), app.inviteSettings.showPreview) {
                 app.inviteSettings.showPreview = it; app.invitationSettingsChanged()
             }
-            text("Show question previews. Lock-screen privacy still applies; public notifications stay redacted.", 14)
+            text(uiString(R.string.show_question_previews_lock_screen_privacy_still_applies_public_notifications), 14)
         }
         card {
-            text("Invitations", 20, bold = true)
-            toggle("Ringing invitations", app.inviteSettings.callMode) {
+            text(uiString(R.string.invitations), 20, bold = true)
+            toggle(uiString(R.string.ringing_invitations), app.inviteSettings.callMode) {
                 app.inviteSettings.callMode = it; app.invitationSettingsChanged()
             }
-            text("Turn off for notifications only. System sound, vibration and Do Not Disturb settings apply.", 14)
+            text(uiString(R.string.turn_off_for_notifications_only_system_sound_vibration_and_do), 14)
             notificationSettings()
             if (Build.VERSION.SDK_INT >= 34) {
                 if (!getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent())
-                    text("Full-screen calls are unavailable. Incoming calls use notifications instead.", 14)
-                button("Full-screen call settings") {
+                    text(uiString(R.string.full_screen_calls_are_unavailable_incoming_calls_use_notifications_instead), 14)
+                button(uiString(R.string.full_screen_call_settings)) {
                     startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName")))
                 }
             }
@@ -404,7 +439,9 @@ class InboxActivity : Activity() {
         val visual = app.callVisual
         if (visual != null) {
             if (callSource !== visual) {
-                callScreen.bind(visual); callSource = visual; page = Page.REQUESTS
+                callScreen.bind(visual); callSource = visual
+                if (!restoreCallPage) page = Page.REQUESTS
+                restoreCallPage = false
             }
             callScreen.setSpeaker(app.speakerEnabled)
             renderVoice()
@@ -425,9 +462,9 @@ class InboxActivity : Activity() {
         panelBack.visibility = if (page == Page.REQUESTS) View.GONE else View.VISIBLE
         panelToolbar.visibility = View.VISIBLE
         panelTitle.text = when (page) {
-            Page.REQUESTS -> "Questions"
-            Page.DETAILS -> "Question details"
-            Page.SETTINGS -> "Settings"
+            Page.REQUESTS -> uiString(R.string.questions)
+            Page.DETAILS -> uiString(R.string.question_details)
+            Page.SETTINGS -> uiString(R.string.settings)
         }
         // Keep controls, focused input and scroll position stable while gateway state changes.
         if (renderedPage == page && page == Page.SETTINGS) return
@@ -466,7 +503,7 @@ class InboxActivity : Activity() {
         }
         val state = app.store.state
         if (state.pending.isEmpty() && app.paired && !app.needsRelayOrigin) {
-            text("No pending questions.", 16).apply {
+            text(uiString(R.string.no_pending_questions), 16).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(16), dp(32), dp(16), dp(32))
             }
@@ -476,15 +513,15 @@ class InboxActivity : Activity() {
             requestHeading(item)
             renderQuestionBody(item, showDetails = false)
             voiceButton(item)
-            button("View details") { selectedId = item.id; app.acknowledge(item.id); page = Page.DETAILS; render() }
-            if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
+            button(uiString(R.string.view_details)) { selectedId = item.id; app.acknowledge(item.id); page = Page.DETAILS; render() }
+            if (item.id !in state.silenced && app.callId != item.id) button(uiString(R.string.not_now)) { app.silence(item.id) }
         }
         val awaiting = state.invited.filterNot { it in state.pending || it in state.closed }
         if (awaiting.isNotEmpty()) {
-            text("Missed invitations", 22, bold = true)
+            text(uiString(R.string.missed_invitations), 22, bold = true)
             for (id in awaiting) card {
-                text(if (id in state.silenced) "Desktop request · Silenced" else "Desktop request · Awaiting sync", 16)
-                if (id !in state.silenced) button("Not now") { app.silence(id) }
+                text(if (id in state.silenced) uiString(R.string.desktop_request_silenced) else uiString(R.string.desktop_request_awaiting_sync), 16)
+                if (id !in state.silenced) button(uiString(R.string.not_now)) { app.silence(id) }
             }
         }
     }
@@ -502,7 +539,7 @@ class InboxActivity : Activity() {
     private fun renderForm(item: Pending): Boolean {
         val schema = app.forms[item.id]
         if (schema == null || !app.verifiedInbox) {
-            text(app.formMessages[item.id] ?: if (app.verifiedInbox) "Loading question…" else "Reconnect to answer.", 16)
+            text(app.formMessage(item.id) ?: if (app.verifiedInbox) uiString(R.string.loading_question) else uiString(R.string.reconnect_to_answer), 16)
             app.loadForm(item.id)
             return false
         }
@@ -514,36 +551,36 @@ class InboxActivity : Activity() {
                     if (resumed) app.answer(item.id, values, notes)
                 }.also { formViews[item.id] = it }
             } catch (_: org.json.JSONException) {
-                text("This question cannot be displayed here. Review details or answer on the desktop.", 16)
+                text(uiString(R.string.this_question_cannot_be_displayed_here_review_details_or_answer), 16)
                 return false
             }
         }
         (view.parent as? ViewGroup)?.removeView(view)
-        view.availability(app.verifiedInbox, item.id in app.submitting, app.formMessages[item.id], canSubmit = app.idle)
+        view.availability(app.verifiedInbox, item.id in app.submitting, app.formMessage(item.id), canSubmit = app.idle)
         contentTarget.addView(view, LinearLayout.LayoutParams(-1, -2))
         return true
     }
 
     private fun voiceButton(item: Pending) {
         if (app.forms[item.id]?.optBoolean("voice", true) == false) return
-        val control = RadianceUi.button(this, "Answer by voice") { if (resumed) answer(item.id) }
+        val control = RadianceUi.button(this, uiString(R.string.answer_by_voice)) { if (resumed) answer(item.id) }
         control.isEnabled = app.verifiedInbox && app.idle && item.id !in app.submitting
         getDrawable(android.R.drawable.ic_btn_speak_now)?.mutate()?.let { microphone ->
             microphone.setBounds(0, 0, dp(20), dp(20))
             microphone.setTint(if (control.isEnabled) RadianceUi.cream else RadianceUi.disabled)
             // Inline with the label so Gravity.CENTER centers the entire group.
-            control.text = SpannableString("\uFFFC  Answer by voice").apply {
+            control.text = SpannableString("\uFFFC  " + uiString(R.string.answer_by_voice)).apply {
                 setSpan(ImageSpan(microphone, ImageSpan.ALIGN_CENTER), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
-        control.contentDescription = "Answer by voice: ${if (app.verifiedInbox) item.question else "Pending question"}"
+        control.contentDescription = uiString(R.string.answer_by_voice_description, if (app.verifiedInbox) item.question else uiString(R.string.pending_question))
         contentTarget.addView(control, RadianceUi.rowParams(this))
     }
 
     private fun requestHeading(item: Pending) {
         val title = if (app.verifiedInbox) item.session?.takeIf { it.isNotBlank() } ?: item.project
-            else "Desktop request · Pending sync"
-        val label = title.trim().ifBlank { "Desktop request" }
+            else uiString(R.string.desktop_request_pending_sync)
+        val label = title.trim().ifBlank { uiString(R.string.desktop_request) }
         var decorated: SpannableString? = null
         var offset = 0
         while (offset < label.length) {
@@ -558,15 +595,15 @@ class InboxActivity : Activity() {
         // Only desktop icon glyphs use the bundled font; normal text and color emoji keep Android fallback.
         text(label, 14, bold = true).also { heading -> decorated?.let { heading.text = it } }
         text(DateFormat.getDateTimeInstance().format(Date(item.createdAt)) +
-            if (item.id in app.store.state.silenced) " · Silenced" else "", 14)
+            if (item.id in app.store.state.silenced) uiString(R.string.silenced) else "", 14)
     }
 
     private fun renderDetails() {
         val state = app.store.state
         val item = state.pending[selectedId]
         if (item == null) {
-            card { text(if (app.verifiedInbox) "That request is no longer pending." else "Request awaiting sync. Reconnect to review it.", 18) }
-            button("All questions") { page = Page.REQUESTS; render() }
+            card { text(if (app.verifiedInbox) uiString(R.string.that_request_is_no_longer_pending) else uiString(R.string.request_awaiting_sync_reconnect_to_review_it), 18) }
+            button(uiString(R.string.all_questions)) { page = Page.REQUESTS; render() }
             return
         }
         card {
@@ -576,19 +613,19 @@ class InboxActivity : Activity() {
         }
         if (app.callId == item.id) {
             card {
-                text("Proposed answer · Not confirmed or submitted", 18, bold = true)
-                text(if (app.verifiedInbox) state.proposals[item.id] ?: "No current proposal from the desktop."
-                    else "Reconnect to review the current proposed answer.", 16)
+                text(uiString(R.string.proposed_answer_not_confirmed_or_submitted), 18, bold = true)
+                text(if (app.verifiedInbox) state.proposals[item.id] ?: uiString(R.string.no_current_proposal_from_the_desktop)
+                    else uiString(R.string.reconnect_to_review_the_current_proposed_answer), 16)
             }
         }
         voiceButton(item)
-        if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
+        if (item.id !in state.silenced && app.callId != item.id) button(uiString(R.string.not_now)) { app.silence(item.id) }
     }
 
 
     private fun notificationSettings() {
-        if (!Invites.allowed(this)) text("Notifications are off. Pending questions still appear on the home screen.", 14)
-        button(if (Invites.allowed(this)) "Notification settings" else "Enable invitations") {
+        if (!Invites.allowed(this)) text(uiString(R.string.notifications_are_off_pending_questions_still_appear_on_the_home), 14)
+        button(if (Invites.allowed(this)) uiString(R.string.notification_settings) else uiString(R.string.enable_invitations)) {
             if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS) && !askedAndDenied(Manifest.permission.POST_NOTIFICATIONS))
                 ask(Manifest.permission.POST_NOTIFICATIONS, NOTIFICATIONS)
             else if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)) appSettings()
@@ -604,7 +641,7 @@ class InboxActivity : Activity() {
     private fun scan() {
         if (!resumed || page != Page.REQUESTS) return
         if (!granted(Manifest.permission.CAMERA)) {
-            pairingView.message("Camera access is needed to scan. You can also pair from the clipboard.")
+            pairingView.message(uiString(R.string.camera_access_is_needed_to_scan_you_can_also_pair))
             if (askedAndDenied(Manifest.permission.CAMERA)) appSettings()
             else ask(Manifest.permission.CAMERA, CAMERA)
             return
@@ -623,10 +660,10 @@ class InboxActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
         if (requestCode == CAMERA) {
-            pairingView.message(if (granted) null else "Camera permission denied. Scan again to retry, or pair from the clipboard.")
+            pairingView.message(if (granted) null else uiString(R.string.camera_permission_denied_scan_again_to_retry_or_pair_from))
         } else {
             notice = if (granted) null else if (requestCode == MIC)
-                "Microphone unavailable. You can still answer by touch." else "Questions remain on the home screen."
+                uiString(R.string.microphone_unavailable_you_can_still_answer_by_touch) else uiString(R.string.questions_remain_on_the_home_screen)
         }
         if (requestCode == MIC) {
             val id = permissionAnswer; permissionAnswer = null

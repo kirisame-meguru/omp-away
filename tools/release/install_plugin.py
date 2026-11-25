@@ -34,7 +34,8 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     for name in ('package.json', 'bun.lock', 'src/index.ts', 'src/media/live-sdk.generated.mjs',
-                 'tunnel/uv.lock', 'media/uv.lock', 'media/peer.py'):
+                 'src/media/prompts/away-call.md', 'src/prompts/translate.md',
+                 'tunnel/uv.lock', 'media/uv.lock', 'media/peer.py', 'media/opening.md'):
         if not (root / 'plugin' / name).is_file():
             raise ValueError('extract the complete verified plugin archive first')
     env = os.environ.copy()

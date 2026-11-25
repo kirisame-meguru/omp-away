@@ -1,7 +1,7 @@
 import type { ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { posix, win32 } from 'node:path';
 
-type Context = Pick<ExtensionContext, 'sessionManager'> & { cwd?: string };
+type Context = { sessionManager: Partial<Pick<ExtensionContext['sessionManager'], 'getSessionName' | 'getBranch'>>; cwd?: string };
 interface Excerpt { text: string; truncated: boolean }
 interface Message extends Excerpt { role: 'user' | 'assistant' }
 interface Snapshot {

@@ -12,7 +12,7 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
     private var shown: QuestionDisplay? = null
     private var fresh = false
     init {
-        isFillViewport = true; addView(body); contentDescription = "Read-only question and options"
+        isFillViewport = true; addView(body); contentDescription = context.uiString(R.string.read_only_question_and_options)
         isNestedScrollingEnabled = false
         background = RadianceUi.surface(context, RadianceUi.surfaceColor, 8)
         val padding = RadianceUi.dp(context, 16)
@@ -25,29 +25,47 @@ internal class QuestionDetailView(context: Context) : ScrollView(context) {
         val switched = request?.id != item.id
         request = item; shown = safeDisplay; fresh = verified
         body.removeAllViews()
-        label("Question and options · Read only", heading = true)
+        label(context.uiString(R.string.question_and_options_read_only), heading = true)
         if (!verified) {
-            label("Pending sync. Reconnect to read the current question; cached choices are unavailable.")
+            label(context.uiString(R.string.pending_sync_reconnect_to_read_the_current_question_cached_choices))
         } else if (safeDisplay == null) {
-            label("Summary only — structured details are unavailable from this desktop.")
+            label(context.uiString(R.string.summary_only_structured_details_are_unavailable_from_this_desktop))
             label(item.question)
         } else {
             if (safeDisplay.context.isNotBlank()) label(safeDisplay.context)
             for ((fieldIndex, field) in safeDisplay.fields.withIndex()) {
-                val semantics = when (field.kind) { "single" -> "Select one"; "multi" -> "Select multiple"; else -> "Free text" }
+                val semantics = when (field.kind) { "single" -> context.uiString(R.string.select_one); "multi" -> context.uiString(R.string.select_multiple); else -> context.uiString(R.string.free_text) }
                 label("${fieldIndex + 1}. ${field.label}", heading = true)
-                label("$semantics · ${if (field.required) "Required" else "Optional"}")
+                label("$semantics · ${if (field.required) context.uiString(R.string.required) else context.uiString(R.string.optional)}")
                 field.description?.takeIf { it.isNotEmpty() }?.let { label(it) }
                 for ((optionIndex, option) in field.options.withIndex()) {
-                    label("${optionIndex + 1}. ${option.label}${if (option.disabled) " · Unavailable" else ""}")
+                    label("${optionIndex + 1}. ${option.label}${if (option.disabled) context.uiString(R.string.unavailable) else ""}")
                         .tag = "${item.id}/${field.id}/${option.id}"
                 }
-                if (field.other) label("Other · Describe a different answer by voice")
-                field.inputType?.let { label("Input: $it") }
-                field.placeholder?.let { label("Hint: $it") }
+                if (field.other) label(context.uiString(R.string.other_describe_a_different_answer_by_voice))
+                field.inputType?.let { label(context.uiString(R.string.input_type, inputLabel(it))) }
+                field.placeholder?.let { label(context.uiString(R.string.input_hint, it)) }
             }
         }
         if (switched || !verified) scrollTo(0, 0)
+    }
+
+    private fun inputLabel(type: String): String {
+        val resource = when (type) {
+            "text" -> R.string.input_text
+            "number" -> R.string.input_number
+            "range" -> R.string.input_range
+            "email" -> R.string.input_email
+            "url" -> R.string.input_url
+            "date" -> R.string.input_date
+            "tel" -> R.string.input_tel
+            "time" -> R.string.input_time
+            "datetime-local" -> R.string.input_datetime_local
+            "month" -> R.string.input_month
+            "week" -> R.string.input_week
+            else -> return type
+        }
+        return context.uiString(resource)
     }
 
     private fun label(value: String, heading: Boolean = false) =

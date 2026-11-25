@@ -34,7 +34,7 @@ class UiScreenshotCatalogTest {
         f.scenario("requests-paired-offline", "REQUESTS", "Synthetic paired vault, offline", { f.paired() })
         f.scenario("requests-awaiting-sync", "REQUESTS", "Cached pending data withheld before authenticated sync", {
             f.paired(); pending(f); f.app.forms[id] = richForm()
-            put(f.app, "status", "Refreshing inbox…")
+            put(f.app, "statusMessage", UiMessage(R.string.refreshing_inbox))
         })
         f.scenario("requests-connected-empty", "REQUESTS", "Connected visual state, empty inbox", { f.connected() })
         f.scenario("requests-multiple-silenced-missed", "REQUESTS", "Multiple pending, silenced and missed invitations", {
@@ -61,7 +61,7 @@ class UiScreenshotCatalogTest {
         })
         f.scenario("requests-voice-error", "REQUESTS", "Synthetic audio setup failure message, no media attempted", {
             f.connected(); pending(f); f.app.forms[id] = compactForm()
-            put(f.app, "status", "Voice did not become ready. Request remains pending.")
+            put(f.app, "statusMessage", UiMessage(R.string.voice_did_not_become_ready_request_remains_pending))
         })
         f.scenario("requests-microphone-unavailable", "REQUESTS", "Touch remains available after a synthetic microphone-denied notice", {
             f.connected(); pending(f); f.app.forms[id] = compactForm()
@@ -177,13 +177,13 @@ class UiScreenshotCatalogTest {
     private fun pairing(f: UiCatalogFixture) {
         f.scenario("pairing-unpaired", "PAIRING", "Initial unpaired page")
         f.scenario("pairing-in-progress", "PAIRING", "Synthetic enrollment progress; no invitation consumed", {
-            put(f.app, "pairing", true); put(f.app, "status", "Verifying desktop identity…")
+            put(f.app, "pairing", true); put(f.app, "statusMessage", UiMessage(R.string.verifying_desktop_identity))
         })
         f.scenario("pairing-verification", "VERIFY", "Synthetic twelve-emoji verification layout; no confirmation action", {
             put(f.app, "pairing", true); put(f.app, "verifyEmoji", "\u2600\uFE0F \u2601\uFE0F \u2602\uFE0F \u2615 \u26BD \u26C4 \u26F5 \u2708\uFE0F \u2728 \u2764\uFE0F \uD83C\uDF08 \uD83C\uDF34")
         })
         f.scenario("pairing-mismatch", "PAIRING", "Synthetic rejected verification notice; no pairing/network operation", {
-            put(f.app, "status", "Pairing declined.")
+            put(f.app, "statusMessage", UiMessage(R.string.pairing_declined))
         })
         f.scenario("pairing-invalid-clipboard", "PAIRING", "Synthetic clipboard validation notice; clipboard is never read", {
             put(f.activity, "notice", "Copy the desktop pairing JSON first.")
@@ -193,12 +193,12 @@ class UiScreenshotCatalogTest {
         })
         f.scenario("pairing-paired-offline", "PAIRING", "Synthetic existing desktop pairing, reconnect control", { f.paired() })
         f.scenario("pairing-relay-recovery", "PAIRING", "Synthetic legacy vault without relay origin", {
-            f.paired(legacy = true); put(f.app, "status", "Relay setup required. Pairing keys have been retained.")
+            f.paired(legacy = true); put(f.app, "statusMessage", UiMessage(R.string.relay_setup_required_pairing_keys_have_been_retained))
         })
         f.scenario("requests-relay-recovery", "REQUESTS", "Restore-relay entry point on home", { f.paired(legacy = true) })
         f.scenario("relay-entry", "RELAY", "Trusted origin entry and warning; no credential is sent", { f.paired(legacy = true) })
         f.scenario("relay-rejected", "PAIRING", "Synthetic relay recovery rejection", {
-            f.paired(legacy = true); put(f.app, "status", "Enter a valid HTTPS relay origin without credentials, path, query or fragment.")
+            f.paired(legacy = true); put(f.app, "statusMessage", UiMessage(R.string.enter_a_valid_https_relay_origin_without_credentials_path_query))
         })
     }
 

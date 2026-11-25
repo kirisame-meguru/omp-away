@@ -106,11 +106,21 @@ class Phone:
         self.marks = set()
         self.details = False
         self.requests = set()
+        self.language = None
 
     def incoming(self, msg):
         """Return false only for validated controls from the most recently ended call."""
         kind, rid = msg.get('type'), msg.get('requestId')
-        if kind == 'list' and (fields(msg, 'type') or fields(msg, 'type', 'details') and type(msg['details']) is bool):
+        if kind in ('list', 'join') and 'language' in msg:
+            if msg['language'] not in ('en', 'ru'):
+                raise ProtocolError('invalid language')
+            if kind == 'list':
+                self.language = msg['language']
+            # Validate the original strict control shape without changing the forwarded frame.
+            control = {key: value for key, value in msg.items() if key != 'language'}
+        else:
+            control = msg
+        if kind == 'list' and (fields(control, 'type') or fields(control, 'type', 'details') and type(control['details']) is bool):
             self.details = msg.get('details', False)
             return True
         if not route(rid):
@@ -129,8 +139,8 @@ class Phone:
                         isinstance(v, list) and all(isinstance(x, str) for x in v)) for k, v in values.items())):
                 return True
             raise ProtocolError('invalid answer')
-        if kind == 'join' and (fields(msg, 'type', 'requestId') or
-                               (fields(msg, 'type', 'requestId', 'captions') and type(msg['captions']) is bool)):
+        if kind == 'join' and (fields(control, 'type', 'requestId') or
+                               (fields(control, 'type', 'requestId', 'captions') and type(control['captions']) is bool)):
             if self.joined or self.joining:
                 raise ProtocolError('call already open')
             # Inbound frames are ordered: a new join fences the previous call's tail.
@@ -171,7 +181,9 @@ class Phone:
         if kind == 'inbox':
             self.requests = inbox_ids(msg)
             return
-        elif kind == 'form' and fields(msg, 'type', 'requestId', 'form') and route(rid):
+        elif kind == 'form' and route(rid) and (
+                fields(msg, 'type', 'requestId', 'form') or
+                fields(msg, 'type', 'requestId', 'form', 'language') and msg['language'] in ('en', 'ru')):
             if msg['form'] is None or (isinstance(msg['form'], dict) and isinstance(msg['form'].get('sections'), list)):
                 return
         elif kind == 'answer' and fields(msg, 'type', 'requestId', 'status', 'message') and route(rid):

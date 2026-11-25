@@ -35,21 +35,38 @@ internal object Invites {
 
     fun ensureChannel(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Desktop requests", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "A pending request on your paired desktop"
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, context.uiString(R.string.desktop_requests), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.uiString(R.string.a_pending_request_on_your_paired_desktop)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
-        manager.createNotificationChannel(NotificationChannel(CALL_CHANNEL, "Incoming voice calls", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Incoming invitations, using your system ringtone and vibration settings"
+        manager.createNotificationChannel(NotificationChannel(CALL_CHANNEL, context.uiString(R.string.incoming_voice_calls), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.uiString(R.string.incoming_invitations_using_your_system_ringtone_and_vibration_settings)
             setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                 AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build())
             enableVibration(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
-        manager.createNotificationChannel(NotificationChannel(ONGOING_CHANNEL, "Active voice call", NotificationManager.IMPORTANCE_LOW).apply {
+        manager.createNotificationChannel(NotificationChannel(ONGOING_CHANNEL, context.uiString(R.string.active_voice_call), NotificationManager.IMPORTANCE_LOW).apply {
             setSound(null, null); enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
+    }
+
+    fun refreshLanguage(app: Gateway) {
+        ensureChannel(app)
+        val manager = app.getSystemService(NotificationManager::class.java) ?: return
+        for (active in manager.activeNotifications) {
+            // Keep an in-flight invitation's platform-owned ringtone and expiry intact.
+            if (active.notification.flags and Notification.FLAG_INSISTENT != 0) continue
+            val ongoing = active.notification.channelId == ONGOING_CHANNEL
+            val id = if (ongoing) app.callId else active.tag
+            if (id == null || !validId(id)) continue
+            val item = if (app.verifiedInbox) app.store.state.pending[id] else null
+            val note = notification(app, id, item, ongoing = ongoing)
+            val silent = Notification.Builder.recoverBuilder(AppLanguage.context(app), note)
+                .setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY).build()
+            try { manager.notify(active.tag, active.id, silent) } catch (_: SecurityException) { }
+        }
     }
 
     fun allowed(context: Context, channel: String = if (InviteSettings(context).callMode) CALL_CHANNEL else CHANNEL): Boolean =
@@ -72,20 +89,21 @@ internal object Invites {
 
     fun notification(context: Context, id: String, item: Pending? = null, ring: Boolean = false, ongoing: Boolean = false): Notification {
         val settings = InviteSettings(context)
+        val localized = AppLanguage.context(context)
         val channel = if (ongoing) ONGOING_CHANNEL else if (ring) CALL_CHANNEL else CHANNEL
         val title = if (settings.showPreview && item != null)
-            item.session?.takeIf { it.isNotBlank() } ?: item.project.takeIf { it.isNotBlank() } ?: "Desktop request"
-            else "Desktop request"
-        val body = if (ongoing) "Voice call in progress"
-            else if (item == null) "Pending sync — open the inbox to reconnect."
-            else if (settings.showPreview) item.question else "A request is pending on your paired desktop."
+            item.session?.takeIf { it.isNotBlank() } ?: item.project.takeIf { it.isNotBlank() } ?: context.uiString(R.string.desktop_request)
+            else context.uiString(R.string.desktop_request)
+        val body = if (ongoing) context.uiString(R.string.voice_call_in_progress)
+            else if (item == null) context.uiString(R.string.pending_sync_open_the_inbox_to_reconnect)
+            else if (settings.showPreview) item.question else context.uiString(R.string.a_request_is_pending_on_your_paired_desktop)
         val open = intent(context, id, OPEN, true)
         val answer = intent(context, id, ANSWER, true)
         val negative = intent(context, id, if (ongoing) HANG_UP else NOT_NOW, false)
-        val publicVersion = Notification.Builder(context, channel).setSmallIcon(R.drawable.ic_invite)
-            .setContentTitle("Desktop request").setContentText(if (ongoing) "Voice call in progress" else "Open Away to review.")
+        val publicVersion = Notification.Builder(localized, channel).setSmallIcon(R.drawable.ic_invite)
+            .setContentTitle(context.uiString(R.string.desktop_request)).setContentText(if (ongoing) context.uiString(R.string.voice_call_in_progress) else context.uiString(R.string.open_away_to_review))
             .setVisibility(Notification.VISIBILITY_PUBLIC).build()
-        val builder = Notification.Builder(context, channel).setSmallIcon(R.drawable.ic_invite)
+        val builder = Notification.Builder(localized, channel).setSmallIcon(R.drawable.ic_invite)
             .setContentTitle(title).setContentText(body).setStyle(Notification.BigTextStyle().bigText(body))
             .setWhen(item?.createdAt ?: System.currentTimeMillis()).setShowWhen(true)
             .setCategory(if (ring || ongoing) Notification.CATEGORY_CALL else Notification.CATEGORY_MESSAGE)
@@ -94,13 +112,13 @@ internal object Invites {
         if (ongoing) {
             if (Build.VERSION.SDK_INT >= 31) builder.setStyle(Notification.CallStyle.forOngoingCall(
                 Person.Builder().setName(title).build(), negative))
-            else builder.addAction(Notification.Action.Builder(null, "Hang up", negative).build())
+            else builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.hang_up), negative).build())
         } else {
             if (ring && Build.VERSION.SDK_INT >= 31) builder.setStyle(Notification.CallStyle.forIncomingCall(
                 Person.Builder().setName(title).build(), negative, answer))
             else {
-                builder.addAction(Notification.Action.Builder(null, "Answer call", answer).build())
-                builder.addAction(Notification.Action.Builder(null, if (ring) "Decline" else "Not now", negative).build())
+                builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.answer_call), answer).build())
+                builder.addAction(Notification.Action.Builder(null, if (ring) context.uiString(R.string.decline) else context.uiString(R.string.not_now), negative).build())
             }
             if (ring) {
                 // The platform owns ringing and timeout even if our process is killed.
@@ -128,7 +146,7 @@ internal object Invites {
             val note = notification(context, id, item, ring)
             // Suppress sound/vibration on generic wakeups and refreshes, without changing channels.
             if (!alert || item == null || (callMode && !ring)) {
-                val silent = Notification.Builder.recoverBuilder(context, note)
+                val silent = Notification.Builder.recoverBuilder(AppLanguage.context(context), note)
                     .setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY).build()
                 manager.notify(id, 1, silent)
             } else manager.notify(id, 1, note)

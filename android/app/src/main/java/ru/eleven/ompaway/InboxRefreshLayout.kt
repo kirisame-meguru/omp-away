@@ -104,7 +104,7 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
             removeCallbacks(completeRefresh)
             manualRefresh = false
             if (displayed != state) present()
-            else indicator.show(InboxStatusIndicator.Kind.ERROR, "Not connected", "Not connected. $detail", animations)
+            else indicator.show(InboxStatusIndicator.Kind.ERROR, context.uiString(R.string.not_connected), context.uiString(R.string.connection_detail, detail), animations)
         } else if (manualRefresh) {
             if (displayed != state) {
                 removeCallbacks(completeRefresh)
@@ -140,10 +140,10 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
             else -> InboxStatusIndicator.Kind.BUSY
         }
         val label = when (connection) {
-            Gateway.InboxConnection.CONNECTING -> if (manualRefresh) "Refreshing…" else "Connecting…"
-            Gateway.InboxConnection.REFRESHING -> if (manualRefresh) "Refreshing…" else "Connecting…"
-            Gateway.InboxConnection.CONNECTED -> "Up to date"
-            Gateway.InboxConnection.DISCONNECTED -> "Not connected"
+            Gateway.InboxConnection.CONNECTING -> if (manualRefresh) context.uiString(R.string.refreshing) else context.uiString(R.string.connecting)
+            Gateway.InboxConnection.REFRESHING -> if (manualRefresh) context.uiString(R.string.refreshing) else context.uiString(R.string.connecting)
+            Gateway.InboxConnection.CONNECTED -> context.uiString(R.string.up_to_date)
+            Gateway.InboxConnection.DISCONNECTED -> context.uiString(R.string.not_connected)
         }
         indicator.show(kind, label, if (kind == InboxStatusIndicator.Kind.ERROR) "$label. $detail" else label, animations)
         settle(restingOffset)
@@ -158,7 +158,7 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
         manualRefresh = true
         refreshStarted = android.os.SystemClock.uptimeMillis()
         displayed = null
-        indicator.show(InboxStatusIndicator.Kind.BUSY, "Refreshing…", "Refreshing…", animations)
+        indicator.show(InboxStatusIndicator.Kind.BUSY, context.uiString(R.string.refreshing), context.uiString(R.string.refreshing), animations)
         settle(restingOffset)
         if (onRefresh?.invoke() == true) return true
         manualRefresh = false
@@ -172,7 +172,7 @@ internal class InboxRefreshLayout(context: Context) : FrameLayout(context) {
             originOffset = offset
             manualRefresh = false
             removeCallbacks(completeRefresh)
-            indicator.show(InboxStatusIndicator.Kind.BUSY, "Refreshing…", "Refreshing…", animations)
+            indicator.show(InboxStatusIndicator.Kind.BUSY, context.uiString(R.string.refreshing), context.uiString(R.string.refreshing), animations)
             pulling = true
         }
         distance = raw.coerceAtLeast(0f)

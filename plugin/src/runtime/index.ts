@@ -10,6 +10,7 @@ import { connectRuntime, type MobileRuntime } from "./routing";
 import { PairingQr } from "./pairing-qr";
 import { clean, PairingComparison } from "../presentation";
 import { AwayNotifications } from "./notifications";
+import { message, routingStatus } from "../messages";
 
 export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"close"|"ringing"> {
 	readonly comparisonCode?: string;
@@ -53,13 +54,13 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	let live=true, commands=Promise.resolve(), nextPair=0, expires=0, pairing=false;
 	let preferences:Preferences={away:false,delayMs:null};
 	const current=()=>live && isCurrent();
-	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(clean(text),type)};
-	const status=(prefs:Preferences)=>`Away · All sessions · Ring immediately: ${prefs.away?"on":"off"} · Fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}`;
+	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(clean(message(notifications.language,text)),type)};
+	const status=(prefs:Preferences)=>`Away · ${routingStatus(notifications.language,prefs.away,prefs.delayMs)}`;
 	const enrollment=new Enrollment((text,comparison)=>ctx.ui.setWidget("omp-away-pairing",comparison
 		? ()=>new PairingComparison(comparison.emoji,comparison.code,(accept,code)=>{
 			if (!current()) return;
 			if (!idle() || !enrollment.decide(accept,code)) notify("No matching idle local comparison.","warning");
-		})
+		},notifications.language)
 		: text?.split("\n")));
 	let expiryTimer: NodeJS.Timeout | undefined;
 	function clearQr() {
@@ -74,10 +75,11 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		notify("Away pairing cancelled; no new device approved.");
 	}
 	const runtime=await resources.connect({url,stateDir,python,desktopToken:token,notifications,
+		onLanguage(language) { if (current()) notifications.setLanguage(language); },
 		onRouting(next) {
 			if (!current()) return;
 			preferences=next;
-			notifications.health("Routing",`All sessions · Ring immediately: ${next.away?"on":"off"} · Fallback: ${next.delayMs===null?"off":`${next.delayMs/1000}s`}`);
+			notifications.health("Routing",language=>routingStatus(language,next.away,next.delayMs));
 		},
 		confirmPair:async (_device,emoji)=>{
 			if (!current() || !idle() || Date.now()>=expires) return false;
@@ -106,6 +108,10 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		} else if(code==="confirmation_failed") {
 			cancelEnrollment();
 			notifications.warn("pairing-failed","Pairing confirmation could not be completed. Check the phone and /away status before trying again.");
+		} else if(code==="translation-unavailable") {
+			notifications.warn(`translation:${requestId}`,"Translation unavailable. Showing the original question.");
+		} else if(code==="language-preference-unavailable") {
+			notifications.warn("language-preference","The language preference could not be saved. Check /away status before trying again.");
 		}
 	});
 	if (!current()) {await runtime.close();return}
@@ -135,7 +141,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 						let availableRows=()=>0;
 						const qr=new PairingQr(payload,()=>availableRows(),()=>{
 							if (epoch===nextPair) cancelPairing();
-						});
+						},notifications.language);
 						ctx.ui.setWidget("omp-away-pairing-qr",tui=>{
 							availableRows=()=>tui.terminal.rows;
 							return qr;
@@ -161,7 +167,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				return;
 			}
 			const fallback=/^fallback (off|[1-9]\d{0,6})$/.exec(args);
-			if(args==="status") {await commands;if(current()) notify(`Away status\n${notifications.status()}`);return}
+			if(args==="status") {await commands;if(current()) notify(`${message(notifications.language,"Away status")}\n${notifications.status()}`);return}
 			if (args!=="" && args!=="on" && args!=="off" && (!fallback || (fallback[1]!=="off" && Number(fallback[1])>2_147_483))) {
 				notify("Usage: /away [on|off|status|fallback off|fallback SECONDS|pair [clipboard|cancel]]", "warning");return;
 			}

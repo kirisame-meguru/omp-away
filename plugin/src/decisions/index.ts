@@ -3,6 +3,8 @@ import { type DecisionForm, prepare } from "./form";
 import { preferences, type Preferences } from "./preferences";
 import { displayExcerpt } from "./display";
 import { touchForm, touchValues, touchNotes, type TouchForm, type TouchResult } from "./touch";
+import type { Language } from "../language";
+import { message } from "../messages";
 
 export type { Preferences } from "./preferences";
 export type { SideContext } from "./side";
@@ -92,24 +94,24 @@ export class DecisionCoordinator {
 			title:entry.ask.context?.title,description:entry.ask.context?.blockedWork,voice:this.voiceAvailable(id)};
 		return Buffer.byteLength(JSON.stringify(form))<=60_000 ? form : null;
 	}
-	async answer(id:string,input:unknown,noteInput:unknown=[]):Promise<TouchResult> {
+	async answer(id:string,input:unknown,noteInput:unknown=[],language:Language="en",labels?:ReadonlyMap<string,string>):Promise<TouchResult> {
 		const entry=this.#pending.get(id);
-		if(!entry||entry.submitted||this.#closed) return {status:"stale",message:"This request is no longer available."};
-		if(entry.withdrawing||this.#active?.entry===entry) return {status:"busy",message:"End the voice interaction before submitting by touch."};
-		const checked=touchValues(entry.form,input);
+		if(!entry||entry.submitted||this.#closed) return {status:"stale",message:message(language,"This request is no longer available.")};
+		if(entry.withdrawing||this.#active?.entry===entry) return {status:"busy",message:message(language,"End the voice interaction before submitting by touch.")};
+		const checked=touchValues(entry.form,input,language,labels);
 		if("error" in checked) return {status:"invalid",message:checked.error};
 		const notes=touchNotes(entry.form,checked.values,noteInput);
-		if(!notes||notes.length&&!entry.ask.supportsOptionNotes) return {status:"invalid",message:"Option notes are invalid or unsupported by this desktop."};
+		if(!notes||notes.length&&!entry.ask.supportsOptionNotes) return {status:"invalid",message:message(language,"Option notes are invalid or unsupported by this desktop.")};
 		// Reserve before dispatch; removal from the inbox cannot revoke this attempt's receipt.
 		entry.submitted=true;
 		this.silence(id);
 		try {
 			if(await entry.ask.submitConfirmed(id,checked.values,notes)==="accepted") {
 				if(this.#pending.get(id)===entry) this.end(id);
-				return {status:"accepted",message:"Answer submitted."};
+				return {status:"accepted",message:message(language,"Answer submitted.")};
 			}
 		} catch { /* A partially dispatched answer must never be retried automatically. */ }
-		return {status:"uncertain",message:"Submission could not be confirmed. Check the desktop before answering again."};
+		return {status:"uncertain",message:message(language,"Submission could not be confirmed. Check the desktop before answering again.")};
 	}
 	display(id:string) {return this.#pending.get(id)?.form.display}
 	// Native live owns its context budget; legacy scripted-readback limits do not apply.
