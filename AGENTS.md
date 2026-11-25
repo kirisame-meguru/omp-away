@@ -9,3 +9,9 @@
 - Publication and synchronization are currently paused. Do not make repositories public, trigger mirror synchronization, push to GitHub, force-push, delete remote refs, or rewrite history without renewed explicit authorization.
 - Prefer Forgejo's native push-mirror settings over custom synchronization scripts. A prepared mirror must have push-triggered synchronization disabled and interval `0`; verify that saving it cannot trigger an initial sync before creating it.
 - Other agents may be editing the component repositories. Coordinate ownership before editing shared files or Git refs. Never absorb another agent's in-progress changes into an unrelated commit.
+
+## Private operational context
+
+- Before deployment, pairing, live-device verification, or shared-runtime changes, read the checkout's ignored `LOCAL_OPERATIONS.md`.
+- Keep production endpoints, machine-local paths, device details, and operational state in that private file or protected runtime configuration, never in tracked documentation. Do not force-add the file or copy its contents into commits, public issues, or release artifacts.
+- If the private file is absent in a fresh checkout, inspect the existing protected `OMP_AWAY_*` bindings and coordinate with the active operator. Do not guess an endpoint, replace pairing keys, or infer loaded runtime compatibility from the source revision alone.
