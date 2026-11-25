@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import release
@@ -89,6 +90,44 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(z.namelist(), ['entry'])
             with self.assertRaises(ValueError):
                 release.archive(root / 'bad.zip', root, ['../outside'], 123)
+
+    def test_plugin_archive_keeps_required_opening_prompt_without_media_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = {
+                'package.json': '{}', 'bun.lock': '{}', 'src/index.ts': '// entry',
+                'tunnel/pyproject.toml': '', 'tunnel/uv.lock': '',
+                'media/pyproject.toml': '', 'media/uv.lock': '', 'media/peer.py': '# peer',
+                'media/opening.md': 'Synthetic opening instructions',
+                'media/diagnostics.json': 'private test fixture',
+            }
+            for name, content in files.items():
+                target = root / 'plugin' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding='utf-8')
+            for name in ('tools/release/install_plugin.py', 'docs/releases/INSTALL.md'):
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('installer fixture', encoding='utf-8')
+            output = root / 'out'
+            output.mkdir()
+
+            def command(args, cwd=None, env=None, capture=False):
+                if args == ['git', 'ls-files', '-z', '--', 'plugin']:
+                    return '\0'.join('plugin/' + name for name in files)
+                if args == ['bun', 'media/build-sdk.ts']:
+                    bundle = cwd / 'src/media/live-sdk.generated.mjs'
+                    bundle.parent.mkdir(parents=True, exist_ok=True)
+                    bundle.write_text('// generated SDK fixture', encoding='utf-8')
+                elif args != ['bun', 'install', '--frozen-lockfile']:
+                    raise AssertionError('unexpected build command')
+
+            with patch.object(release, 'ROOT', root), patch.object(release, 'command', command):
+                release.build_plugin(output, 'v1.0.22', 123)
+            with zipfile.ZipFile(output / 'omp-away-plugin-v1.0.22.zip') as archive:
+                self.assertEqual(archive.read('plugin/media/opening.md').decode(),
+                                 files['media/opening.md'])
+                self.assertNotIn('plugin/media/diagnostics.json', archive.namelist())
 
 
 class HostTests(unittest.TestCase):

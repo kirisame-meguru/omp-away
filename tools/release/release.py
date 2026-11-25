@@ -242,7 +242,7 @@ def build_plugin(output, tag, epoch):
                          if p.is_file() and '__pycache__' not in p.parts)
         for sub in ('tunnel', 'media'):
             names.extend('plugin/' + sub + '/' + name for name in ('pyproject.toml', 'uv.lock'))
-        names.append('plugin/media/peer.py')
+        names.extend(('plugin/media/peer.py', 'plugin/media/opening.md'))
         archive(output / f'omp-away-plugin-{tag}.zip', stage, names, epoch)
 
 
