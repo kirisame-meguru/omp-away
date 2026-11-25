@@ -116,7 +116,6 @@ export async function translatePresentation(
   const reply = await ctx.runEphemeralTurn({
     promptText,
     tools: false,
-    maxTokens: 8192,
     dedupeReply: false,
     purpose: "away-translation",
     signal,
