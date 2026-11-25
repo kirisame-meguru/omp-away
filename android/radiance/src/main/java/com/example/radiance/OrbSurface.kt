@@ -41,6 +41,7 @@ class OrbSurface(
     private var disposed = false
     private var enabled = true
     private var scheduled = false
+    var onPoseChanged: (() -> Unit)? = null
     private var mode = 1
     private var still = true
     private var light = true
@@ -145,6 +146,7 @@ class OrbSurface(
         val dt = if (previous == 0L) 0f else ((frameTimeNanos - previous) / 1e9f).coerceIn(0f, .1f)
         previous = frameTimeNanos
         if (!still && layer != OrbLayer.SCENE) { elapsed += dt; shell.advance(dt) }
+        onPoseChanged?.invoke()
         instance.setParameter("shellPose", shell.width * placement.scale, shell.height * placement.scale,
             placement.lift(shell), shell.opacity)
         instance.setParameter("shellShape", shell.shape)

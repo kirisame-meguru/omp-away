@@ -36,6 +36,7 @@ class VoiceLensOverlayTest {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         lateinit var scene: CallScreen
         lateinit var root: FrameLayout
+        lateinit var underlay: RefractiveContent
         lateinit var panel: LinearLayout
         lateinit var header: Button
         lateinit var placement: LensPlacement
@@ -69,13 +70,19 @@ class VoiceLensOverlayTest {
                     addView(header, LinearLayout.LayoutParams(-1, RadianceUi.dp(activity, 200)))
                     addView(TextView(activity).apply { text = "Fixture content" }, LinearLayout.LayoutParams(-1, 0, 1f))
                 }
-                root = FrameLayout(activity).apply {
+                underlay = RefractiveContent(activity).apply {
                     addView(scene, FrameLayout.LayoutParams(-1, -1))
                     addView(panel, FrameLayout.LayoutParams(-1, -1))
+                    (scene.controlsOverlay.parent as ViewGroup).removeView(scene.controlsOverlay)
+                    addView(scene.controlsOverlay)
+                }
+                root = FrameLayout(activity).apply {
+                    addView(underlay, FrameLayout.LayoutParams(-1, -1))
                     (scene.voiceOverlay.parent as ViewGroup).removeView(scene.voiceOverlay)
                     addView(scene.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
                 }
                 activity.setContentView(root)
+                scene.refract(underlay)
                 scene.resume()
             }
             await { activity.hasWindowFocus() && root.width > 0 && placement.restingBottom > 0f }
@@ -91,7 +98,9 @@ class VoiceLensOverlayTest {
                 panel.getLocationOnScreen(panelPosition)
                 headingMargin = ((callHeading.get(scene) as View).layoutParams as FrameLayout.LayoutParams).topMargin
                 centerX = origin[0] + root.width / 2
-                centerY = origin[1] + (placement.restingBottom - placement.baseRadius * placement.scale * .744f).toInt()
+                // Probe lower glass, not the luminous wave core, which can legitimately be opaque.
+                val radius = placement.baseRadius * placement.scale
+                centerY = origin[1] + (placement.restingBottom - radius*.744f + radius*.4f).toInt()
                 outsideX = origin[0] + root.width / 12
                 assertTrue("The voice lens must overlap the first ordinary-layout header", centerY < headerPosition[1] + header.height)
                 assertSame(header, panel.getChildAt(0))
@@ -105,11 +114,7 @@ class VoiceLensOverlayTest {
                     preferences.animations = false
                     preferences.quality = quality
                     scene.refreshAppearance()
-                    if (quality == 1) {
-                        val gpu = children(scene.voiceOverlay).filterIsInstance<OrbSurface>().single()
-                        assertTrue("GPU selector must exercise the actual native foreground", gpu.isShown)
-                        assertEquals(OrbLayer.LENS, gpu.layer)
-                    } else assertTrue(children(scene.voiceOverlay).filterIsInstance<OrbFallback>().single().isShown)
+                    assertFalse("Idle calls must not cover Questions with controls", scene.controlsOverlay.isShown)
                 }
                 // Establish that the actual screen, including the native surface, is transparent while idle.
                 val idle = awaitPixels(centerX, centerY, outsideX) { center, outside ->
@@ -125,9 +130,34 @@ class VoiceLensOverlayTest {
                     preferences.animations = true
                     scene.refreshAppearance()
                 }
-                awaitPixels(centerX, centerY, outsideX) { center, outside ->
-                    difference(center, idle.first) > 60 && difference(outside, idle.second) < 8
+                await { scene.controlsOverlay.isShown && scene.voiceOverlay.isShown }
+                instrumentation.runOnMainSync {
+                    assertSame(underlay, scene.controlsOverlay.parent)
+                    assertEquals(root.width, scene.voiceOverlay.width)
+                    assertEquals(root.height, scene.voiceOverlay.height)
+                    if (quality == 1) {
+                        val gpu = children(scene.voiceOverlay).filterIsInstance<OrbSurface>().single()
+                        assertTrue(gpu.isShown)
+                        assertFalse("The global orb must preserve alpha outside its shape", gpu.isOpaque)
+                        assertEquals(OrbLayer.LENS, gpu.layer)
+                    } else assertTrue(children(scene.voiceOverlay).filterIsInstance<OrbFallback>().single().isShown)
+                    val scale = placement.scale
+                    val bottom = placement.restingBottom
+                    scene.captions("A longer live user caption that remains a transcript, not a submitted answer.",
+                        false, "A live assistant caption over the Questions page.", false)
+                    assertEquals(scale, placement.scale, 0f)
+                    assertEquals("Captions must not position the orb", bottom, placement.restingBottom, 0f)
                 }
+                val activePixels = awaitPixels(centerX, centerY, outsideX) { center, outside ->
+                    difference(center, idle.first) > 20 && difference(outside, idle.second) < 8
+                }
+                instrumentation.runOnMainSync { header.setBackgroundColor(Color.CYAN) }
+                // Change the actual card underneath an unchanged, active orb.
+                // Its interior must reveal that change, not a synthetic backdrop.
+                awaitPixels(centerX, centerY, outsideX) { center, outside ->
+                    difference(center, activePixels.first) > 25 && difference(outside, Color.CYAN) < 8
+                }
+                instrumentation.runOnMainSync { header.setBackgroundColor(Color.MAGENTA) }
                 instrumentation.runOnMainSync {
                     val current = IntArray(2)
                     header.getLocationOnScreen(current)
@@ -153,6 +183,7 @@ class VoiceLensOverlayTest {
                 awaitPixels(centerX, centerY, outsideX) { center, outside ->
                     difference(center, idle.first) < 8 && difference(outside, idle.second) < 8
                 }
+                await { !scene.controlsOverlay.isShown && !scene.voiceOverlay.isShown }
             }
         } finally {
             instrumentation.runOnMainSync {

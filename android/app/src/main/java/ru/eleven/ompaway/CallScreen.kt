@@ -66,6 +66,8 @@ internal class CallScreen(
     private val end = Button(context)
     private val settingsButton = Button(context)
     private val controls = LinearLayout(context)
+    internal val controlsOverlay: View get() = controls
+    private var captionsMaximumHeight = dp(304)
     private val content = LinearLayout(context)
     private val callActions = LinearLayout(context)
     private var speakerEnabled = false
@@ -84,8 +86,20 @@ internal class CallScreen(
     private var safeRight = 0
     private var safeBottom = 0
     private var safeTop = 0
-    private val slotLocation = IntArray(2)
-    private val overlayLocation = IntArray(2)
+    private var refractiveContent: RefractiveContent? = null
+
+    fun refract(content: RefractiveContent) {
+        refractiveContent = content
+        surface?.onPoseChanged = ::updateRefraction
+        fallback.onPoseChanged = ::updateRefraction
+        updateRefraction()
+    }
+
+    private fun updateRefraction() {
+        refractiveContent?.lens(voiceOverlay.width, voiceOverlay.height,
+            shell.width * placement.scale, shell.height * placement.scale,
+            placement.lift(shell), if (voiceOverlay.visibility == VISIBLE) shell.opacity else 0f, shell.shape)
+    }
 
     init {
         shell.target(4, true)
@@ -121,8 +135,14 @@ internal class CallScreen(
             orientation = LinearLayout.VERTICAL
             addView(content, LinearLayout.LayoutParams(-1, -2))
         }
-        val captions = ScrollView(context).apply { isFillViewport = true; addView(body) }
-        controls.addView(captions, LinearLayout.LayoutParams(-1, -1))
+        val captions = object : ScrollView(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val limit = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED)
+                    captionsMaximumHeight else minOf(MeasureSpec.getSize(heightMeasureSpec), captionsMaximumHeight)
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST))
+            }
+        }.apply { addView(body) }
+        controls.addView(captions, LinearLayout.LayoutParams(-1, -2))
         callActions.gravity = Gravity.CENTER
         callActions.background = GradientDrawable().apply {
             setColor(RadianceUi.cardColor); cornerRadius = dp(12).toFloat()
@@ -150,14 +170,10 @@ internal class CallScreen(
             updatePlacement()
             layoutControls()
         }
-        heading.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            updatePlacement()
-            layoutControls()
-        }
         setOnApplyWindowInsetsListener { _, insets ->
             val top: Int
             if (Build.VERSION.SDK_INT >= 30) {
-                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
                 safeLeft = safe.left; safeRight = safe.right; safeBottom = safe.bottom; top = safe.top
             } else {
                 @Suppress("DEPRECATION")
@@ -185,9 +201,9 @@ internal class CallScreen(
         callActions.visibility = if (source == null) GONE else VISIBLE
         callNotice.visibility = if (source == null) GONE else VISIBLE
         heading.visibility = if (panelOpen || source == null) GONE else VISIBLE
-        controls.visibility = if (panelOpen || source == null) INVISIBLE else VISIBLE
-        settingsButton.visibility = if (panelOpen) GONE else VISIBLE
-        if (panelOpen && source == null) setVoiceOverlayVisible(false)
+        controls.visibility = if (source == null) GONE else VISIBLE
+        settingsButton.visibility = VISIBLE
+        setVoiceOverlayVisible(source != null)
         content.gravity = Gravity.CENTER_HORIZONTAL or Gravity.TOP
     }
 
@@ -200,40 +216,18 @@ internal class CallScreen(
     }
 
     fun setPanelOpen(open: Boolean) {
-        if (panelOpen != open) {
-            panelOpen = open
-            if (!open) voiceOverlay.layoutParams = LayoutParams(-1, -1)
-            updatePlacement()
-            layoutControls()
-            setVoiceOverlayVisible(!open)
-        }
+        panelOpen = open
         showActions()
         importantForAccessibility = if (open) IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             else IMPORTANT_FOR_ACCESSIBILITY_AUTO
     }
 
-    fun placePanelLens(slot: View) {
-        if (!panelOpen || source == null || slot.width <= 0 || slot.height <= 0) return
-        slot.getLocationInWindow(slotLocation)
-        (voiceOverlay.parent as? View)?.getLocationInWindow(overlayLocation) ?: return
-        val size = minOf(slot.width, slot.height, dp(64))
-        val left = slotLocation[0] - overlayLocation[0] + (slot.width - size) / 2
-        val top = slotLocation[1] - overlayLocation[1] + (slot.height - size) / 2
-        val params = voiceOverlay.layoutParams as LayoutParams
-        if (params.width != size || params.height != size || params.leftMargin != left || params.topMargin != top) {
-            params.width = size; params.height = size
-            params.leftMargin = left; params.topMargin = top
-            voiceOverlay.layoutParams = params
-        }
-        setVoiceOverlayVisible(true)
-    }
-
     private fun updatePlacement() {
-        placement.compact = panelOpen
-        placement.resize(voiceOverlay.width, voiceOverlay.height,
-            if (panelOpen) 0f else (safeTop + heading.height).toFloat())
+        // The orb belongs to the window, never to a header, caption, or page.
+        placement.resize(voiceOverlay.width, voiceOverlay.height, safeTop.toFloat())
         surface?.refreshPlacement()
         fallback.invalidate()
+        updateRefraction()
     }
 
     fun bind(next: CallVisualSource?) {
@@ -282,7 +276,7 @@ internal class CallScreen(
             rightMargin = maxOf(dp(12), safeRight)
             topMargin = safeTop + dp(8)
         }
-        controls.setPadding(maxOf(dp(24), safeLeft), 0, maxOf(dp(24), safeRight), maxOf(dp(16), safeBottom))
+        controls.setPadding(maxOf(dp(24), safeLeft), 0, maxOf(dp(24), safeRight), dp(16))
         val stacked = width / resources.displayMetrics.density / resources.configuration.fontScale < 360f
         val orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         if (callActions.orientation != orientation) {
@@ -292,11 +286,16 @@ internal class CallScreen(
                     LinearLayout.LayoutParams(-1, -2) else LinearLayout.LayoutParams(0, -2, 1f)
             }
         }
-        if (!panelOpen) {
-            val top = (placement.restingBottom.toInt() + dp(16)).coerceIn(0, height)
-            controls.layoutParams = (controls.layoutParams as LayoutParams).apply {
-                height = this@CallScreen.height - top
-            }
+        val available = (height - safeTop - safeBottom).coerceAtLeast(0)
+        val maximum = (minOf(available / 2, dp(320)) - dp(16)).coerceAtLeast(0)
+        if (captionsMaximumHeight != maximum) {
+            captionsMaximumHeight = maximum
+            controls.requestLayout()
+        }
+        val params = controls.layoutParams as LayoutParams
+        if (params.bottomMargin != safeBottom) {
+            params.bottomMargin = safeBottom
+            controls.layoutParams = params
         }
     }
 
@@ -334,6 +333,7 @@ internal class CallScreen(
         backgroundFallback.update(false, light, 4)
         surface?.update(mode, reduced, light, !flat && lensVisible, quality == 0)
         fallback.update(!reduced && flat && lensVisible, light, mode)
+        updateRefraction()
     }
 
     override fun doFrame(frameTimeNanos: Long) {

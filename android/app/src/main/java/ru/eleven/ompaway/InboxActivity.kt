@@ -42,7 +42,6 @@ class InboxActivity : Activity() {
     private var selectedId: String? = null
     private var notice: String? = null
     private var resumed = false
-    private var transcriptViews: CallTranscriptViews? = null
     private val detailViews = mutableMapOf<String, QuestionDetailView>()
     private val formViews = mutableMapOf<String, QuestionFormView>()
     private var answerRequested: String? = null
@@ -58,7 +57,6 @@ class InboxActivity : Activity() {
     private lateinit var panelSettings: ImageButton
     private lateinit var contentTarget: LinearLayout
     private lateinit var panelToolbar: LinearLayout
-    private lateinit var panelLensSlot: View
     private lateinit var pairingView: PairingView
     private lateinit var receiptToast: ReceiptToast
     private var page = Page.REQUESTS
@@ -66,7 +64,7 @@ class InboxActivity : Activity() {
     private var renderedPage: Page? = null
     private var renderedId: String? = null
 
-    private enum class Page { NONE, REQUESTS, DETAILS, SETTINGS }
+    private enum class Page { REQUESTS, DETAILS, SETTINGS }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -142,15 +140,10 @@ class InboxActivity : Activity() {
             setOnClickListener { if (resumed) navigateBack() }
         }
         panelToolbar.addView(panelBack, LinearLayout.LayoutParams(dp(48), dp(48)))
-        panelLensSlot = View(this).apply {
-            minimumWidth = dp(48)
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }
         panelTitle = RadianceUi.text(this, "Questions", 24, heading = true).apply {
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
         panelToolbar.addView(panelTitle, LinearLayout.LayoutParams(0, -2, 1f))
-        panelToolbar.addView(panelLensSlot, LinearLayout.LayoutParams(dp(56), dp(56)))
         panelHangup = RadianceUi.button(this, "Hang up", destructive = true) { if (resumed) app.hangup() }
         panelToolbar.addView(panelHangup, LinearLayout.LayoutParams(-2, -2))
         panelHeader.addView(panelToolbar, LinearLayout.LayoutParams(-1, -2))
@@ -179,15 +172,25 @@ class InboxActivity : Activity() {
             })
         }
         refresh.setContent(overlay)
-        setContentView(FrameLayout(this).apply {
+        val underlay = RefractiveContent(this).apply {
             addView(callScreen, FrameLayout.LayoutParams(-1, -1))
             addView(refresh, FrameLayout.LayoutParams(-1, -1))
+            val voiceControls = callScreen.controlsOverlay
+            (voiceControls.parent as? ViewGroup)?.removeView(voiceControls)
+            addView(voiceControls)
+            addView(receiptToast, FrameLayout.LayoutParams(-1, -1))
+        }
+        setContentView(FrameLayout(this).apply {
+            addView(underlay, FrameLayout.LayoutParams(-1, -1))
             (callScreen.voiceOverlay.parent as? ViewGroup)?.removeView(callScreen.voiceOverlay)
             addView(callScreen.voiceOverlay, FrameLayout.LayoutParams(-1, -1))
-            addView(receiptToast, FrameLayout.LayoutParams(-1, -1))
         })
+        callScreen.refract(underlay)
         overlay.viewTreeObserver.addOnGlobalLayoutListener {
-            if (panelLensSlot.visibility == View.VISIBLE) callScreen.placePanelLens(panelLensSlot)
+            val voiceControls = callScreen.controlsOverlay
+            val bottom = if (voiceControls.visibility == View.VISIBLE) voiceControls.height else 0
+            if (scroll.paddingBottom != bottom)
+                scroll.setPadding(scroll.paddingLeft, scroll.paddingTop, scroll.paddingRight, bottom)
         }
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.setSystemBarsAppearance(0,
@@ -212,7 +215,7 @@ class InboxActivity : Activity() {
             OnBackInvokedDispatcher.PRIORITY_DEFAULT
         ) {
             if (pairingView.cancelScan()) Unit
-            else if (page != Page.NONE && page != Page.REQUESTS) navigateBack()
+            else if (page != Page.REQUESTS) navigateBack()
             else if (isTaskRoot) moveTaskToBack(true) else finish()
         }
         // Recreation restores an already-authorized action, rather than replaying the launch intent.
@@ -306,16 +309,15 @@ class InboxActivity : Activity() {
     }
 
 
-    private fun showInboxPanel(open: Boolean) {
-        panel.visibility = if (open) View.VISIBLE else View.GONE
+    private fun showInboxPanel() {
+        panel.visibility = View.VISIBLE
         panelHangup.visibility = if (app.callId != null) View.VISIBLE else View.GONE
-        panelLensSlot.visibility = if (app.callId != null) View.VISIBLE else View.GONE
-        callScreen.setPanelOpen(open)
+        callScreen.setPanelOpen(true)
     }
 
     private fun navigateBack() {
         page = when (page) {
-            Page.DETAILS -> if (app.callId != null) Page.NONE else Page.REQUESTS
+            Page.DETAILS -> Page.REQUESTS
             Page.SETTINGS -> settingsReturn
             else -> Page.REQUESTS
         }
@@ -328,13 +330,13 @@ class InboxActivity : Activity() {
     @Deprecated("Platform back callback")
     override fun onBackPressed() {
         if (pairingView.cancelScan()) return
-        if (page != Page.NONE && page != Page.REQUESTS) navigateBack() else super.onBackPressed()
+        if (page != Page.REQUESTS) navigateBack() else super.onBackPressed()
     }
 
     private fun applyScreenPrivacy() { screenPreferences.apply(window) }
 
     private fun showSettings() {
-        settingsReturn = page
+        if (page != Page.SETTINGS) settingsReturn = page
         page = Page.SETTINGS
         render()
     }
@@ -402,34 +404,30 @@ class InboxActivity : Activity() {
         val visual = app.callVisual
         if (visual != null) {
             if (callSource !== visual) {
-                callScreen.bind(visual); callSource = visual; page = Page.NONE
+                callScreen.bind(visual); callSource = visual; page = Page.REQUESTS
             }
             callScreen.setSpeaker(app.speakerEnabled)
             renderVoice()
         } else {
             if (callSource != null) {
                 callSource = null
-                page = Page.REQUESTS
                 callScreen.dismiss { callScreen.bind(null); render() }
                 return
             }
-            if (page == Page.NONE) page = Page.REQUESTS
         }
-        showInboxPanel(page != Page.NONE)
+        showInboxPanel()
         pairingView.setActive(page == Page.REQUESTS)
         app.takeAnswerReceipt()?.let { receiptToast.show(it, screenPreferences.animations) }
         refresh.isEnabled = page == Page.REQUESTS && app.canRefresh
         refresh.update(resumed && page == Page.REQUESTS && app.paired && !app.needsRelayOrigin && app.idle,
             app.inboxConnection, app.status, screenPreferences.animations)
         panelSettings.visibility = if (page == Page.REQUESTS) View.VISIBLE else View.GONE
-        if (page == Page.NONE) { renderedPage = null; return }
         panelBack.visibility = if (page == Page.REQUESTS) View.GONE else View.VISIBLE
         panelToolbar.visibility = View.VISIBLE
         panelTitle.text = when (page) {
             Page.REQUESTS -> "Questions"
             Page.DETAILS -> "Question details"
             Page.SETTINGS -> "Settings"
-            Page.NONE -> ""
         }
         // Keep controls, focused input and scroll position stable while gateway state changes.
         if (renderedPage == page && page == Page.SETTINGS) return
@@ -442,14 +440,13 @@ class InboxActivity : Activity() {
         renderedPage = page; renderedId = selectedId
         val focused = currentFocus
         saveDrafts()
-        column.removeAllViews(); contentTarget = column; transcriptViews = null
+        column.removeAllViews(); contentTarget = column
         detailViews.keys.retainAll(app.store.state.pending.keys)
         formViews.keys.retainAll(app.store.state.pending.keys)
         when (page) {
             Page.SETTINGS -> renderSettings()
             Page.DETAILS -> renderDetails()
             Page.REQUESTS -> renderRequests()
-            Page.NONE -> Unit
         }
         if (focused?.isAttachedToWindow == true) focused.requestFocus()
         scroll.post { scroll.scrollTo(0, y) }
@@ -462,11 +459,10 @@ class InboxActivity : Activity() {
             pairingView.bind()
             pairingView.setActive(true)
         }
-        if (notice != null || app.pushWarning != null || !Invites.allowed(this) || app.callId != null) card {
+        if (notice != null || app.pushWarning != null || !Invites.allowed(this)) card {
             notice?.let { text(it, 14) }
             app.pushWarning?.let { text(it, 14) }
             if (!Invites.allowed(this)) notificationSettings()
-            if (app.callId != null) button("Return to voice") { page = Page.NONE; render() }
         }
         val state = app.store.state
         if (state.pending.isEmpty() && app.paired && !app.needsRelayOrigin) {
@@ -523,7 +519,7 @@ class InboxActivity : Activity() {
             }
         }
         (view.parent as? ViewGroup)?.removeView(view)
-        view.availability(app.verifiedInbox && app.idle, item.id in app.submitting, app.formMessages[item.id])
+        view.availability(app.verifiedInbox, item.id in app.submitting, app.formMessages[item.id], canSubmit = app.idle)
         contentTarget.addView(view, LinearLayout.LayoutParams(-1, -2))
         return true
     }
@@ -584,12 +580,6 @@ class InboxActivity : Activity() {
                 text(if (app.verifiedInbox) state.proposals[item.id] ?: "No current proposal from the desktop."
                     else "Reconnect to review the current proposed answer.", 16)
             }
-            card {
-                text("Voice captions · Not a submitted answer", 18, bold = true)
-                transcriptViews = CallTranscriptViews(text("", 20, bold = true), text("", 16), text("", 16))
-                renderVoice()
-                toggle("Speaker", app.speakerEnabled) { app.setSpeakerEnabled(it) }
-            }
         }
         voiceButton(item)
         if (item.id !in state.silenced && app.callId != item.id) button("Not now") { app.silence(item.id) }
@@ -609,8 +599,6 @@ class InboxActivity : Activity() {
     private fun renderVoice() {
         if (!resumed || app.callId == null) return
         callScreen.captions(app.callerCaption, app.callerCaptionFinal, app.assistantCaption, app.assistantCaptionFinal)
-        transcriptViews?.update(app.talking, app.speaking, app.callerCaption, app.callerCaptionFinal,
-            app.assistantCaption, app.assistantCaptionFinal)
     }
 
     private fun scan() {

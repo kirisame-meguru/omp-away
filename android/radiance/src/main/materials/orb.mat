@@ -54,70 +54,18 @@ fragment {
             SHAPE / HEIGHT * sign(p.y) * pow(abs(p.y/HEIGHT),SHAPE-1.0),
             2.0*z/(DEPTH*DEPTH)));
     }
-    vec3 spectralColor(float layer, float phase) {
-        float drift = 0.5+0.5*sin(phase*0.37);
-        if (layer<0.5) return mix(vec3(0.012,0.10,1.0),vec3(0.015,0.30,1.0),drift);
-        if (layer<1.5) return mix(vec3(1.0,0.035,0.004),vec3(1.0,0.16,0.008),drift);
-        return vec3(0.06,0.34,0.09);
-    }
+    #include "../assets/lens-overlay.glsl"
     vec3 waves(vec2 p, float pixel) {
-        float x = p.x;
-        if (abs(x)>1.12) return vec3(0.0);
-        float x2 = x*x;
-        float envelope = pow(max(0.0,1.0-x2),2.0);
-        float derivative = -4.0*x*max(0.0,1.0-x2);
-        float level = materialParams.energy;
-        float amplitude = 0.018 + 0.235*level;
-        float phase = materialParams.time*3.5 + 0.30;
-        float baseline = 0.0;
-        vec3 radiance = vec3(0.0);
-        for (int i=0; i<3; i++) {
-            float layer = float(i);
-            float angle = phase + layer*2.094395;
-            float a = sin(angle+x*1.65);
-            float b = sin(angle+x*1.65+1.95);
-            float nearY = baseline + amplitude*envelope*a;
-            float farY = baseline + amplitude*envelope*b;
-            float lowY = min(nearY,farY);
-            float highY = max(nearY,farY);
-            float span = max(highY-lowY,pixel);
-            float signedDistance = max(lowY-p.y,p.y-highY);
-            float coverage = 1.0-smoothstep(-pixel,pixel,signedDistance);
-            float v = clamp((p.y-nearY)/(abs(farY-nearY)<pixel ? pixel : farY-nearY),0.0,1.0);
-            float nearSlope = amplitude*(derivative*a+envelope*1.65*cos(angle+x*1.65));
-            float farSlope = amplitude*(derivative*b+envelope*1.65*cos(angle+x*1.65+1.95));
-            // Exact tangents of P(x,v)=(x,mix(nearY,farY,v),(v-.5)*.55*envelope).
-            vec3 tangentX = vec3(1.0,mix(nearSlope,farSlope,v),(v-0.5)*0.55*derivative);
-            vec3 tangentV = vec3(0.0,farY-nearY,0.55*envelope+0.001);
-            vec3 normal = normalize(cross(tangentX,tangentV));
-            float facing = abs(normal.z);
-            float fresnel = 0.08+0.92*pow(1.0-facing,3.0);
-            float interior = 0.18+0.46*sin(3.14159265*v)+0.34*v;
-            float edgeWidth = max(pixel,0.006+0.008*envelope);
-            float nearRidge = exp(-pow((p.y-nearY)/edgeWidth,2.0));
-            float farRidge = exp(-pow((p.y-farY)/(edgeWidth*1.6),2.0));
-            vec3 tint = spectralColor(layer,phase);
-            tint = mix(vec3(0.54,0.68,0.84),tint,smoothstep(0.0,0.22,level));
-            float opticalDepth = min(span/(0.035+0.20*level),1.0);
-            float body = coverage*interior*(0.45+0.70*fresnel)*opticalDepth;
-            float ridge = (nearRidge*0.72+farRidge*0.22)*envelope;
-            radiance += tint*(body*1.55+ridge*0.65)*(0.55+0.75*level);
-            // Integrated, broad scattering lobe; no full-screen blur or marching loop.
-            float glow = exp(-pow(max(signedDistance,0.0)/(0.035+0.035*level),2.0));
-            radiance += tint*glow*envelope*(0.035+0.08*level);
-            // Grazing folds catch neutral light rather than becoming flat saturated paint.
-            radiance += vec3(0.62,0.72,0.80)*ridge*fresnel*0.20;
-        }
-        float fold = baseline+amplitude*envelope*0.45*sin(phase+x*1.65+0.9);
-        float foldGlow = exp(-pow((p.y-fold)/(0.012+0.026*level),2.0));
-        radiance += vec3(0.90,0.97,1.0)*foldGlow*envelope*level*1.25;
-        float quiet = exp(-pow((p.y-baseline)/0.016,2.0));
-        radiance += vec3(0.65,0.75,0.80)*quiet*envelope*(1.0-level)*0.65;
-        return radiance;
+        return voiceWaves(p,pixel,materialParams.time,materialParams.energy);
     }
     vec4 shade(vec2 p, float worldPixel) {
         if (materialParams.shellPose.w<=0.0) return vec4(0.0);
         float pixel = worldPixel/min(materialParams.shellPose.x,materialParams.shellPose.y);
+        if (materialParams.layer>1.5) {
+            vec4 lens = voiceLens(p,pixel,materialParams.time,materialParams.energy,SHAPE);
+            lens.a *= materialParams.shellPose.w;
+            return lens;
+        }
         float power = radialPower(p);
         float shell = pow(power,1.0/SHAPE);
         float coverage = 1.0-smoothstep(1.0-pixel,1.0+pixel,shell);

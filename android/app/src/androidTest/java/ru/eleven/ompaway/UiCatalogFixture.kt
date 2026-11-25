@@ -206,7 +206,7 @@ internal class UiCatalogFixture(private val instrumentation: Instrumentation, pr
         (get(app, "loadingForms") as MutableSet<*>).clear()
         put(app, "verifiedInbox", false); put(app, "status", "Offline"); put(app, "pairing", false)
         put(app, "verifyEmoji", null); put(app, "answerReceipt", null); put(app, "endingId", null)
-        put(activity, "notice", null); put(activity, "shownEmoji", null); put(activity, "selectedId", null)
+        put(activity, "notice", null); put(activity, "selectedId", null)
         put(activity, "renderedPage", null); put(activity, "renderedId", null)
         context.getSharedPreferences("away.sealed.v1", Context.MODE_PRIVATE).edit().clear().commit()
         ScreenPreferences(context).apply { blockScreenshots = false; animations = true; lightBackdrop = true; quality = 0 }

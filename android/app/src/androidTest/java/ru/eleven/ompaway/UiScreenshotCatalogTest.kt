@@ -252,7 +252,10 @@ class UiScreenshotCatalogTest {
                 "Wait, I would like to clarify", false, "The previous synthetic response was", false)
             f.voice("voice-$label-ending", renderer, true, true, 0f, 0f, dismissing = true)
             f.voice("voice-$label-ended", renderer, false, false, 0f, 0f, "A complete synthetic statement.", true)
-            f.voice("voice-$label-panel-overlay", renderer, true, true, .5f, 0f, panel = true, panelForm = compactForm())
+            f.voice("voice-$label-panel-overlay", renderer, true, true, .5f, 0f,
+                caller = "Please review this option while I keep the question open.", callerFinal = true,
+                assistant = "These live captions are not a submitted answer.", assistantFinal = true,
+                panel = true, panelForm = compactForm())
             f.voice("voice-$label-speaker-on", renderer, true, true, 0f, 0f, speakerOn = true)
             for (light in listOf(true, false)) for (motion in listOf(true, false)) {
                 f.voice("voice-$label-speaking-${if (light) "reference" else "dark"}-${if (motion) "animated" else "still"}",

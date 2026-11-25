@@ -41,13 +41,16 @@ class QuestionFormViewTest {
         val view = QuestionFormView(instrumentation.targetContext, schema, null, null) { values, notes ->
             sentValues = values; sentNotes = notes
         }
+        view.availability(true, false, null, canSubmit = false)
+        assertFalse("Voice may gate submission without locking draft editing", submit(view).isEnabled)
+        assertTrue(descendants(view).filterIsInstance<RadioButton>().single { it.text.toString() == "Alpha" }.isEnabled)
+        assertTrue(descendants(view).filterIsInstance<EditText>().single { it.text.toString() == "Initial" }.isEnabled)
         view.availability(true, false, null)
         assertEquals("Initial", view.values().getString("reason"))
         assertEquals("a", view.values().getString("choice"))
         assertEquals("[\"x\"]", view.values().getJSONArray("extras").toString())
         assertFalse(descendants(view).filterIsInstance<RadioButton>().single { it.text.toString() == "Unavailable" }.isEnabled)
-        descendants(view).filterIsInstance<Button>().single { it.text.toString() == "Note: Alpha" }.performClick()
-        descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "Note for Alpha" }.setText("Raw note")
+        descendants(view).filterIsInstance<EditText>().single { it.contentDescription == "Notes for Alpha" }.setText("Raw note")
         submit(view).performClick()
         assertEquals("a", sentValues!!.getString("choice"))
         val note = sentNotes!!.getJSONObject(0)

@@ -135,8 +135,8 @@ internal class QuestionFormView(
         addView(message); addView(send, RadianceUi.rowParams(context))
     }
 
-    fun availability(enabled: Boolean, busy: Boolean, text: String?) {
-        send.isEnabled = enabled && !busy
+    fun availability(enabled: Boolean, busy: Boolean, text: String?, canSubmit: Boolean = enabled) {
+        send.isEnabled = enabled && canSubmit && !busy
         for (input in inputs) input.isEnabled = enabled && !busy
         send.text = if (busy) "Awaiting desktop confirmation" else "Submit answer"
         message.text = text.orEmpty()
