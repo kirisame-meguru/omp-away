@@ -8,6 +8,7 @@ import type { Preferences } from "../decisions";
 import { Enrollment } from "./enrollment";
 import { connectRuntime, type MobileRuntime } from "./routing";
 import { PairingQr } from "./pairing-qr";
+import { clean, PairingComparison } from "../presentation";
 
 const runtimeWarnings: Readonly<Record<string,string>> = {
 	phone_disconnected: "Phone connection was interrupted",
@@ -58,9 +59,14 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	if (!isCurrent()) return;
 	let live=true, commands=Promise.resolve(), nextPair=0, expires=0, pairing=false, routingReady=false;
 	const current=()=>live && isCurrent();
-	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(text,type)};
-	const status=(prefs:Preferences)=>`Away (all sessions) immediate: ${prefs.away?"on":"off"}; fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}.`;
-	const enrollment=new Enrollment(text=>ctx.ui.setWidget("omp-away-pairing",text?.split("\n")));
+	const notify=(text:string,type:"info"|"warning"|"error"="info")=>{if (current()) ctx.ui.notify(clean(text),type)};
+	const status=(prefs:Preferences)=>`Away · All sessions · Ring immediately: ${prefs.away?"on":"off"} · Fallback: ${prefs.delayMs===null?"off":`${prefs.delayMs/1000}s`}`;
+	const enrollment=new Enrollment((text,comparison)=>ctx.ui.setWidget("omp-away-pairing",comparison
+		? ()=>new PairingComparison(comparison.emoji,comparison.code,(accept,code)=>{
+			if (!current()) return;
+			if (!idle() || !enrollment.decide(accept,code)) notify("No matching idle local comparison.","warning");
+		})
+		: text?.split("\n")));
 	let expiryTimer: NodeJS.Timeout | undefined;
 	function clearQr() {
 		clearTimeout(expiryTimer);
@@ -88,7 +94,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 		},
 	},code=>{
 		const warning=Object.hasOwn(runtimeWarnings,code) ? runtimeWarnings[code] : undefined;
-		notify(`Away: ${warning ?? (code==="phone_protocol_error" ? "Invalid phone data; the connection was closed" : code)}.`,warning===undefined?"error":"warning");
+		notify(`Away: ${warning ?? (code==="phone_protocol_error" ? "Invalid phone data; the connection was closed" : "Connection unavailable; check the gateway and try again")}.`,warning===undefined?"error":"warning");
 	});
 	if (!current()) {await runtime.close();return}
 	notify("Away: secure mobile gateway ready");

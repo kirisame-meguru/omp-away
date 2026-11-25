@@ -14,6 +14,7 @@ import { connectRuntime, type AskContext } from "../src/runtime/routing";
 import { Enrollment } from "../src/runtime/enrollment";
 import { awaySuggestions } from "../src/runtime/commands";
 import type { Preferences } from "../src/decisions";
+import type { ExtensionWidgetContent } from "@oh-my-pi/pi-tui/chat/extension-types";
 
 const pcm=new Uint8Array(960);
 interface RoutingBus {current:Preferences;clients:Set<SecureDesktopOptions>}
@@ -423,21 +424,21 @@ test("shared routing commands are idempotent patches and status follows remote u
 		await admins[1].command("fallback 30");
 		expect(current).toEqual({away:true,delayMs:30000});
 		await admins[0].command("status");
-		expect(notices[0].at(-1)).toMatch(/immediate: on.*fallback: 30s/);
+		expect(notices[0].at(-1)).toMatch(/Ring immediately: on.*Fallback: 30s/);
 		delayed=true;
 		const pending=admins[0].command("on"); await tick();
 		current={...current,away:false}; for(const subscriber of subscribers) subscriber(current);
 		gate.resolve(); await pending;
 		await admins[0].command("status");
-		expect(notices[0].at(-1)).toMatch(/immediate: off.*fallback: 30s/);
+		expect(notices[0].at(-1)).toMatch(/Ring immediately: off.*Fallback: 30s/);
 		expect(await Bun.file(join(dir,"routing.json")).exists()).toBe(false);
 	} finally {gate.resolve();for(const admin of admins)await admin.close();await rm(dir,{recursive:true,force:true})}
 });
 
 test("admin uses only the private clipboard for enrollment; busy Ask blocks comparison, not the native form",async()=>{
 	const dir=await mkdtemp(join(tmpdir(),"away-admin-")), tokenFile=join(dir,"token");
-	const notices:string[]=[], widgets:(string[]|undefined)[]=[], copied:string[]=[];
-	const ctx={ui:{notify:(text:string)=>notices.push(text),setWidget:(_key:string,lines:string[]|undefined)=>widgets.push(lines)}} as unknown as ExtensionContext;
+	const notices:string[]=[], widgets:ExtensionWidgetContent[]=[], copied:string[]=[];
+	const ctx={ui:{notify:(text:string)=>notices.push(text),setWidget:(_key:string,content:ExtensionWidgetContent)=>widgets.push(content)}} as unknown as ExtensionContext;
 	const env={OMP_AWAY_URL:"https://example.invalid",OMP_AWAY_STATE_DIR:dir,OMP_AWAY_TOKEN_FILE:tokenFile};
 	let confirm!:SecureDesktopOptions["confirmPair"], pairs=0, idle=true;
 	try {
@@ -448,9 +449,9 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 		}});
 		try {
 			idle=false;await admin!.command("pair");expect(pairs).toBe(0);expect(await confirm("phone","🐶".repeat(12))).toBe(false);
-			idle=true;await admin!.command("pair");expect(copied).toEqual(['{"secret":"test-only-enrollment"}']);
-			const comparison=confirm("phone","🐶".repeat(12));expect(widgets.at(-1)?.join(" ")).toContain("/away approve");
-			expect(awaySuggestions("app",admin!.comparisonCode)?.map(item=>item.value)).toEqual([widgets.at(-1)![1].match(/\/away (approve [0-9a-f]+)/)![1]]);
+			idle=true;await admin!.command("pair clipboard");expect(copied).toEqual(['{"secret":"test-only-enrollment"}']);
+			const comparison=confirm("phone","🐶".repeat(12));expect(typeof widgets.at(-1)).toBe("function");
+			expect(awaySuggestions("app",admin!.comparisonCode)?.map(item=>item.value)).toEqual([`approve ${admin!.comparisonCode}`]);
 			admin!.cancelEnrollment();expect(await comparison).toBe(false);expect(widgets.at(-1)).toBeUndefined();
 			expect(awaySuggestions("app",admin!.comparisonCode)).toBeNull();
 			expect(JSON.stringify([notices,widgets])).not.toContain("test-only-enrollment");

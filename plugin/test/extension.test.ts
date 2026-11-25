@@ -48,7 +48,7 @@ test("async offers work without native Collab, survive agent end and cannot outl
 	const off = events.on("omp-async-ask:connect:v1", request => {
 		if (request && typeof request === "object" && "accept" in request && typeof request.accept === "function") request.accept(source);
 	});
-	const api = { events, arktype, registerTool() {}, registerCommand() {}, on(name: string, handler: Handler) { handlers.set(name, handler); } } as unknown as ExtensionAPI;
+	const api = { events, arktype, registerMessageRenderer() {}, registerTool() {}, registerCommand() {}, on(name: string, handler: Handler) { handlers.set(name, handler); } } as unknown as ExtensionAPI;
 	away(api);
 	try {
 		await handlers.get("session_start")!({}, ctx);
@@ -94,7 +94,7 @@ test.each(["desktop-answer","cancel","room-loss","agent-end","shutdown"])("nativ
 	const events=new EventBus();
 	const ctx={cwd:"/example/project",agent:{kind:"main"},mode:"tui",isIdle:()=>true,
 		sessionManager:{getSessionId:()=>"owner",getSessionName:()=>"Native review"},ui:{notify(){}}} as unknown as ExtensionContext;
-	const api={events,arktype,registerTool(){},pi:{settings:{}},registerCommand(){},getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
+	const api={events,arktype,registerMessageRenderer(){},registerTool(){},pi:{settings:{}},registerCommand(){},getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
 		on(name:string,handler:Handler){handlers.set(name,handler)}} as unknown as ExtensionAPI;
 	away(api);
 	try {
@@ -130,7 +130,7 @@ test("assistant hangup is explicit, session-owned and cancellation-safe",async()
 	});
 	const handlers=new Map<string,(event:unknown,ctx:ExtensionContext)=>unknown>();
 	let tool!:ToolDefinition;
-	const api={events:new EventBus(),arktype,registerCommand(){},
+	const api={events:new EventBus(),arktype,registerCommand(){},registerMessageRenderer(){},
 		registerTool(value:ToolDefinition){tool=value},
 		on(name:string,handler:(event:unknown,ctx:ExtensionContext)=>unknown){handlers.set(name,handler)},
 	} as unknown as ExtensionAPI;

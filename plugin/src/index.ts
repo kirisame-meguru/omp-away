@@ -7,6 +7,7 @@ import { createResponder, type Responder } from "./collab/responder";
 import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
 import { awayHelp, awaySuggestions } from "./runtime/commands";
 import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
+import { CallMessage, clean, endCallRenderers } from "./presentation";
 
 export type Values = Record<string, string | number | boolean | string[]>;
 export interface AnswerNote { name: string; question: string; option: string; value: string; text: string }
@@ -68,6 +69,23 @@ function configuredPort(pi: ExtensionAPI): number | undefined {
 
 /** Each factory owns exactly one host session. Room loss invalidates even a same-session Ask. */
 export default function away(pi: ExtensionAPI): void {
+	for (const customType of ["omp-away:call", "omp-away:call-result"]) {
+		// Keep the component's local disclosure across host/theme invalidation.
+		const views = new WeakMap<object, { view: CallMessage; expanded: boolean }>();
+		pi.registerMessageRenderer(customType, (message, options) => {
+			let cached = views.get(message);
+			if (!cached) {
+				const content = typeof message.content === "string" ? message.content
+					: message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n");
+				cached = { view: new CallMessage(content, customType === "omp-away:call-result", options.expanded), expanded: options.expanded };
+				views.set(message, cached);
+			} else if (cached.expanded !== options.expanded) {
+				cached.expanded = options.expanded;
+				cached.view.setExpanded(options.expanded);
+			}
+			return cached.view;
+		});
+	}
 	let session: string | undefined;
 	let generation = 0;
 	let adapter: Adapter | undefined;
@@ -232,7 +250,7 @@ export default function away(pi: ExtensionAPI): void {
 				unavailable(reason: string) {
 					if (epoch === generation) {
 						logger.info("Away native bridge", { stage:"adapter-unavailable" });
-						ctx.ui.notify(`Away unavailable: ${reason}`, "error");
+						ctx.ui.notify(`Away unavailable: ${clean(reason)}`, "error");
 					}
 				},
 				lost() {
@@ -276,6 +294,7 @@ export default function away(pi: ExtensionAPI): void {
 		parameters: endCallParameters,
 		loadMode: "essential",
 		approval: "write",
+		...endCallRenderers,
 		async execute(_id, params, signal, _update, ctx) {
 			signal?.throwIfAborted();
 			const ended = owns(ctx) && !!admin && await admin.endCall(params.requestId);
