@@ -1,4 +1,5 @@
 import type { ExtensionContext, ExtensionLiveSession } from '@oh-my-pi/pi-coding-agent';
+import { logger } from '@oh-my-pi/pi-utils';
 import type { QuestionCall } from '../decisions';
 import { spawnPeer, type MediaPeer } from './peer';
 
@@ -37,11 +38,25 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 	let live:ExtensionLiveSession|undefined,peer:MediaPeer|undefined;
 	let closed=false,muted=false,cleanup:Promise<void>|undefined;
 	let output=Promise.resolve(),queued=0;
+	let stage='peer-offer';
+	const started=Date.now();
 	const ended=Promise.withResolvers<never>();
 	void ended.promise.catch(()=>{});
 	const abort=()=>{void close()};
 	function close(reason?:Error):Promise<void> {
 		if(cleanup) return cleanup;
+		// Keep diagnostics categorical: provider errors may contain private URLs or credentials.
+		const knownReasons=[
+			'Call context was not delivered','Session changed','Voice setup timed out',
+			'A live session is already active','Media peer unavailable','Phone audio transport stalled',
+			'Phone audio unavailable','Voice call ended',
+			'Finish the current speech-to-text capture before starting live mode.',
+		];
+		logger.debug('Away voice lifecycle ended',{
+			stage,elapsedMs:Date.now()-started,
+			reason:reason ? (knownReasons.includes(reason.message)?reason.message:'unclassified-error')
+				:call.signal.aborted?'question-aborted':'close-requested',
+		});
 		closed=true;clearTimeout(timer);call.signal.removeEventListener('abort',abort);
 		ended.reject(reason??Error('Voice call ended'));
 		cleanup=Promise.resolve().then(async()=>{
@@ -62,10 +77,13 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 		if(closed) return;
 		// Release a native Ask before live delegation needs the same agent loop.
 		// The phone call retains its route until the native live controller stops.
+		stage='question-takeover';
 		await call.takeOver();
 		if(closed) return;
+		stage='context-delivery';
 		await ctx.awayContext!(context);
 		if(closed) return;
+		stage='native-live';
 		live=await ctx.startLive!({
 			sdpOffer,
 			onPhase:phase=>{muted=phase==='muted'},
@@ -73,7 +91,9 @@ Question lifecycle: ending audio does not submit a form or mark a question answe
 			onEnd:reason=>{void close(reason)},
 		});
 		if(closed) {await live.stop();return}
+		stage='peer-answer';
 		await peer.answer(live.sdpAnswer,context);
+		stage='active';
 		clearTimeout(timer);
 	}
 	try {await Promise.race([start(),ended.promise]);call.signal.throwIfAborted();if(closed) throw Error('Voice call ended')}

@@ -11,7 +11,10 @@ const life=new AbortController(), release=Promise.withResolvers<void>();
 let startOptions:ExtensionLiveStartOptions|undefined;
 let emitAudio:((pcm:Uint8Array)=>void)|undefined;
 let audio=0;
-mock.module('@oh-my-pi/pi-utils',()=>({...utils,VERSION:version}));
+const diagnostics:unknown[]=[];
+mock.module('@oh-my-pi/pi-utils',()=>({...utils,VERSION:version,logger:{
+	...utils.logger,debug(message:string,fields:unknown){if(message==='Away voice lifecycle ended') diagnostics.push(fields)},
+}}));
 mock.module('../../src/media/peer',()=>({
 	spawnPeer(onAudio:(pcm:Uint8Array)=>void) {
 		++peers;order.push('peer');emitAudio=onAudio;
@@ -35,6 +38,7 @@ const ctx:VoiceContext={
 	async awayContext(content) {
 		order.push('context');
 		if(scenario==='context-failed') throw Error('context failed');
+		if(scenario==='context-timeout') throw Error('Call context was not delivered');
 		contexts.push(content);
 	},
 	async startLive(options) {
@@ -80,4 +84,4 @@ try {
 	}
 } catch(reason) {error=reason instanceof Error?reason.message:'Unknown failure'}
 finally {release.resolve()}
-console.log(JSON.stringify({error,peers,answers,pcm,closedPeers,closedTransports,ended,takeovers,order,contexts,captions,audio}));
+console.log(JSON.stringify({error,peers,answers,pcm,closedPeers,closedTransports,ended,takeovers,order,contexts,captions,audio,diagnostics}));

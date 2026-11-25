@@ -45,14 +45,17 @@ for(const scenario of ['missing-live','noncallable-live','missing-context','nonc
 	});
 }
 test.each([
-	['takeover-failed','takeover failed',0],
-	['context-failed','context failed',0],
-	['signaling-failed','signaling failed',0],
-	['peer-answer-failed','peer answer failed',1],
-])('native live releases resources on %s',async(scenario,message,closedTransports)=>{
+	['takeover-failed','takeover failed',0,'question-takeover'],
+	['context-failed','context failed',0,'context-delivery'],
+	['signaling-failed','signaling failed',0,'native-live'],
+	['peer-answer-failed','peer answer failed',1,'peer-answer'],
+])('native live releases resources on %s',async(scenario,message,closedTransports,stage)=>{
 	const result=await startup('19.1.1',scenario);
 	expect(result.error).toBe(message);
 	expect(result).toMatchObject({peers:1,answers:0,pcm:0,closedPeers:1,closedTransports,ended:1});
+	expect(result.diagnostics).toHaveLength(1);
+	expect(result.diagnostics[0]).toMatchObject({stage,reason:'unclassified-error'});
+	expect(JSON.stringify(result.diagnostics)).not.toContain(message);
 	if(scenario==='takeover-failed') expect(result.contexts).toEqual([]);
 	if(scenario==='context-failed') expect(result.order).not.toContain('live');
 });
@@ -60,4 +63,12 @@ test('a session returned after cancellation is stopped without answering the pee
 	const result=await startup('19.1.1','abort-during-start');
 	expect(result.error).toBeDefined();
 	expect(result).toMatchObject({peers:1,answers:0,closedPeers:1,closedTransports:1,ended:1});
+});
+test('context delivery timeout is retained categorically without logging call content',async()=>{
+	const result=await startup('19.1.1','context-timeout');
+	expect(result.diagnostics).toHaveLength(1);
+	expect(result.diagnostics[0]).toMatchObject({stage:'context-delivery',reason:'Call context was not delivered'});
+	expect(result.diagnostics[0].elapsedMs).toBeGreaterThanOrEqual(0);
+	expect(JSON.stringify(result.diagnostics)).not.toContain('Choose a drink');
+	expect(result.order).not.toContain('live');
 });
