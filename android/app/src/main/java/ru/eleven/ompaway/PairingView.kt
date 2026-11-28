@@ -9,9 +9,10 @@ import android.widget.TextView
 import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeCallback
 import com.journeyapps.barcodescanner.BarcodeResult
-import com.journeyapps.barcodescanner.BarcodeView
 import com.journeyapps.barcodescanner.CameraPreview
+import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
+import com.journeyapps.barcodescanner.camera.CameraSettings
 
 /** Pairing lives in the home card; camera and verification never launch an activity. */
 internal class PairingView(
@@ -27,7 +28,7 @@ internal class PairingView(
     private var code: String? = null
     private var scanning = false
     private var active = false
-    private var scanner: BarcodeView? = null
+    private var scanner: DecoratedBarcodeView? = null
 
     init {
         orientation = VERTICAL
@@ -49,11 +50,7 @@ internal class PairingView(
     fun setActive(value: Boolean) {
         if (active == value) return
         active = value
-        if (value && isAttachedToWindow) scanner?.resume() else scanner?.pause()
-        if (!value && scanning) {
-            scanning = false
-            bind()
-        }
+        if (!value) cancelScan()
     }
 
     fun startScan() {
@@ -100,13 +97,13 @@ internal class PairingView(
             }
             Mode.SCAN -> {
                 label(context.uiString(R.string.point_the_camera_at_the_qr_on_your_desktop))
-                val preview = BarcodeView(context).apply {
-                    setUseTextureView(true)
+                val preview = DecoratedBarcodeView(context).apply {
+                    statusView.visibility = GONE // The localized prompt is above the preview.
+                    cameraSettings.focusMode = CameraSettings.FocusMode.CONTINUOUS
                     decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
                 }
                 scanner = preview
-                body.addView(preview, LayoutParams(-1, RadianceUi.dp(context, 260)))
-                preview.addStateListener(object : CameraPreview.StateListener {
+                preview.barcodeView.addStateListener(object : CameraPreview.StateListener {
                     override fun previewSized() = Unit
                     override fun previewStarted() = Unit
                     override fun previewStopped() = Unit
@@ -126,8 +123,18 @@ internal class PairingView(
                         else { message(null); app.pair(raw) }
                     }
                 })
+                // ZXing creates its preview surface when the inner camera view attaches.
+                preview.barcodeView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(view: View) {
+                        if (active && scanner === preview) preview.resume()
+                    }
+
+                    override fun onViewDetachedFromWindow(view: View) {
+                        if (scanner === preview) preview.pause()
+                    }
+                })
+                body.addView(preview, LayoutParams(-1, RadianceUi.dp(context, 320)))
                 button(context.uiString(R.string.cancel_scan)) { cancelScan() }
-                if (active) preview.resume()
             }
             Mode.WAIT -> button(context.uiString(R.string.cancel_pairing)) { app.retry() }
             Mode.VERIFY -> {
@@ -163,16 +170,6 @@ internal class PairingView(
             }
             Mode.PAIRED -> Unit
         }
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        if (active) scanner?.resume()
-    }
-
-    override fun onDetachedFromWindow() {
-        scanner?.pause()
-        super.onDetachedFromWindow()
     }
 
     private fun label(value: String) {
