@@ -100,6 +100,8 @@ export default function away(pi: ExtensionAPI): void {
 	let mobileConfigured = false;
 	let ready = false;
 	let activeId: string | undefined;
+	// A native Ask is exclusive, so `away_call` can only arm the next one in this turn.
+	let armedCall: number | undefined;
 	const approvals = new Set<string>();
 	const calls = new Map<string, Call>();
 	const contextDeliveries = new Map<string, { done(): void; cancel(): void }>();
@@ -132,6 +134,7 @@ export default function away(pi: ExtensionAPI): void {
 		call.responder.clear();
 	}
 	function discard() {
+		armedCall = undefined;
 		for (const key of calls.keys()) finish(key);
 	}
 	async function stop() {
@@ -201,7 +204,11 @@ export default function away(pi: ExtensionAPI): void {
 			},
 		};
 		if (mobileConfigured) {
-			if(admin) admin.offer(pending, voiceContext(call.ctx));
+			if(admin) {
+				admin.offer(pending, voiceContext(call.ctx));
+				if (armedCall !== undefined && Date.now() < armedCall) ring(admin, requestId);
+				armedCall = undefined;
+			}
 			else notifications?.warn("mobile-outage","This question could not be forwarded to the phone. Answer on the desktop; inspect /away status.");
 		} else pi.events.emit("omp-away:pending-ask", pending); // isolated local-gate integration only
 		// Observe only after delivery; no capability, question, or session context crosses this boundary.
@@ -209,6 +216,15 @@ export default function away(pi: ExtensionAPI): void {
 			try { pi.events.emit("omp-away:offer-observed", Object.freeze({ toolCallId, requestId })); }
 			catch { /* A broken observer must not interrupt the native Ask. */ }
 		});
+	}
+
+	function ring(mobile: Admin, requestId: string) {
+		const epoch = generation;
+		void mobile.call(requestId).then(outcome => {
+			if (epoch !== generation) return;
+			logger.info("Away call", { outcome });
+			if (outcome === "unavailable") notifications?.warn(`call:${requestId}`, "The phone call could not be started. Answer on the desktop or open the phone inbox.");
+		}, () => { if (epoch === generation) notifications?.diagnostic("invite-unavailable"); });
 	}
 
 	async function start(ctx: ExtensionContext) {
@@ -316,6 +332,44 @@ export default function away(pi: ExtensionAPI): void {
 		}
 	}
 
+	const callParameters = pi.arktype({ "questionId?": "string", "nativeAsk?": "boolean" });
+	pi.registerTool<typeof callParameters>({
+		name: "away_call",
+		get label() { return t("Call phone"); },
+		description: "Optional: ring the user's paired Away phone like an incoming phone call so they can discuss a pending question by voice. Ordinary questions only appear as phone notifications that can be answered by touch; use this only when a live voice conversation is genuinely useful or urgent. A call always belongs to a pending question: pass `questionId` from an `ask_async` question that is still pending, or `nativeAsk: true` to ring for the native `ask` you invoke next. Because native `ask` blocks, emit `away_call` with `nativeAsk: true` immediately before `ask` in the same response; the arm lapses when the turn ends. For `questionId`, this waits up to 45 seconds and reports answered, declined, missed or closed. Never ring repeatedly for the same question after a decline or miss.",
+		parameters: callParameters,
+		approval: "write",
+		async execute(_id, params, signal, _update, ctx) {
+			signal?.throwIfAborted();
+			if ((params.questionId === undefined) === (params.nativeAsk !== true)) throw Error("Pass exactly one of questionId or nativeAsk: true.");
+			if (!owns(ctx) || !admin) throw Error("Away phone forwarding is unavailable in this session. Leave the question pending.");
+			if (params.nativeAsk) {
+				if (!ready || !adapter) throw Error("Native Ask forwarding is unavailable; the phone cannot be called for a native ask. Use ask_async with away_call questionId, or ask normally.");
+				armedCall = Date.now() + 120_000;
+				return {
+					content: [{ type: "text", text: "Call armed. The phone rings when your next native ask opens in this turn; call ask now." }],
+					details: { outcome: "armed" },
+				};
+			}
+			const requestId = asyncQuestions?.requestId(params.questionId!);
+			if (!requestId) throw Error("No pending async question with that ID is forwarded to the phone.");
+			const aborted = Promise.withResolvers<never>();
+			const onAbort = () => aborted.reject(signal!.reason);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			try {
+				const outcome = await Promise.race([admin.call(requestId), aborted.promise]);
+				const text = {
+					answered: "The user picked up; voice setup for this question was requested. Pickup is not proof that audio is ready.",
+					declined: "The user declined the call. The question stays pending; do not call again for it.",
+					missed: "The call was not answered within 45 seconds. The question stays pending and remains available as a phone notification.",
+					closed: "The question became unavailable before the call was answered.",
+					unavailable: "The phone could not be called for this question (no paired phone, an active call, or it is no longer pending).",
+				}[outcome];
+				return { content: [{ type: "text", text }], details: { outcome } };
+			} finally { signal?.removeEventListener("abort", onAbort); }
+		},
+	});
+
 	const endCallParameters = pi.arktype({ requestId: "string" });
 	pi.registerTool<typeof endCallParameters>({
 		name: "away_end_call",
@@ -336,7 +390,7 @@ export default function away(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("away", {
-		get description() { return t("Enable Away for all connected sessions; /away off disables immediate ringing"); },
+		get description() { return t("Enable Away for all connected sessions; /away off disables immediate phone notifications"); },
 		getArgumentCompletions: prefix => awaySuggestions(prefix, admin?.comparisonCode)?.map(item=>({...item,description:t(item.description)})) ?? null,
 		handler: async (args, ctx) => {
 			if (ctx.agent.kind !== "main" || ctx.mode !== "tui") return;

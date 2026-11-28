@@ -43,6 +43,7 @@ class Gateway : Application() {
             formMessages.keys.retainAll(submitting)
             localFormMessages.keys.retainAll(submitting)
             store.state.invalidateDetails()
+            notificationForms.keys.retainAll(submitting)
         }
         displayedLanguage = language
         Invites.refreshLanguage(this)
@@ -120,6 +121,13 @@ class Gateway : Application() {
         return if (local != null && local.second == value) uiString(local.first) else value
     }
     internal val submitting = mutableSetOf<String>()
+    /** Last authenticated schema per question, kept after the tunnel retires so the shade can render it. */
+    private val notificationForms = mutableMapOf<String, JSONObject>()
+    internal val notificationStates = mutableMapOf<String, NotificationForm.State>()
+    /** Drafts edited in the shade; an open in-app form must rebuild from them. */
+    internal val externalDrafts = mutableSetOf<String>()
+    /** Shade submissions waiting for an authenticated tunnel; never sent twice. */
+    private val queuedAnswers = linkedMapOf<String, Pair<JSONObject, JSONArray>>()
     internal var answerReceipt: String? = null
         private set
     internal fun takeAnswerReceipt(): String? {
@@ -139,8 +147,9 @@ class Gateway : Application() {
         s.channel.form(id)
         main.postDelayed({
             if (session === s && loadingForms[id] === load) {
+                loadingForms.remove(id)
                 setFormMessage(id, R.string.question_did_not_arrive_reconnect_to_refresh)
-                changed()
+                settleSync(); changed()
             }
         }, 30_000)
     }
@@ -151,22 +160,57 @@ class Gateway : Application() {
         acknowledge(id)
         answerReceipt = null
         submitting.add(id); setFormMessage(id, R.string.submitting)
-        awaitingReceipts.add(id)
         drafts[id] = values; noteDrafts[id] = notes
+        send(id, values, notes)
+    }
+
+    internal fun notificationForm(id: String): JSONObject? =
+        (notificationForms[id] ?: forms[id]?.takeIf { verifiedInbox })?.takeIf { id in store.state.pending }
+
+    /** Silently re-render an existing question notification after shade or receipt changes. */
+    internal fun refreshNotification(id: String) {
+        val item = store.state.pending[id] ?: return
+        if (id !in store.state.invited || id in store.state.silenced || id in store.state.acknowledged || id == callId) return
+        Invites.show(this, id, item)
+    }
+
+    internal fun notificationDraftChanged(id: String) {
+        externalDrafts.add(id)
+        refreshNotification(id)
+        changed() // Rebuild any open in-app form from the same draft immediately.
+    }
+
+    /** Submit from the notification shade, connecting in the background when needed. */
+    internal fun answerFromNotification(id: String, values: JSONObject, notes: JSONArray) {
+        drafts[id] = values; noteDrafts[id] = notes
+        if (!idle || requestedJoin != null || id in submitting || id !in store.state.pending) { refreshNotification(id); return }
+        answerReceipt = null
+        submitting.add(id); setFormMessage(id, R.string.submitting)
+        if (verifiedInbox) send(id, values, notes)
+        else {
+            queuedAnswers[id] = values to notes
+            if (observer != null || syncJob != null) { if (!current().connecting) connect() }
+            else SilenceJob.schedule(this, urgent = true)
+            refreshNotification(id); changed()
+        }
+    }
+
+    private fun send(id: String, values: JSONObject, notes: JSONArray) {
+        awaitingReceipts.add(id)
         val s = current()
         if (!s.channel.answer(id, values, notes)) {
             submitting.remove(id)
             awaitingReceipts.remove(id)
             setFormMessage(id, R.string.answer_was_not_sent_check_the_connection_or_shorten_your)
-            changed(); return
+            refreshNotification(id); changed(); return
         }
         main.postDelayed({
             if (session === s && id in submitting && localFormMessages[id]?.first == R.string.submitting) {
                 setFormMessage(id, R.string.submission_not_confirmed_check_the_desktop_before_retrying)
-                changed()
+                refreshNotification(id); changed()
             }
         }, 30_000)
-        changed()
+        refreshNotification(id); changed()
     }
 
     private fun invalidateForms() {
@@ -175,7 +219,8 @@ class Gateway : Application() {
         awaitingReceipts.clear()
         formMessages.keys.retainAll(submitting)
         localFormMessages.keys.retainAll(submitting)
-        for (id in submitting) setFormMessage(id, R.string.submission_not_confirmed_check_the_desktop_before_retrying)
+        // A queued shade answer was never sent; it may still go out on the next authenticated tunnel.
+        for (id in submitting) if (id !in queuedAnswers) setFormMessage(id, R.string.submission_not_confirmed_check_the_desktop_before_retrying)
     }
 
     override fun onCreate() {
@@ -319,7 +364,7 @@ class Gateway : Application() {
             Invites.show(this, id)
         }
         if (verifiedInbox) current().channel.list()
-        SilenceJob.schedule(this)
+        if (syncJob == null) SilenceJob.schedule(this, urgent = true)
         changed()
     }
 
@@ -347,6 +392,11 @@ class Gateway : Application() {
                 if (observer == null && call == null) retire()
             }
         }
+    }
+
+    /** A background sync stays alive for shade forms and answer receipts it is responsible for. */
+    private fun settleSync() {
+        if (syncJob != null && queuedAnswers.isEmpty() && awaitingReceipts.isEmpty() && loadingForms.isEmpty()) finishSync(false)
     }
 
     private fun finishSync(retry: Boolean) {
@@ -468,9 +518,10 @@ class Gateway : Application() {
         DebugDiagnostics.record(DiagnosticEvent.INBOX_RECEIVED, items.size)
         finishRefresh()
         val channel = current().channel
-        val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session) })
+        val removed = store.reconcile(items.map { Pending(it.requestId, it.project, it.question, it.createdAt, it.session, it.call) })
         for (id in removed) {
             staleSubmittedForms.remove(id)
+            notificationForms.remove(id); notificationStates.remove(id); externalDrafts.remove(id); queuedAnswers.remove(id)
             forms.remove(id); drafts.remove(id); noteDrafts.remove(id)
             loadingForms.remove(id); formMessages.remove(id); localFormMessages.remove(id)
         }
@@ -478,6 +529,11 @@ class Gateway : Application() {
         for (id in removed) Invites.cancel(this, id)
         verifiedInbox = true; sentSilences.removeAll(removed)
         inboxConnection = InboxConnection.CONNECTED
+        // Consume fresh call tokens before forwarding old silences; an earlier "Not now"
+        // must not immediately decline a new explicit call.
+        val incoming = if (idle) store.state.pending.values.filter { it.id !in submitting && store.ring(it) }.map { it.id }.toSet()
+            else emptySet()
+        sentSilences.removeAll(incoming)
         val toSilence = store.state.silenced.filter { sentSilences.add(it) }
         toSilence.forEach { channel.silence(it) }
         if (callId?.let { it !in store.state.pending } == true) endCall(DiagnosticEvent.END_QUESTION_REMOVED, UiMessage(R.string.request_closed_on_desktop))
@@ -488,15 +544,28 @@ class Gateway : Application() {
             if (answer in store.state.pending) startCall(answer)
             else statusMessage = UiMessage(R.string.that_request_is_no_longer_pending_nothing_was_joined)
         }
+        for ((id, answer) in queuedAnswers.toList()) {
+            queuedAnswers.remove(id)
+            if (id in store.state.pending && idle) send(id, answer.first, answer.second)
+            else { submitting.remove(id); setFormMessage(id, R.string.answer_was_not_sent_check_the_connection_or_shorten_your) }
+        }
         for (item in store.state.pending.values) {
+            if (item.call == null) Invites.cancelRinging(this, item.id)
+            // Only an explicit desktop call rings, once per call token.
+            if (item.id in incoming) {
+                Invites.show(this, item.id, item, alert = true, call = true)
+                continue
+            }
             val alert = store.consumeAlert(item.id)
-            if (item.id in store.state.invited && item.id !in store.state.silenced && item.id !in store.state.acknowledged && item.id != callId)
+            if (item.id in store.state.invited && item.id !in store.state.silenced && item.id !in store.state.acknowledged && item.id != callId) {
                 Invites.show(this, item.id, item, alert, !idle)
+                if (inviteSettings.showPreview && item.id !in notificationForms) loadForm(item.id)
+            }
         }
         store.needsSync = false
         if (syncJob != null) {
             // A list response following silence fences its delivery on this ordered socket.
-            if (toSilence.isNotEmpty()) channel.list() else finishSync(false)
+            if (toSilence.isNotEmpty()) channel.list() else settleSync()
         }
         changed()
     }
@@ -521,7 +590,7 @@ class Gateway : Application() {
 
         override fun onForm(requestId: String, form: JSONObject?, language: String?) = ui {
             val load = loadingForms.remove(requestId)
-            if (!verifiedInbox || requestId !in store.state.pending) return@ui
+            if (!verifiedInbox || requestId !in store.state.pending) { settleSync(); return@ui }
             if ((language ?: load?.language)?.let { it != AppLanguage.effective(this@Gateway) } == true) {
                 // The old reply releases the desktop's outstanding-request correlation.
                 if (localFormMessages[requestId]?.first == R.string.question_did_not_arrive_reconnect_to_refresh) {
@@ -534,12 +603,16 @@ class Gateway : Application() {
             staleSubmittedForms.remove(requestId)
             if (form != null) {
                 forms[requestId] = form
+                notificationForms[requestId] = form
                 if (requestId !in submitting) formMessages.remove(requestId)
             } else {
                 forms.remove(requestId)
+                notificationForms.remove(requestId)
                 if (requestId !in submitting)
                     setFormMessage(requestId, R.string.touch_answers_are_unavailable_for_this_question_review_details_or)
             }
+            refreshNotification(requestId)
+            settleSync()
             changed()
         }
 
@@ -558,9 +631,13 @@ class Gateway : Application() {
             }
             if (status == "accepted" || status == "stale") {
                 forms.remove(requestId); drafts.remove(requestId); noteDrafts.remove(requestId)
+                notificationForms.remove(requestId); notificationStates.remove(requestId)
                 staleSubmittedForms.remove(requestId)
+                Invites.cancel(this@Gateway, requestId)
+                if (observer == null && status == "accepted") Invites.receipt(this@Gateway, requestId, message)
                 channel.list()
-            }
+            } else refreshNotification(requestId)
+            settleSync()
             changed()
         }
 

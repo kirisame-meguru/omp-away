@@ -12,7 +12,7 @@ import { clean, PairingComparison } from "../presentation";
 import { AwayNotifications } from "./notifications";
 import { message, routingStatus } from "../messages";
 
-export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"close"|"ringing"> {
+export interface Admin extends Pick<MobileRuntime,"offer"|"end"|"endCall"|"call"|"close"|"ringing"> {
 	readonly comparisonCode?: string;
 	command(args:string):Promise<void>;
 	cancelEnrollment():void;
@@ -118,7 +118,7 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 	return {
 		get ringing() { return runtime.ringing },
 		get comparisonCode() { return enrollment.comparisonCode },
-		offer:runtime.offer,end:runtime.end,endCall:runtime.endCall,cancelEnrollment,
+		offer:runtime.offer,end:runtime.end,endCall:runtime.endCall,call:runtime.call,cancelEnrollment,
 		async command(raw) {
 			if (!current()) return;
 			const args=raw.trim(), decision=/^(approve|deny) ([a-f0-9]{12})$/.exec(args);

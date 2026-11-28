@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { spansText } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 import type { PendingAsk } from "../index";
-import { DecisionCoordinator, type QuestionCall, type Preferences } from "../decisions";
+import { DecisionCoordinator, type CallOutcome, type QuestionCall, type Preferences } from "../decisions";
 import { displayExcerpt } from "../decisions/display";
 import { openVoice, type VoiceCall, type VoiceContext } from "../media";
 import { startSecureDesktop, type DesktopControl, type SecureDesktop, type SecureDesktopOptions } from "../secure-channel";
@@ -16,6 +16,8 @@ export interface MobileRuntime {
 	offer(ask:PendingAsk,ctx:AskContext):void;
 	end(requestId:string):void;
 	endCall(requestId:string):Promise<boolean>;
+	/** Explicitly ring paired handsets for a question already offered here. */
+	call(requestId:string):Promise<CallOutcome|"unavailable">;
 	configure(patch:Partial<Preferences>):Promise<void>;
 	pair():Promise<string>;
 	close():Promise<void>;
@@ -37,23 +39,27 @@ export async function connectRuntime(settings:Settings,report:(code:string,reque
 	const devices=new Set<string>(),online=new Set<string>(),details=new Set<string>();
 	const connections=new Map<string,symbol>();
 	const invalidations=new Set<Promise<void>>(),closing=new Set<Promise<void>>();
-	const requests=new Map<string,{ctx:AskContext;audience:Set<string>;abort:AbortController;translations:Map<Language,Translation>}>();
+	const requests=new Map<string,{ctx:AskContext;audience:Set<string>;wakeups:Set<string>;abort:AbortController;translations:Map<Language,Translation>}>();
 	const core=new DecisionCoordinator({
 		error(code,id){if(code!=="unsupported-form" || prefs.away || prefs.delayMs!==null) report(code,id)},
-		async invite(id) {
-			const audience=requests.get(id)?.audience;
+		async invite(id,wakeup=id) {
+			const entry=requests.get(id);
+			const audience=entry?.audience;
 			state();
 			if(audience?.size&&!closed) {
-				await Promise.any(Array.from(audience,device=>gateway!.ring(device,id)));
+				// A call needs a fresh opaque wakeup: the relay deduplicates question invitations.
+				entry!.wakeups.add(wakeup);
+				await Promise.any(Array.from(audience,device=>gateway!.ring(device,wakeup)));
 				if(!closed) feedback?.recover("invite");
 			}
 		},
 		retired(id) {
-			const audience=requests.get(id)?.audience;
-			requests.get(id)?.abort.abort();
+			const entry=requests.get(id);
+			const audience=entry?.audience;
+			entry?.abort.abort();
 			if(!audience||!gateway) return;
-			for(const device of audience) {
-				const pending=gateway.invalidate(device,id).catch(()=>{if(!closed) report("invalidation-unavailable")});
+			for(const device of audience) for(const wakeup of entry!.wakeups) {
+				const pending=gateway.invalidate(device,wakeup).catch(()=>{if(!closed) report("invalidation-unavailable")});
 				invalidations.add(pending);void pending.finally(()=>invalidations.delete(pending));
 			}
 			requests.delete(id);
@@ -255,7 +261,7 @@ export async function connectRuntime(settings:Settings,report:(code:string,reque
 		get ringing(){return prefs.away || prefs.delayMs!==null},
 		offer(ask,ctx){
 			if(closed||!devices.size||requests.has(ask.requestId)) return;
-			requests.set(ask.requestId,{ctx,audience:new Set(devices),abort:new AbortController(),translations:new Map()});
+			requests.set(ask.requestId,{ctx,audience:new Set(devices),wakeups:new Set([ask.requestId]),abort:new AbortController(),translations:new Map()});
 			let session:string|undefined;
 			try {
 				const name=ctx.sessionManager.getSessionName?.();
@@ -270,6 +276,22 @@ export async function connectRuntime(settings:Settings,report:(code:string,reque
 			call.question.close();
 			await Promise.all(closing);
 			return true;
+		},
+		async call(id) {
+			const entry=requests.get(id);
+			if(closed||!entry?.audience.size) return "unavailable";
+			const pending=core.call(id);
+			if(!pending) return "unavailable";
+			const token=core.list().find(item=>item.requestId===id)?.call;
+			const outcome=await pending;
+			// Wake idle phones after the ringing window so they retire the call UI and
+			// restore the still-pending question. No relay protocol/content change.
+			if(!closed&&token&&(outcome==="missed"||outcome==="declined")) {
+				await Promise.all(Array.from(entry.audience,device=>gateway!.invalidate(device,token).catch(()=>{
+					if(!closed) report("invalidation-unavailable");
+				})));
+			}
+			return outcome;
 		},
 		async configure(patch){if(closed) throw Error("runtime-closed");await gateway!.routing(patch)},
 		pair:()=>gateway!.pair(),

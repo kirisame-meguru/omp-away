@@ -19,8 +19,6 @@
     <string name="notification_previews">"Notification previews"</string>
     <string name="show_question_previews_lock_screen_privacy_still_applies_public_notifications">"Show question previews. Lock-screen privacy still applies; public notifications stay redacted."</string>
     <string name="invitations">"Invitations"</string>
-    <string name="ringing_invitations">"Ringing invitations"</string>
-    <string name="turn_off_for_notifications_only_system_sound_vibration_and_do">"Turn off for notifications only. System sound, vibration and Do Not Disturb settings apply."</string>
     <string name="full_screen_calls_are_unavailable_incoming_calls_use_notifications_instead">"Full-screen calls are unavailable. Incoming calls use notifications instead."</string>
     <string name="full_screen_call_settings">"Full-screen call settings"</string>
     <string name="question_details">"Question details"</string>
@@ -138,7 +136,6 @@
     <string name="a_request_is_pending_on_your_paired_desktop">"A request is pending on your paired desktop."</string>
     <string name="open_away_to_review">"Open Away to review."</string>
     <string name="answer_call">"Answer call"</string>
-    <string name="decline">"Decline"</string>
     <string name="incoming_call">"Incoming call"</string>
     <string name="unlock_to_review_the_question_answer_starts_a_voice_call">"Unlock to answer the call."</string>
     <string name="read_only_question_and_options">"Read-only question and options"</string>
@@ -194,4 +191,12 @@
         <item quantity="one">"Use at most %1$d character."</item>
         <item quantity="other">"Use at most %1$d characters."</item>
     </plurals>
+    <string name="questions_arrive_as_notifications_calls_ring_only_when_requested">"Questions arrive as notifications you can answer from the notification shade. Your phone rings only when the desktop agent calls you about a question."</string>
+    <string name="notification_submit">"Submit"</string>
+    <string name="notification_other_answer">"Other answer"</string>
+    <string name="notification_add_note">"Add note"</string>
+    <string name="notification_edit_note">"Edit note"</string>
+    <string name="notification_type_hint">"Use “Your answer” below to type."</string>
+    <string name="notification_previous">"‹ Back"</string>
+    <string name="notification_next">"Next ›"</string>
 </resources>

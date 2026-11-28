@@ -74,13 +74,15 @@ internal fun decodeInboxSnapshot(message: JSONObject): List<InboxItem> {
     val items = message.getJSONArray("items")
     val ids = HashSet<String>()
     return List(items.length()) { index -> items.getJSONObject(index).run {
-        if (has("session")) fields("requestId", "project", "question", "createdAt", "session")
-        else fields("requestId", "project", "question", "createdAt")
+        fields(*(listOf("requestId", "project", "question", "createdAt") +
+            listOf("session", "call").filter(::has)).toTypedArray())
         val id = text("requestId"); require(validId(id) && ids.add(id))
         val project = get("project") as String
         val question = get("question") as String
         val session = if (has("session")) get("session") as String else null
+        // An explicit desktop call carries a one-use opaque ring token; ordinary questions never ring.
+        val call = if (has("call")) (get("call") as String).also { require(it.length in 1..128 && it.all { c -> c.isLetterOrDigit() && c.code < 128 || c == '-' || c == '_' }) } else null
         require(project.length <= 8192 && question.length <= 8192 && (session == null || session.length <= 128))
-        InboxItem(id, project, question, (get("createdAt") as Long).also { require(it >= 0) }, session)
+        InboxItem(id, project, question, (get("createdAt") as Long).also { require(it >= 0) }, session, call)
     } }
 }

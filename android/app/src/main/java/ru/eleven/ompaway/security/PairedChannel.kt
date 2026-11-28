@@ -31,7 +31,7 @@ import org.json.JSONArray
 import ru.eleven.ompaway.QuestionDisplay
 import ru.eleven.ompaway.decodeQuestionDisplay
 
-data class InboxItem(val requestId: String, val project: String, val question: String, val createdAt: Long, val session: String? = null)
+data class InboxItem(val requestId: String, val project: String, val question: String, val createdAt: Long, val session: String? = null, val call: String? = null)
 
 /** One application-owned instance. Listener callbacks are serialized, off the main thread. */
 class PairedChannel(context: Context, private val listener: Listener) : Closeable {

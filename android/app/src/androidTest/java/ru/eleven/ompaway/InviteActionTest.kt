@@ -29,7 +29,7 @@ class InviteActionTest {
             val note = Invites.notification(target, id)
             assertNotNull(note.deleteIntent)
             assertNotNull(note.contentIntent)
-            assertEquals(listOf("Answer call", "Not now"), note.actions.map { it.title.toString() })
+            assertEquals(listOf("Answer by voice", "Not now"), note.actions.map { it.title.toString() })
             assertNotEquals(note.contentIntent, note.actions[0].actionIntent)
             assertNotEquals(note.actions[0].actionIntent, Invites.notification(target, "$id-2").actions[0].actionIntent)
             assertEquals("Desktop request", note.extras.getString(Notification.EXTRA_TITLE))
@@ -91,9 +91,8 @@ class InviteActionTest {
         try {
             val settings = InviteSettings(isolated)
             assertFalse(settings.showPreview)
-            assertFalse(settings.callMode)
-            settings.callMode = true; settings.showPreview = true
-            assertTrue(InviteSettings(isolated).callMode)
+            settings.showPreview = true
+            assertTrue(InviteSettings(isolated).showPreview)
             val item = Pending("request", "Project", "Private question", 1, "Private session")
             val note = Invites.notification(isolated, item.id, item, ring = true)
             assertEquals("Private session", note.extras.getString(Notification.EXTRA_TITLE))
@@ -105,7 +104,7 @@ class InviteActionTest {
             assertTrue(note.flags and Notification.FLAG_INSISTENT != 0)
             if (Build.VERSION.SDK_INT >= 31)
                 assertEquals(Notification.CallStyle::class.java.name, note.extras.getString(Notification.EXTRA_TEMPLATE))
-            else assertEquals(listOf("Answer call", "Decline"), note.actions.map { it.title.toString() })
+            else assertEquals(listOf("Answer call", "Not now"), note.actions.map { it.title.toString() })
             if (Build.VERSION.SDK_INT >= 34 &&
                 !target.getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent())
                 assertNull(note.fullScreenIntent)
@@ -135,7 +134,47 @@ class InviteActionTest {
         } finally { target.deleteSharedPreferences(name) }
     }
 
-    @Test fun notificationPermissionDenialCannotBeBypassedByCallMode() {
+    @Test fun explicitCallClearsOldSilenceButCannotRingTheSameTokenAfterRestart() {
+        val target = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "away-test-${UUID.randomUUID()}"
+        val isolated = object : ContextWrapper(target) {
+            override fun getSharedPreferences(ignored: String, mode: Int): SharedPreferences =
+                target.getSharedPreferences(name, mode)
+        }
+        try {
+            val store = InboxStore(isolated)
+            val item = Pending("call-question", "Example", "Still pending", 1, call = "call-token")
+            store.reconcile(listOf(item))
+            store.silence(item.id); store.acknowledge(item.id)
+            assertTrue(store.ring(item))
+            assertFalse(item.id in store.state.silenced)
+            assertFalse(item.id in store.state.acknowledged)
+            assertTrue(item.id in store.state.invited)
+            val reopened = InboxStore(isolated)
+            assertFalse(reopened.ring(item))
+            assertTrue(item.id in reopened.state.pending)
+            assertTrue(reopened.ring(item.copy(call = "another-call-token")))
+        } finally { target.deleteSharedPreferences(name) }
+    }
+
+    @Test fun localeRefreshDoesNotTurnAReceiptIntoAPermanentQuestion() {
+        org.junit.Assume.assumeTrue(BuildConfig.ISOLATED_INTEGRATION)
+        val instrument = InstrumentationRegistry.getInstrumentation()
+        val context = instrument.targetContext
+        org.junit.Assume.assumeTrue(Invites.allowed(context))
+        val manager = context.getSystemService(android.app.NotificationManager::class.java)
+        val id = "receipt-locale-test"
+        try {
+            instrument.runOnMainSync { Invites.receipt(context, id, "Answer submitted") }
+            instrument.waitForIdleSync()
+            instrument.runOnMainSync { Invites.refreshLanguage(context.applicationContext as Gateway) }
+            val receipt = manager.activeNotifications.single { it.tag == id && it.id == 2 }.notification
+            assertEquals(4_000L, receipt.timeoutAfter)
+            assertEquals("Answer submitted", receipt.extras.getString(Notification.EXTRA_TITLE))
+        } finally { manager.cancel(id, 2) }
+    }
+
+    @Test fun notificationPermissionDenialCannotBeBypassedByACall() {
         if (Build.VERSION.SDK_INT < 33) return
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val denied = object : ContextWrapper(target) {

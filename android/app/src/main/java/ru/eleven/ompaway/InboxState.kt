@@ -1,6 +1,6 @@
 package ru.eleven.ompaway
 
-internal data class Pending(val id: String, val project: String, val question: String, val createdAt: Long, val session: String? = null)
+internal data class Pending(val id: String, val project: String, val question: String, val createdAt: Long, val session: String? = null, val call: String? = null)
 internal fun validId(value: String) = value.length in 1..256 && value.all { it.code in 33..126 }
 internal enum class Arrival { IGNORE, CACHE, NOTIFY }
 internal fun freshInvite(sent: Long, ttl: Int, now: Long) = sent > 0 && ttl >= 0 && (ttl == 0 || now - sent < ttl * 1000L)
@@ -12,6 +12,8 @@ internal class InboxState {
     val closed = linkedSetOf<String>()
     val alerted = linkedSetOf<String>()
     val acknowledged = linkedSetOf<String>()
+    /** One-use explicit call tokens already rung; a reconnect never rings the same call twice. */
+    val rung = linkedSetOf<String>()
     val details = mutableMapOf<String, QuestionDisplay>()
     val proposals = mutableMapOf<String, String>()
 
@@ -35,6 +37,16 @@ internal class InboxState {
     fun invite(id: String, notificationAllowed: Boolean): Arrival {
         if (!validId(id) || id in silenced || id in closed || !invited.add(id)) return Arrival.IGNORE
         return if (notificationAllowed) Arrival.NOTIFY else Arrival.CACHE
+    }
+
+    /** An explicit desktop call is a fresh invitation even after an earlier "Not now". */
+    fun ring(item: Pending): Boolean {
+        val token = item.call ?: return false
+        if (item.id !in pending || item.id in closed || !rung.add(token)) return false
+        while (rung.size > 64) rung.remove(rung.first())
+        silenced.remove(item.id); acknowledged.remove(item.id)
+        invited.add(item.id); alerted.add(item.id)
+        return true
     }
 
     fun silence(id: String) {

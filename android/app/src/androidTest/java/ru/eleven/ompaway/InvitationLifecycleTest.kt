@@ -25,24 +25,39 @@ class InvitationLifecycleTest {
         assumeTrue(InstrumentationRegistry.getArguments().getString("disposableLifecycle") == "true")
         val context = instrument.targetContext
         val app = context.applicationContext as Gateway
+        val native = "test-native-request"
+        val async = "test-async-request"
+        val declined = "test-declined-request"
+        // Recover only this fixture's IDs after a previous test-process crash.
+        instrument.runOnMainSync {
+            if (BuildConfig.ISOLATED_INTEGRATION && !app.paired) {
+                for (id in listOf(native, async, declined)) {
+                    Invites.cancel(context, id)
+                    app.store.state.pending.remove(id); app.store.state.invited.remove(id)
+                    app.store.state.silenced.remove(id); app.store.state.closed.remove(id)
+                    app.store.state.alerted.remove(id); app.store.state.acknowledged.remove(id)
+                    app.store.state.rung.remove("call-token-$id")
+                }
+                app.store.reconcile(app.store.state.pending.values.toList())
+            }
+        }
         var unpaired = false
         instrument.runOnMainSync { unpaired = !app.paired && app.store.state.pending.isEmpty() && app.store.state.invited.isEmpty() }
         assumeTrue("Never alter an existing pairing or inbox", unpaired)
         assumeTrue(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
         assumeTrue(Invites.allowed(context, Invites.CHANNEL))
         val manager = context.getSystemService(NotificationManager::class.java)
-        val oldCallMode = app.inviteSettings.callMode
         val oldPreview = app.inviteSettings.showPreview
-        val native = "test-native-request"
-        val async = "test-async-request"
-        val declined = "test-declined-request"
+        val screen = ScreenPreferences(context)
+        val oldQuality = screen.quality
         var activity: Activity? = null
         var covering: Activity? = null
-        fun snapshot(vararg ids: String) {
+        fun snapshot(vararg ids: String, call: String? = null) {
             val rows = JSONArray()
             for (id in ids) rows.put(JSONObject().put("requestId", id).put("project", "Example project")
                 .put("session", if (id == native) "Native session" else "Async session")
-                .put("question", if (id == native) "Choose the native option?" else "Choose the async option?").put("createdAt", 1200L))
+                .put("question", if (id == native) "Choose the native option?" else "Choose the async option?").put("createdAt", System.currentTimeMillis())
+                .apply { if (id == call) put("call", "call-token-$id") })
             val decoded = decodeInboxSnapshot(bytesJson(JSONObject().put("type", "inbox").put("items", rows).toString().toByteArray()))
             instrument.runOnMainSync { app.reconcileInbox(decoded) }
         }
@@ -57,7 +72,7 @@ class InvitationLifecycleTest {
             assertTrue(message, condition())
         }
         try {
-            instrument.runOnMainSync { app.inviteSettings.callMode = false; app.inviteSettings.showPreview = true }
+            instrument.runOnMainSync { app.inviteSettings.showPreview = true; screen.quality = 2 }
             activity = instrument.startActivitySync(Intent(context, InboxActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             instrument.runOnMainSync {
                 app.receivedInvite(native, true); app.receivedInvite(async, true)
@@ -70,14 +85,15 @@ class InvitationLifecycleTest {
             assertEquals("Choose the native option?", notes()[native]!!.notification.extras.getString(android.app.Notification.EXTRA_TEXT))
             val staleAnswer = notes()[native]!!.notification.actions.first().actionIntent
             val asyncAnswer = notes()[async]!!.notification.actions.first().actionIntent
-            instrument.runOnMainSync {
-                app.inviteSettings.callMode = true; app.invitationSettingsChanged()
-            }
+            instrument.runOnMainSync { app.invitationSettingsChanged() }
+            // Questions never ring; only an explicit desktop call token does, once.
             assertTrue(notes().values.none { it.notification.flags and android.app.Notification.FLAG_INSISTENT != 0 })
             assumeTrue(Invites.allowed(context, Invites.CALL_CHANNEL))
             instrument.runOnMainSync { app.receivedInvite(declined, true) }
             snapshot(native, async, declined)
-            await("New call invitation never entered ringing presentation") {
+            assertTrue(notes().values.none { it.notification.flags and android.app.Notification.FLAG_INSISTENT != 0 })
+            snapshot(native, async, declined, call = declined)
+            await("Explicit call never entered ringing presentation") {
                 notes()[declined]?.notification?.flags?.and(android.app.Notification.FLAG_INSISTENT) == android.app.Notification.FLAG_INSISTENT
             }
             val incoming = notes()[declined]!!.notification
@@ -85,6 +101,8 @@ class InvitationLifecycleTest {
             val declineAction = incoming.actions.single { it.actionIntent == incoming.deleteIntent }
             declineAction.actionIntent.send()
             await("Decline did not cancel its own notification") { declined !in notes() }
+            snapshot(native, async, declined, call = declined)
+            assertFalse("A reconnect rang the same call twice", declined in notes())
             instrument.runOnMainSync {
                 assertTrue(declined in app.store.state.pending)
                 assertTrue(declined in app.store.state.silenced)
@@ -129,13 +147,15 @@ class InvitationLifecycleTest {
         } finally {
             instrument.runOnMainSync {
                 app.hangup(); covering?.finish(); activity?.finish()
-                app.inviteSettings.callMode = oldCallMode; app.inviteSettings.showPreview = oldPreview
+                app.inviteSettings.showPreview = oldPreview
+                screen.quality = oldQuality
                 // Test-owned IDs only; never clear a real pairing or shared device storage.
                 for (id in listOf(native, async, declined)) {
                     Invites.cancel(context, id)
                     app.store.state.pending.remove(id); app.store.state.invited.remove(id)
                     app.store.state.silenced.remove(id); app.store.state.closed.remove(id)
                     app.store.state.alerted.remove(id); app.store.state.acknowledged.remove(id)
+                    app.store.state.rung.remove("call-token-$id")
                 }
                 app.store.reconcile(app.store.state.pending.values.toList())
                 app.store.needsSync = false

@@ -28,6 +28,7 @@
             <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
         </service>
         <receiver android:name=".NotNowReceiver" android:exported="false" />
+        <receiver android:name=".NotificationFormReceiver" android:exported="false" />
         <service android:name=".SilenceJob" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
         <service android:name=".VoiceForegroundService" android:exported="false" android:foregroundServiceType="microphone" android:stopWithTask="false" />
     </application>

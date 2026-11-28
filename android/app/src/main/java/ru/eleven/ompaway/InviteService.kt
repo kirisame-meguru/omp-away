@@ -56,26 +56,23 @@ internal object Invites {
         ensureChannel(app)
         val manager = app.getSystemService(NotificationManager::class.java) ?: return
         for (active in manager.activeNotifications) {
-            // Keep an in-flight invitation's platform-owned ringtone and expiry intact.
-            if (active.notification.flags and Notification.FLAG_INSISTENT != 0) continue
+            // Preserve platform-owned ringing and short-lived answer-receipt expiry.
+            if (active.id == 2 || active.notification.flags and Notification.FLAG_INSISTENT != 0) continue
             val ongoing = active.notification.channelId == ONGOING_CHANNEL
             val id = if (ongoing) app.callId else active.tag
             if (id == null || !validId(id)) continue
             val item = if (app.verifiedInbox) app.store.state.pending[id] else null
-            val note = notification(app, id, item, ongoing = ongoing)
-            val silent = Notification.Builder.recoverBuilder(AppLanguage.context(app), note)
-                .setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY).build()
-            try { manager.notify(active.tag, active.id, silent) } catch (_: SecurityException) { }
+            try { manager.notify(active.tag, active.id, notification(app, id, item, ongoing = ongoing, silent = true)) } catch (_: SecurityException) { }
         }
     }
 
-    fun allowed(context: Context, channel: String = if (InviteSettings(context).callMode) CALL_CHANNEL else CHANNEL): Boolean =
+    fun allowed(context: Context, channel: String = CHANNEL): Boolean =
         (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
         context.getSystemService(NotificationManager::class.java)?.let {
             it.areNotificationsEnabled() && (it.getNotificationChannel(channel)?.importance ?: 0) > NotificationManager.IMPORTANCE_NONE
         } == true
 
-    private fun intent(context: Context, id: String, action: String, activity: Boolean): PendingIntent {
+    internal fun intent(context: Context, id: String, action: String, activity: Boolean): PendingIntent {
         val uri = Uri.Builder().scheme("omp-away").authority("invite").appendPath(id).appendPath(action).build()
         val intent = Intent(context, if (activity) InboxActivity::class.java else NotNowReceiver::class.java)
             .setAction(action).setData(uri).putExtra(ID, id)
@@ -87,7 +84,7 @@ internal object Invites {
         else PendingIntent.getBroadcast(context, 0, intent, FLAGS)
     }
 
-    fun notification(context: Context, id: String, item: Pending? = null, ring: Boolean = false, ongoing: Boolean = false): Notification {
+    fun notification(context: Context, id: String, item: Pending? = null, ring: Boolean = false, ongoing: Boolean = false, silent: Boolean = false): Notification {
         val settings = InviteSettings(context)
         val localized = AppLanguage.context(context)
         val channel = if (ongoing) ONGOING_CHANNEL else if (ring) CALL_CHANNEL else CHANNEL
@@ -109,48 +106,64 @@ internal object Invites {
             .setCategory(if (ring || ongoing) Notification.CATEGORY_CALL else Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(publicVersion)
             .setContentIntent(open).setDeleteIntent(negative).setOnlyAlertOnce(true).setOngoing(ongoing)
+        // Suppress sound/vibration on wakeups and refreshes, without changing channels.
+        if (silent) builder.setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
         if (ongoing) {
             if (Build.VERSION.SDK_INT >= 31) builder.setStyle(Notification.CallStyle.forOngoingCall(
                 Person.Builder().setName(title).build(), negative))
             else builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.hang_up), negative).build())
+        } else if (!ring) {
+            // A question is not a call: answer it by touch in the shade, or open it.
+            val app = context.applicationContext as? Gateway
+            val form = if (settings.showPreview && item != null) app?.notificationForm(id) else null
+            if (form == null || !NotificationForm.decorate(context, builder, app!!, id, form, negative)) {
+                builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.answer_by_voice), answer).build())
+                builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.not_now), negative).build())
+            }
         } else {
-            if (ring && Build.VERSION.SDK_INT >= 31) builder.setStyle(Notification.CallStyle.forIncomingCall(
+            if (Build.VERSION.SDK_INT >= 31) builder.setStyle(Notification.CallStyle.forIncomingCall(
                 Person.Builder().setName(title).build(), negative, answer))
             else {
                 builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.answer_call), answer).build())
-                builder.addAction(Notification.Action.Builder(null, if (ring) context.uiString(R.string.decline) else context.uiString(R.string.not_now), negative).build())
+                builder.addAction(Notification.Action.Builder(null, context.uiString(R.string.not_now), negative).build())
             }
-            if (ring) {
-                // The platform owns ringing and timeout even if our process is killed.
-                builder.setTimeoutAfter(45_000)
-                val manager = context.getSystemService(NotificationManager::class.java)
-                if (context.checkSelfPermission(Manifest.permission.USE_FULL_SCREEN_INTENT) == PackageManager.PERMISSION_GRANTED &&
-                    (Build.VERSION.SDK_INT < 34 || manager?.canUseFullScreenIntent() == true))
-                    builder.setFullScreenIntent(intent(context, id, "ru.eleven.ompaway.INCOMING", true), true)
-            }
+            // The platform owns ringing and timeout even if our process is killed.
+            builder.setTimeoutAfter(45_000)
+            val manager = context.getSystemService(NotificationManager::class.java)
+            if (context.checkSelfPermission(Manifest.permission.USE_FULL_SCREEN_INTENT) == PackageManager.PERMISSION_GRANTED &&
+                (Build.VERSION.SDK_INT < 34 || manager?.canUseFullScreenIntent() == true))
+                builder.setFullScreenIntent(intent(context, id, "ru.eleven.ompaway.INCOMING", true), true)
         }
         return builder.build().also { if (ring) it.flags = it.flags or Notification.FLAG_INSISTENT }
     }
 
-    fun show(context: Context, id: String, item: Pending? = null, alert: Boolean = false, busy: Boolean = false) {
+    /**
+     * Questions are ordinary notifications. Only an explicit desktop call ([call]) rings,
+     * and only when no other call is ringing or active.
+     */
+    fun show(context: Context, id: String, item: Pending? = null, alert: Boolean = false, busy: Boolean = false, call: Boolean = false) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         val active = manager.activeNotifications
-        if (!alert && active.any { it.tag == id && it.notification.flags and Notification.FLAG_INSISTENT != 0 }) return
+        if (!call && active.any { it.tag == id && it.notification.flags and Notification.FLAG_INSISTENT != 0 }) return
         val existingRing = active.any { it.notification.flags and Notification.FLAG_INSISTENT != 0 }
-        val callMode = InviteSettings(context).callMode
-        val ring = item != null && alert && callMode && !busy && !existingRing
+        val ring = call && item != null && !busy && !existingRing
+        if (call && !ring) return
         val channel = if (ring) CALL_CHANNEL else CHANNEL
         if (!allowed(context, channel)) return
         try {
-            if (alert) manager.cancel(id, 1) // A generic pending-sync card must not suppress the first authenticated alert.
-            val note = notification(context, id, item, ring)
-            // Suppress sound/vibration on generic wakeups and refreshes, without changing channels.
-            if (!alert || item == null || (callMode && !ring)) {
-                val silent = Notification.Builder.recoverBuilder(AppLanguage.context(context), note)
-                    .setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY).build()
-                manager.notify(id, 1, silent)
-            } else manager.notify(id, 1, note)
+            if (alert || ring) manager.cancel(id, 1) // A generic pending-sync card must not suppress the first authenticated alert.
+            manager.notify(id, 1, notification(context, id, item, ring, silent = !ring && (!alert || item == null)))
         } catch (_: SecurityException) { /* Permission revoked; authenticated inbox remains available. */ }
+    }
+
+    /** A short-lived, silent receipt after an answer submitted from the notification shade. */
+    fun receipt(context: Context, id: String, text: String) {
+        if (!allowed(context)) return
+        val note = Notification.Builder(AppLanguage.context(context), CHANNEL).setSmallIcon(R.drawable.ic_invite)
+            .setContentTitle(text).setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setGroup("away-silent-$id").setGroupAlertBehavior(Notification.GROUP_ALERT_SUMMARY)
+            .setTimeoutAfter(4_000).setAutoCancel(true).build()
+        try { context.getSystemService(NotificationManager::class.java)?.notify(id, 2, note) } catch (_: SecurityException) { }
     }
 
     fun stopRinging(context: Context) {
@@ -159,6 +172,12 @@ internal object Invites {
             if (active.notification.flags and Notification.FLAG_INSISTENT == 0) continue
             manager.cancel(active.tag, active.id)
         }
+    }
+
+    fun cancelRinging(context: Context, id: String) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        if (manager.activeNotifications.any { it.tag == id && it.id == 1 &&
+                it.notification.flags and Notification.FLAG_INSISTENT != 0 }) manager.cancel(id, 1)
     }
 
     fun cancel(context: Context, id: String) { context.getSystemService(NotificationManager::class.java)?.cancel(id, 1) }
@@ -203,13 +222,20 @@ class SilenceJob : JobService() {
         return true
     }
     companion object {
-        fun schedule(context: Context) {
+        fun schedule(context: Context, urgent: Boolean = false) {
             val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
-            if (scheduler.getPendingJob(4091) != null) return
-            val job = JobInfo.Builder(4091, ComponentName(context, SilenceJob::class.java))
+            val existing = scheduler.getPendingJob(4091)
+            if (existing != null && (!urgent || Build.VERSION.SDK_INT < 31 || existing.isExpedited)) return
+            // FCM wakeups and user-initiated shade replies can use expedited work.
+            // Keep the persistent normal job as the platform/quota fallback.
+            if (urgent && Build.VERSION.SDK_INT >= 31) {
+                val expedited = JobInfo.Builder(4091, ComponentName(context, SilenceJob::class.java))
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).setExpedited(true).build()
+                if (scheduler.schedule(expedited) == JobScheduler.RESULT_SUCCESS) return
+            }
+            scheduler.schedule(JobInfo.Builder(4091, ComponentName(context, SilenceJob::class.java))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL).setPersisted(true).build()
-            scheduler.schedule(job)
+                .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL).setPersisted(true).build())
         }
     }
 }

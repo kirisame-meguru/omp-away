@@ -59,7 +59,7 @@ class IncomingCallActivity : AppCompatActivity() {
                     object : KeyguardManager.KeyguardDismissCallback() { override fun onDismissSucceeded() { open() } })
                 else open()
         }, RadianceUi.rowParams(this))
-        actions.addView(RadianceUi.button(this, uiString(R.string.decline), destructive = true) {
+        actions.addView(RadianceUi.button(this, uiString(R.string.not_now), destructive = true) {
             app.silence(request); finish()
         }, RadianceUi.rowParams(this))
         val sheet = RadianceUi.column(this).apply {

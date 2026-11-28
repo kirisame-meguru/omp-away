@@ -24,12 +24,12 @@ internal class InboxStore(context: Context) {
                 state.pending[item.id] = item
             }
             for ((name, set) in listOf("invited" to state.invited, "silenced" to state.silenced,
-                "closed" to state.closed, "alerted" to state.alerted, "acknowledged" to state.acknowledged)) {
+                "closed" to state.closed, "alerted" to state.alerted, "acknowledged" to state.acknowledged, "rung" to state.rung)) {
                 val array = doc.optJSONArray(name) ?: continue
                 repeat(array.length()) { i -> set.add(array.getString(i)) }
             }
         } catch (_: JSONException) {
-            state.pending.clear(); state.invited.clear(); state.silenced.clear(); state.closed.clear(); state.alerted.clear(); state.acknowledged.clear()
+            state.pending.clear(); state.invited.clear(); state.silenced.clear(); state.closed.clear(); state.alerted.clear(); state.acknowledged.clear(); state.rung.clear()
             prefs.edit().remove("snapshot").apply()
         }
     }
@@ -41,6 +41,7 @@ internal class InboxStore(context: Context) {
         return invite(id, allowed)
     }
     fun silence(id: String) { state.silence(id); save() }
+    fun ring(item: Pending) = state.ring(item).also { if (it) save() }
     fun reconcile(items: List<Pending>) = state.reconcile(items).also { save() }
     fun consumeAlert(id: String): Boolean {
         val already = id in state.alerted
@@ -59,7 +60,7 @@ internal class InboxStore(context: Context) {
         for (item in state.pending.values) rows.put(JSONArray().put(item.id).put(item.project).put(item.question).put(item.createdAt).put(item.session.orEmpty()))
         val snapshot = JSONObject().put("pending", rows).put("invited", JSONArray(state.invited))
             .put("closed", JSONArray(state.closed)).put("silenced", JSONArray(state.silenced)).put("alerted", JSONArray(state.alerted))
-            .put("acknowledged", JSONArray(state.acknowledged))
+            .put("acknowledged", JSONArray(state.acknowledged)).put("rung", JSONArray(state.rung))
         // Push callbacks must not return before replay/retirement suppression is durable.
         prefs.edit().putString("snapshot", snapshot.toString()).commit()
     }

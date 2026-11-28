@@ -110,6 +110,10 @@ class QuestionControlTest(unittest.TestCase):
         for session in ['x' * 129, 1, 'bad\0name']:
             with self.assertRaises(ProtocolError):
                 phone.outgoing(dict(type='inbox', items=[self.item | dict(session=session)]))
+        phone.outgoing(dict(type='inbox', items=[self.item | dict(call='5b8f0c62-1f4e-4d1c-9a58-0f1d7b7e8a01')]))
+        for call in ['', 'x' * 129, 1, 'bad token']:
+            with self.assertRaises(ProtocolError):
+                phone.outgoing(dict(type='inbox', items=[self.item | dict(call=call)]))
         with self.assertRaises(ProtocolError):
             phone.outgoing(dict(type='inbox', items=[self.item | dict(requestId=f'r{i}', question='x' * 256) for i in range(400)]))
 

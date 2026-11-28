@@ -296,7 +296,7 @@ class RadianceHomeTest {
                 assertEquals("An invitation alone must not show the voice lens", 0f, shell.opacity, 0f)
                 assertNull(app.callVisual)
                 assertFalse(texts(activity.window.decorView).any { it.contains("Private invitation question") || it.contains("Private project") })
-                for (label in listOf("Answer call", "Decline")) {
+                for (label in listOf("Answer call", "Not now")) {
                     val action = descendants(activity.window.decorView).filterIsInstance<android.widget.Button>()
                         .single { it.text.toString() == label }
                     val visible = android.graphics.Rect()

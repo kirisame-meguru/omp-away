@@ -21,7 +21,11 @@ export interface QuestionSource {
 	readonly version: 1; readonly sessionId: string; readonly signal: AbortSignal;
 	subscribe(listener: (questions: readonly AsyncQuestion[]) => void): () => void;
 }
-export interface AsyncAskConnection { close(): void }
+export interface AsyncAskConnection {
+	/** Away request ID for a canonical async question ID that is currently forwarded. */
+	requestId(questionId: string): string | undefined;
+	close(): void;
+}
 interface Offer { question: AsyncQuestion; pending: PendingAsk; active: boolean }
 interface Binding {
 	source: QuestionSource; offers: Map<string, Offer>; revision: number;
@@ -160,5 +164,11 @@ export function connectAsyncQuestions(
 		if (isRecord(value) && value.version === 1 && value.sessionId === sessionId) request();
 	});
 	request();
-	return { close() { if (!live) return; live = false; unsubscribe(); detach(); } };
+	return {
+		requestId(questionId) {
+			const offer = live && current() ? binding?.offers.get(questionId) : undefined;
+			return offer?.active ? offer.pending.requestId : undefined;
+		},
+		close() { if (!live) return; live = false; unsubscribe(); detach(); },
+	};
 }

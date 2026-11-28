@@ -218,8 +218,8 @@ class UiScreenshotCatalogTest {
         f.scenario("settings-dark-backdrop", "SETTINGS", "Production Reference backdrop off selection", {
             f.preferences().lightBackdrop = false; f.screen.refreshAppearance()
         })
-        f.scenario("settings-previews-ringing-enabled", "SETTINGS", "Synthetic notification preferences enabled; no notification is posted", {
-            f.app.inviteSettings.apply { showPreview = true; callMode = true }
+        f.scenario("settings-previews-enabled", "SETTINGS", "Synthetic notification preview preference enabled; no notification is posted", {
+            f.app.inviteSettings.apply { showPreview = true }
         })
         f.scenario("settings-privacy-enabled", "SETTINGS", "Checked Block screenshots control from fixture prefs; host remains intentionally capture-enabled, not a FLAG_SECURE test", {
             f.preferences().blockScreenshots = true

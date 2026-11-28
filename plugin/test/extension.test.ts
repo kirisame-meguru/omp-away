@@ -24,7 +24,7 @@ test("async offers work without native Collab, survive agent end and cannot outl
 	let submitted = 0, closed = 0;
 	spyOn(runtime, "openAdmin").mockResolvedValue({
 		offer(ask) { offered.push(ask); }, end(id) { ended.push(id); },
-		async endCall() { return false; },
+		async endCall() { return false; }, async call() { return "unavailable" as const; },
 		async close() { closed++; }, async command() {}, cancelEnrollment() {},
 	});
 	const events = new EventBus();
@@ -127,7 +127,7 @@ test("assistant hangup is explicit, session-owned and cancellation-safe",async()
 	spyOn(runtime,"gatewayConfigured").mockReturnValue(true);
 	const ended:string[]=[];
 	spyOn(runtime,"openAdmin").mockResolvedValue({
-		offer(){},end(){},async endCall(id){ended.push(id);return id==="active"},
+		offer(){},end(){},async endCall(id){ended.push(id);return id==="active"},async call(){return "unavailable" as const},
 		async close(){},async command(){},cancelEnrollment(){},
 	});
 	const handlers=new Map<string,(event:unknown,ctx:ExtensionContext)=>unknown>();
@@ -156,4 +156,80 @@ test("assistant hangup is explicit, session-owned and cancellation-safe",async()
 		expect((await invoke("active")).details).toEqual({ended:false});
 		expect(ended).toEqual(["active","stale"]);
 	} finally {await handlers.get("session_shutdown")!({},ctx)}
+});
+
+test("away_call requires a forwarded async question or arms only the next native ask",async()=>{
+	const settings=new Map<string,registry.AnySetting>();
+	for (const [id,value] of Object.entries({"collab.autoStart":"control","ask.timeout":0,"collab.relayUrl":"ws://127.0.0.1:12345"})) {
+		const setting=new registry.Setting<unknown>(typeof value==="number" ? {id,type:"number",default:value} : {id,type:"string",default:value});
+		spyOn(setting,"get").mockReturnValue(value);
+		settings.set(id,setting);
+	}
+	spyOn(registry,"lookup").mockImplementation(key=>settings.get(key));
+	spyOn(runtime,"gatewayConfigured").mockReturnValue(true);
+	let native!:{request(value:CollabUiRequest):void};
+	spyOn(adapter,"startAdapter").mockImplementation(async(port,_session,callbacks)=>{
+		native=callbacks; callbacks.ready?.();
+		return {port,async reply(){return true},async close(){}};
+	});
+	const offered:PendingAsk[]=[], called:string[]=[];
+	spyOn(runtime,"openAdmin").mockResolvedValue({
+		offer(ask){offered.push(ask)},end(){},async endCall(){return false},
+		async call(id){called.push(id);return "declined"},
+		async close(){},async command(){},cancelEnrollment(){},
+	});
+	const events=new EventBus();
+	const off=events.on("omp-async-ask:connect:v1",request=>{
+		if (request && typeof request==="object" && "accept" in request && typeof request.accept==="function") request.accept({
+			version:1,sessionId:"owner",signal:new AbortController().signal,
+			subscribe(listener:(questions:unknown[])=>void){listener([{id:"canonical",requestId:"async-request",toolCallId:"async-tool",title:"Pick",blockedWork:"Work",createdAt:1,
+				html:'<form><label>Target<input name="target"></label></form>',submitConfirmed(){return {kind:"stale"}}}]);return ()=>{}},
+		});
+	});
+	const handlers=new Map<string,(event:unknown,ctx:ExtensionContext)=>unknown>();
+	const tools=new Map<string,ToolDefinition>();
+	const api={events,arktype,registerCommand(){},registerMessageRenderer(){},pi:{settings:{}},
+		getAllTools(){return [{name:"ask",sourceInfo:{source:"builtin",path:"<builtin:ask>"}}]},
+		registerTool(value:ToolDefinition){tools.set(value.name,value)},
+		on(name:string,handler:(event:unknown,ctx:ExtensionContext)=>unknown){handlers.set(name,handler)},
+	} as unknown as ExtensionAPI;
+	const ctx={cwd:"/example",agent:{kind:"main"},mode:"tui",isIdle:()=>true,
+		sessionManager:{getSessionId:()=>"owner"},ui:{notify(){}}} as unknown as ExtensionContext;
+	away(api);
+	try {
+		await handlers.get("session_start")!({},ctx);
+		const tool=tools.get("away_call")!;
+		expect(tool.loadMode).toBeUndefined();
+		const invoke=(params:object,context=ctx)=>tool.execute("call",params,undefined,undefined,context);
+		await expect(invoke({})).rejects.toThrow("exactly one");
+		await expect(invoke({questionId:"canonical",nativeAsk:true})).rejects.toThrow("exactly one");
+		await expect(invoke({questionId:"unknown"})).rejects.toThrow("No pending async question");
+		await expect(invoke({questionId:"canonical"},{...ctx,agent:{kind:"sub"}} as unknown as ExtensionContext)).rejects.toThrow("unavailable");
+		expect((await invoke({questionId:"canonical"})).details).toEqual({outcome:"declined"});
+		expect(called).toEqual(["async-request"]);
+
+		// Arming alone rings nothing; the next native ask offered in this turn rings once.
+		expect((await invoke({nativeAsk:true})).details).toEqual({outcome:"armed"});
+		expect(called).toEqual(["async-request"]);
+		const prepare=async(id:string)=>{
+			const result=await handlers.get("tool_call")!({toolName:"ask",toolCallId:id,input:{html:'<form><label>Explain<textarea name="answer"></textarea></label></form>'}},ctx) as {input:{html:string}};
+			await handlers.get("tool_execution_start")!({toolName:"ask",toolCallId:id,args:{html:result.input.html}},ctx);
+			native.request({kind:"editor",reqId:Number(id.slice(-1)),title:[...fieldQuestions(parseHtmlForm(result.input.html)).values()][0]!,prefill:""});
+		};
+		await prepare("tool1");
+		const nativeRequest=offered.at(-1)!.requestId;
+		await tick();
+		expect(called).toEqual(["async-request",nativeRequest]);
+		await handlers.get("tool_execution_end")!({toolName:"ask",toolCallId:"tool1",isError:true,result:{}},ctx);
+		await prepare("tool2");
+		await tick();
+		expect(called).toHaveLength(2);
+		// Agent end discards an unused arm.
+		await invoke({nativeAsk:true});
+		await handlers.get("tool_execution_end")!({toolName:"ask",toolCallId:"tool2",isError:true,result:{}},ctx);
+		await handlers.get("agent_end")!({},ctx);
+		await prepare("tool3");
+		await tick();
+		expect(called).toHaveLength(2);
+	} finally {off();await handlers.get("session_shutdown")!({},ctx)}
 });

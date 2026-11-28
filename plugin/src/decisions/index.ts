@@ -10,7 +10,11 @@ export type { Preferences } from "./preferences";
 export type { SideContext } from "./side";
 export type { DecisionCall, DecisionReply } from "./call";
 export type { SpokenDraft } from "./form";
-export interface InboxItem { requestId:string; project:string; question:string; createdAt:number; session?:string }
+export interface InboxItem { requestId:string; project:string; question:string; createdAt:number; session?:string; call?:string }
+/** Explicit `away_call` outcome; ordinary question notifications never ring. */
+export type CallOutcome="answered"|"declined"|"missed"|"closed";
+/** Matches the handset's platform-owned ringing timeout. */
+export const RING_MS=45_000;
 export interface Clock { now():number; after(ms:number, callback:()=>void):()=>void }
 export interface QuestionCall {
 	signal:AbortSignal;
@@ -20,7 +24,7 @@ export interface QuestionCall {
 	close():void;
 }
 interface Options {
-	invite(requestId:string):void|Promise<void>;
+	invite(requestId:string,wakeupId?:string):void|Promise<void>;
 	changed?():void;
 	retired?(requestId:string):void;
 	error?(code:string, requestId?:string):void;
@@ -30,6 +34,7 @@ interface Options {
 interface Entry {
 	item:InboxItem; ask:PendingAsk; form:DecisionForm;
 	cancelTimer?:()=>void; silenced:boolean; rang:boolean; withdrawing:boolean; submitted:boolean;
+	ringing?:{token:string;outcome:Promise<CallOutcome>;settle(outcome:CallOutcome):void};
 }
 const realtime:Clock={now:Date.now,after(ms,fn){const timer=setTimeout(fn,ms);return ()=>clearTimeout(timer)}};
 
@@ -76,7 +81,27 @@ export class DecisionCoordinator {
 		const wait=away?0:Math.max(0,e.item.createdAt+delayMs!-this.#clock.now());
 		if(wait===0) ring();else e.cancelTimer=this.#clock.after(wait,ring);
 	}
-	list():InboxItem[] {return Array.from(this.#pending.values(),e=>({...e.item}))}
+	list():InboxItem[] {return Array.from(this.#pending.values(),e=>e.ringing?{...e.item,call:e.ringing.token}:{...e.item})}
+	/** Ring the handset for one pending question. Returns undefined when it cannot be called now. */
+	call(id:string):Promise<CallOutcome>|undefined {
+		const e=this.#pending.get(id);
+		if(this.#closed||!e||e.submitted||e.withdrawing||this.#active) return;
+		if(e.ringing) return e.ringing.outcome;
+		for(const other of this.#pending.values()) if(other.ringing) return;
+		const {promise,resolve}=Promise.withResolvers<CallOutcome>();
+		let stop=()=>{};
+		const ringing={token:crypto.randomUUID(),outcome:promise,settle:(outcome:CallOutcome)=>{
+			if(e.ringing!==ringing) return;
+			e.ringing=undefined;stop();resolve(outcome);
+			if(outcome!=="closed"&&!this.#closed) this.#opt.changed?.();
+		}};
+		e.ringing=ringing;
+		stop=this.#clock.after(RING_MS,()=>ringing.settle("missed"));
+		const failed=()=>{if(e.ringing===ringing) this.#opt.error?.("invite-unavailable",id)};
+		try {Promise.resolve(this.#opt.invite(id,ringing.token)).catch(failed)} catch {failed()}
+		this.#opt.changed?.();
+		return promise;
+	}
 	get pendingCount():number {return this.#pending.size}
 	expectsMobile():boolean {
 		if(this.#closed) return false;
@@ -103,7 +128,7 @@ export class DecisionCoordinator {
 		const notes=touchNotes(entry.form,checked.values,noteInput);
 		if(!notes||notes.length&&!entry.ask.supportsOptionNotes) return {status:"invalid",message:message(language,"Option notes are invalid or unsupported by this desktop.")};
 		// Reserve before dispatch; removal from the inbox cannot revoke this attempt's receipt.
-		entry.submitted=true;
+		entry.submitted=true;entry.ringing?.settle("closed");
 		this.silence(id);
 		try {
 			if(await entry.ask.submitConfirmed(id,checked.values,notes)==="accepted") {
@@ -118,11 +143,13 @@ export class DecisionCoordinator {
 	voiceAvailable(id:string) {const entry=this.#pending.get(id);return !!entry&&!entry.submitted&&!entry.withdrawing}
 	silence(id:string):boolean {
 		const e=this.#pending.get(id);if(!e) return false;
+		e.ringing?.settle("declined");
 		e.silenced=true;e.cancelTimer?.();e.cancelTimer=undefined;return true;
 	}
 	join(id:string):QuestionCall|undefined {
 		const entry=this.#pending.get(id);
 		if(this.#closed||this.#active||!entry||entry.withdrawing||entry.submitted) return;
+		entry.ringing?.settle("answered");
 		this.silence(id);
 		const life=new AbortController();
 		const call:QuestionCall={
@@ -161,7 +188,7 @@ export class DecisionCoordinator {
 			this.#active.retired=true;
 			return;
 		}
-		this.#pending.delete(id);entry.cancelTimer?.();
+		this.#pending.delete(id);entry.cancelTimer?.();entry.ringing?.settle("closed");
 		if(this.#active?.entry===entry) this.#active.call.close();
 		this.#opt.retired?.(id);this.#opt.changed?.();
 	}
@@ -169,7 +196,7 @@ export class DecisionCoordinator {
 		if(this.#closed) return;
 		this.#closed=true;
 		this.#active?.call.close();
-		for(const e of this.#pending.values()) {e.cancelTimer?.();this.#opt.retired?.(e.item.requestId)}
+		for(const e of this.#pending.values()) {e.cancelTimer?.();e.ringing?.settle("closed");this.#opt.retired?.(e.item.requestId)}
 		this.#pending.clear();this.#seen.clear();this.#tools.clear();this.#opt.changed?.();
 	}
 }

@@ -14,7 +14,7 @@ export type PhoneControl =
   | { type: 'silence' | 'hangup'; requestId: string }
   | { type: 'played'; requestId: string; mark: string };
 export type DesktopControl =
-  | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number; session?: string }[] }
+  | { type: 'inbox'; items: { requestId: string; project: string; question: string; createdAt: number; session?: string; call?: string }[] }
   | { type: 'form'; requestId: string; form: TouchForm | null; language?: Language }
   | ({ type: 'answer'; requestId: string } & TouchResult)
   | { type: 'question'; requestId: string; display: QuestionDisplay }

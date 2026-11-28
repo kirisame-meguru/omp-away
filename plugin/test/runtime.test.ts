@@ -58,6 +58,25 @@ async function fixture(voice?:typeof openVoice,shared?:RoutingBus) {
 	return {runtime,wire,voices,native,contexts,order,media,controls,rings,invalidations,ctx,audioIn,audioOut,submitted,notes,offer,join,
 		get closedPeers(){return closedPeers},get closedLive(){return closedLive}};
 }
+test("an explicit call uses a fresh wakeup after a question invitation and retires both wakeups",async()=>{
+	const f=await fixture(); try {
+		await f.runtime.configure({away:true});
+		f.wire.onConnect!("phone");f.offer("A");
+		expect(f.rings).toEqual([["phone","A"]]);
+		const calling=f.runtime.call("A");
+		const inbox=f.controls.at(-1)?.message;
+		if(inbox?.type!=="inbox") throw Error("No call inbox");
+		const token=inbox.items[0].call;
+		expect(token).toMatch(/^[0-9a-f-]{36}$/);
+		expect(f.rings).toEqual([["phone","A"],["phone",token!]]);
+		await f.wire.onMessage("phone",{type:"silence",requestId:"A"});
+		expect(await calling).toBe("declined");
+		expect(f.invalidations).toContainEqual(["phone",token!]);
+		f.runtime.end("A");
+		expect(f.invalidations).toContainEqual(["phone","A"]);
+		expect(f.controls.at(-1)?.message).toMatchObject({type:"inbox",items:[]});
+	} finally {await f.runtime.close()}
+});
 test("details are negotiated, request-scoped, and cleared across reconnects",async()=>{
 	const f=await fixture(); try {
 		f.wire.onConnect!("phone"); f.offer("A"); f.offer("B");
@@ -410,7 +429,7 @@ test("shared routing commands are idempotent patches and status follows remote u
 			const ctx={ui:{notify:(text:string)=>notices[i].push(text),setWidget(){}}} as unknown as ExtensionContext;
 			admins.push((await openAdmin(ctx,()=>true,()=>true,{env,copy:async()=>{},async connect(options){
 				if(options.onRouting) {subscribers.push(options.onRouting);options.onRouting(current)}
-				return {offer(){},end(){},async endCall(){return false},async close(){},async pair(){throw Error("not pairing")},
+				return {offer(){},end(){},async endCall(){return false},async call(){return "unavailable" as const},async close(){},async pair(){throw Error("not pairing")},
 					async configure(patch) {
 						current={...current,...patch};
 						for(const subscriber of subscribers) subscriber(current);
@@ -424,13 +443,13 @@ test("shared routing commands are idempotent patches and status follows remote u
 		await admins[1].command("fallback 30");
 		expect(current).toEqual({away:true,delayMs:30000});
 		await admins[0].command("status");
-		expect(notices[0].at(-1)).toMatch(/Ring immediately: on.*Fallback: 30s/);
+		expect(notices[0].at(-1)).toMatch(/Notify immediately: on.*Fallback: 30s/);
 		delayed=true;
 		const pending=admins[0].command("on"); await tick();
 		current={...current,away:false}; for(const subscriber of subscribers) subscriber(current);
 		gate.resolve(); await pending;
 		await admins[0].command("status");
-		expect(notices[0].at(-1)).toMatch(/Ring immediately: off.*Fallback: 30s/);
+		expect(notices[0].at(-1)).toMatch(/Notify immediately: off.*Fallback: 30s/);
 		expect(await Bun.file(join(dir,"routing.json")).exists()).toBe(false);
 	} finally {gate.resolve();for(const admin of admins)await admin.close();await rm(dir,{recursive:true,force:true})}
 });
@@ -445,7 +464,7 @@ test("admin uses only the private clipboard for enrollment; busy Ask blocks comp
 		await writeFile(tokenFile,Buffer.alloc(32,7).toString("base64url"),{mode:0o600});
 		const admin=await openAdmin(ctx,()=>true,()=>idle,{env,copy:async payload=>{copied.push(payload)},async connect(options){
 			confirm=options.confirmPair;
-			return {offer(){},end(){},async endCall(){return false},async close(){},async configure(){},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
+			return {offer(){},end(){},async endCall(){return false},async call(){return "unavailable" as const},async close(){},async configure(){},async pair(){pairs++;return '{"secret":"test-only-enrollment"}'}};
 		}});
 		try {
 			idle=false;await admin!.command("pair");expect(pairs).toBe(0);expect(await confirm("phone","🐶".repeat(12))).toBe(false);
@@ -471,7 +490,7 @@ test("idle transport diagnostics stay quiet while actionable failures and comman
 			copy:async()=>{},
 			async connect(_options,onReport) {
 				report=onReport;
-				return {offer(){},end(){},async endCall(){return false},async configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
+				return {offer(){},end(){},async endCall(){return false},async call(){return "unavailable" as const},async configure(){},async close(){},async pair(){throw Error("Command must not start enrollment")}};
 			},
 		});
 		try {

@@ -48,10 +48,11 @@ def inbox_ids(message):
     ids = set()
     for item in message['items']:
         required = {'requestId', 'project', 'question', 'createdAt'}
-        if (not isinstance(item, dict) or not required <= item.keys() or not item.keys() <= required | {'session'} or
+        if (not isinstance(item, dict) or not required <= item.keys() or not item.keys() <= required | {'session', 'call'} or
                 not isinstance(item['requestId'], str) or ROUTE.fullmatch(item['requestId']) is None or item['requestId'] in ids or
                 not text(item['project'], 128) or not text(item['question'], 256) or
                 'session' in item and not text(item['session'], 128) or
+                'call' in item and (not isinstance(item['call'], str) or ROUTE.fullmatch(item['call']) is None) or
                 type(item['createdAt']) is not int or not 0 <= item['createdAt'] <= 2**53 - 1):
             raise ProtocolError('invalid inbox item')
         ids.add(item['requestId'])

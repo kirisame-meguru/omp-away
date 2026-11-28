@@ -227,6 +227,27 @@ test("fresh async source keys permit restoration without weakening native tool-c
 		expect(f.core.offer({...f.ask("native"),requestId:"native-duplicate"},f.ctx,"project")).toBe(false);
 	} finally {f.core.close()}
 });
+test("explicit calls ring once per request, expose a token and settle by answer, decline, timeout or retirement",async()=>{
+	const f=fixture(); try {
+		f.offer("A"); f.offer("B"); f.offer("C"); f.offer("D");
+		expect(f.core.call("missing")).toBeUndefined();
+		const answered=f.core.call("A")!;
+		expect(f.core.call("A")).toBe(answered);
+		expect(f.invites).toEqual(["A"]);
+		const token=f.core.list().find(item=>item.requestId==="A")?.call;
+		expect(token).toMatch(/^[0-9a-f-]{36}$/);
+		expect(f.core.list().find(item=>item.requestId==="B")).not.toHaveProperty("call");
+		const call=f.core.join("A")!;
+		expect(await answered).toBe("answered");
+		expect(f.core.list().find(item=>item.requestId==="A")).not.toHaveProperty("call");
+		expect(f.core.call("B")).toBeUndefined(); // One voice call at a time.
+		call.close();
+		const declined=f.core.call("B")!; f.core.silence("B"); expect(await declined).toBe("declined");
+		const missed=f.core.call("C")!; f.advance(45_000); expect(await missed).toBe("missed");
+		expect(f.core.list().find(item=>item.requestId==="C")).not.toHaveProperty("call");
+		const closed=f.core.call("D")!; f.core.end("D"); expect(await closed).toBe("closed");
+	} finally {f.core.close()}
+});
 test('local completion cancels invitations and permanently revokes a stale offer',()=>{
 	const f=fixture(); f.core.configure({away:false,delayMs:10}); f.offer("A"); const call=f.join("A")!;
 	f.core.end("A"); expect(call.signal.aborted).toBe(true); expect(f.offer("A")).toBe(false); expect(f.join("A")).toBeUndefined();

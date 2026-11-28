@@ -4,9 +4,9 @@ const actions = [
 	action("pair clipboard", "Copy pairing data instead of displaying a QR"),
 	action("pair cancel", "Cancel pending pairing and hide the QR"),
 	action("status", "Show shared immediate and fallback settings"),
-	action("on", "Enable immediate ringing for all connected sessions"),
-	action("off", "Stop immediate ringing in all sessions; keep fallback"),
-	action("fallback off", "Disable delayed ringing in all sessions"),
+	action("on", "Enable immediate phone notifications for all connected sessions"),
+	action("off", "Stop immediate phone notifications in all sessions; keep fallback"),
+	action("fallback off", "Disable delayed phone notifications in all sessions"),
 	action("fallback 90", "Set the shared delay to 90 seconds (or enter your own delay)"),
 	action("help", "List Away commands"),
 ];

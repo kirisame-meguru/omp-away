@@ -101,7 +101,7 @@ class QuestionDisplayTest {
         assertEquals(8192, decoded.fields[1].label.length)
         assertEquals(256, decoded.fields[0].options.size)
         assertEquals(65528, bytesJson(("{\"x\":\"" + "x".repeat(65528) + "\"}").toByteArray()).getString("x").length)
-        val tooDeep = "{\"x\":".repeat(8) + "0" + "}".repeat(8)
+        val tooDeep = "{\"x\":".repeat(33) + "0" + "}".repeat(33)
         assertTrue(runCatching { bytesJson(tooDeep.toByteArray()) }.isFailure)
     }
 
@@ -114,6 +114,12 @@ class QuestionDisplayTest {
         assertEquals("Actual question", legacy.question)
         val modern = decodeInboxSnapshot(frame(JSONArray().put(row("one").put("session", "Session")))).single()
         assertEquals("Session", modern.session)
+        assertNull(modern.call)
+        val calling = decodeInboxSnapshot(frame(JSONArray().put(row("one").put("call", "one-use-token")))).single()
+        assertEquals("one-use-token", calling.call)
+        for (invalid in listOf("", "bad token", "x".repeat(129), "é", 1)) {
+            assertTrue(runCatching { decodeInboxSnapshot(frame(JSONArray().put(row("one").put("call", invalid)))) }.isFailure)
+        }
         assertTrue(runCatching { decodeInboxSnapshot(frame(JSONArray().put(row("one")).put(row("one")))) }.isFailure)
         assertTrue(runCatching { decodeInboxSnapshot(frame(JSONArray().put(row("one")).put(row("two").put("session", "x".repeat(129))))) }.isFailure)
         assertTrue(runCatching { decodeInboxSnapshot(frame(JSONArray().put(row("bad id")))) }.isFailure)

@@ -99,15 +99,15 @@ const russian = {
   "Show a QR to pair a phone with this desktop": "Показать QR-код для сопряжения телефона с этим компьютером",
   "Copy pairing data instead of displaying a QR": "Скопировать данные сопряжения вместо показа QR-кода",
   "Cancel pending pairing and hide the QR": "Отменить ожидающее сопряжение и скрыть QR-код",
-  "Show shared immediate and fallback settings": "Показать общие настройки немедленного и отложенного звонка",
-  "Enable immediate ringing for all connected sessions": "Включить немедленный звонок для всех подключённых сеансов",
-  "Stop immediate ringing in all sessions; keep fallback": "Отключить немедленный звонок во всех сеансах, сохранив отложенный",
-  "Disable delayed ringing in all sessions": "Отключить отложенный звонок во всех сеансах",
+  "Show shared immediate and fallback settings": "Показать общие настройки немедленных и отложенных уведомлений",
+  "Enable immediate phone notifications for all connected sessions": "Включить немедленные уведомления для всех подключённых сеансов",
+  "Stop immediate phone notifications in all sessions; keep fallback": "Отключить немедленные уведомления во всех сеансах, сохранив отложенный",
+  "Disable delayed phone notifications in all sessions": "Отключить отложенные уведомления во всех сеансах",
   "Set the shared delay to 90 seconds (or enter your own delay)": "Установить общую задержку 90 секунд (или ввести своё значение)",
   "List Away commands": "Показать команды Away",
   "Reject this pairing comparison": "Отклонить это сопряжение",
   "Approve only if all 12 emojis match": "Одобрить, только если все 12 эмодзи совпадают",
-  "Enable Away for all connected sessions; /away off disables immediate ringing": "Включить Away для всех подключённых сеансов; /away off отключает немедленный звонок",
+  "Enable Away for all connected sessions; /away off disables immediate phone notifications": "Включить Away для всех подключённых сеансов; /away off отключает немедленные уведомления",
   "Scan with Away on your phone. Expires in 10 minutes.": "Отсканируйте в Away на телефоне. Срок действия — 10 минут.",
   "QR cannot fit. Enlarge the terminal or use /away pair clipboard.": "QR-код не помещается. Увеличьте терминал или используйте /away pair clipboard.",
   "Cancel: /away pair cancel": "Отмена: /away pair cancel",
@@ -115,6 +115,8 @@ const russian = {
   "Scan with Away on your phone, then compare all 12 emojis.": "Отсканируйте в Away на телефоне, затем сравните все 12 эмодзи.",
   "QR images are unavailable in this terminal.": "Изображения QR-кодов недоступны в этом терминале.",
   "Clipboard alternative: /away pair clipboard": "Через буфер обмена: /away pair clipboard",
+  "Call phone": "Позвонить на телефон",
+  "The phone call could not be started. Answer on the desktop or open the phone inbox.": "Не удалось позвонить на телефон. Ответьте на компьютере или откройте входящие на телефоне.",
   "Expires in 10 minutes": "Срок действия — 10 минут",
   "Cancel pairing": "Отменить сопряжение",
   "Pair phone": "Сопряжение телефона",
@@ -168,8 +170,8 @@ export function message(language: Language, english: string): string {
 }
 
 export function routingStatus(language: Language, away: boolean, delayMs: number | null): string {
-  if (language === "ru") return `Все сеансы · Звонить сразу: ${away ? "вкл." : "выкл."} · Отложенный звонок: ${delayMs === null ? "выкл." : `${delayMs / 1000} с`}`;
-  return `All sessions · Ring immediately: ${away ? "on" : "off"} · Fallback: ${delayMs === null ? "off" : `${delayMs / 1000}s`}`;
+  if (language === "ru") return `Все сеансы · Уведомлять сразу: ${away ? "вкл." : "выкл."} · Отложенное уведомление: ${delayMs === null ? "выкл." : `${delayMs / 1000} с`}`;
+  return `All sessions · Notify immediately: ${away ? "on" : "off"} · Fallback: ${delayMs === null ? "off" : `${delayMs / 1000}s`}`;
 }
 
 export function diagnosticCount(language: Language, count: number): string {

@@ -307,7 +307,7 @@ class InboxActivity : AppCompatActivity() {
     }
 
     private fun saveDrafts() {
-        for ((id, view) in formViews) if (id in app.store.state.pending && id in app.forms) {
+        for ((id, view) in formViews) if (id in app.store.state.pending && id in app.forms && id !in app.externalDrafts) {
             app.drafts[id] = view.values()
             app.noteDrafts[id] = view.notes()
         }
@@ -419,10 +419,7 @@ class InboxActivity : AppCompatActivity() {
         }
         card {
             text(uiString(R.string.invitations), 20, bold = true)
-            toggle(uiString(R.string.ringing_invitations), app.inviteSettings.callMode) {
-                app.inviteSettings.callMode = it; app.invitationSettingsChanged()
-            }
-            text(uiString(R.string.turn_off_for_notifications_only_system_sound_vibration_and_do), 14)
+            text(uiString(R.string.questions_arrive_as_notifications_calls_ring_only_when_requested), 14)
             notificationSettings()
             if (Build.VERSION.SDK_INT >= 34) {
                 if (!getSystemService(android.app.NotificationManager::class.java).canUseFullScreenIntent())
@@ -543,6 +540,7 @@ class InboxActivity : AppCompatActivity() {
             app.loadForm(item.id)
             return false
         }
+        if (app.externalDrafts.remove(item.id)) formViews.remove(item.id) // Rebuild from the shade's draft.
         val cached = formViews[item.id]
         val view = if (cached != null && cached.schema === schema) cached else {
             try {

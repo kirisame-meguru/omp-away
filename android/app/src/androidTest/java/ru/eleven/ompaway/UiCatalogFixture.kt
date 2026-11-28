@@ -210,7 +210,7 @@ internal class UiCatalogFixture(private val instrumentation: Instrumentation, pr
         put(activity, "renderedPage", null); put(activity, "renderedId", null)
         context.getSharedPreferences("away.sealed.v1", Context.MODE_PRIVATE).edit().clear().commit()
         ScreenPreferences(context).apply { blockScreenshots = false; animations = true; lightBackdrop = true; quality = 0 }
-        app.inviteSettings.apply { callMode = false; showPreview = false }
+        app.inviteSettings.apply { showPreview = false }
         screen.bind(null); screen.refreshAppearance(); screen.setSpeaker(false)
     }
 
