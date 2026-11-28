@@ -12,11 +12,14 @@ function text(node: UiNode): string {
   return nodes(node).map(n => JSON.stringify(n.props())).join("\n");
 }
 
-test("call messages return reactive cards without exposing the context envelope", () => {
+test("call messages retain card fallback and disclosure without a misleading completion badge", () => {
   const detail = "x".repeat(300);
   const message = new CallMessage(`secret instructions\n${JSON.stringify({ requestId: "request-1", title: "Release", blockedWork: detail })}\n</omp-away-plugin>`, false, false);
   expect(message.view).toBeInstanceOf(UiNode);
   expect(message.view.kind).toBe("card");
+  expect(message.view.props()).not.toHaveProperty("status");
+  expect(text(message.view)).toContain("Phone picked up");
+  expect(text(message.view)).not.toContain("pickup is not an answer");
   expect(text(message.view)).not.toContain("secret instructions");
   expect(text(message.view)).not.toContain("request-1");
   expect(text(message.view)).toContain("…");
@@ -27,14 +30,62 @@ test("call messages return reactive cards without exposing the context envelope"
   expect(text(message.view)).not.toContain("request-1");
 });
 
+test("native voice receipts use OMP tool heads, prose, and event-specific status notes", () => {
+  setNativeRenderingForTest(true);
+  try {
+    for (const result of [false, true]) {
+      const detail = "Review the display. ".repeat(40);
+      const content = result
+        ? JSON.stringify({ question: "request-1", title: "Display", voiceDiscussion: detail })
+        : `context\n${JSON.stringify({ requestId: "request-1", title: "Display", blockedWork: detail })}`;
+      const message = new CallMessage(content, result, false);
+      expect(message.view.kind).toBe("tool");
+      expect(message.view.props()).toMatchObject({
+        name: "away", targetKind: "text", preview: "children",
+        note: result ? "Discussion received" : "Phone picked up",
+      });
+      expect(nodes(message.view).some(node => node.kind === "card")).toBe(false);
+      expect(message.view.children()[0]!.kind).toBe("md");
+      expect(text(message.view)).not.toContain("request-1");
+      message.view.handlers.onToggle!(false, {} as never);
+      expect(message.view.props()).toHaveProperty("collapsed", false);
+      expect(text(message.view)).toContain("request-1");
+      expect(nodes(message.view).find(node => node.kind === "md")!.props()).toHaveProperty("text", detail.replaceAll(".", "&#46;"));
+      message.setExpanded(false);
+      expect(text(message.view)).not.toContain("request-1");
+    }
+    const russian = new CallMessage('{"requestId":"request-2"}', false, false, "ru");
+    expect(russian.view.props()).toHaveProperty("note", "Звонок принят");
+  } finally {
+    setNativeRenderingForTest(false);
+  }
+});
+
+test("voice prose escapes markup rather than executing model-authored formatting", () => {
+  const message = new CallMessage(JSON.stringify({
+    question: "request-1", voiceDiscussion: "# Heading\n[link](https://example.com) <img> $math$",
+  }), true, true);
+  const body = nodes(message.view).find(node => node.kind === "md")!;
+  expect(body.props()).toHaveProperty("text", "&#35; Heading  \n&#91;link&#93;&#40;https&#58;&#47;&#47;example&#46;com&#41; &#60;img&#62; &#36;math&#36;");
+  const indented = new CallMessage(JSON.stringify({ voiceDiscussion: "    Not a code block" }), true, true);
+  expect(nodes(indented.view).find(node => node.kind === "md")!.props()).toHaveProperty("text", "&#32;".repeat(4) + "Not a code block");
+});
+
 test("end-call phases use native nodes, including errors and pending execution", () => {
   const renderers = createEndCallRenderers();
   const options = { expanded: false, isPartial: false };
   expect(text(renderers.renderCall({}, { ...options, executionStarted: false }))).toContain("Waiting to end call");
+  expect(renderers.renderCall({}, options).kind).toBe("md");
   expect(text(renderers.renderResult({ content: [], details: { ended: true } }, options))).toContain("Call ended");
   expect(text(renderers.renderResult({ content: [], isError: true }, options))).toContain("Could not end call");
   expect(text(renderers.renderResult({ content: [], details: { ended: false } }, options))).toContain("No matching active call");
   expect(text(renderers.renderResult({ content: [] }, { ...options, isPartial: true }))).toContain("Ending call");
+  expect(text(renderers.renderCall({}, { ...options, cancelled: true }))).toContain("Cancelled");
+  for (const ended of [true, false]) {
+    const output = text(renderers.renderResult({ content: [], details: { ended } }, options));
+    expect(output).not.toContain("submit");
+    expect(output).not.toContain("Pending questions");
+  }
 });
 
 test("comparison actions remain bound to their comparison code", () => {

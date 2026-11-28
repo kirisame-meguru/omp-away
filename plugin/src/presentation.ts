@@ -1,4 +1,4 @@
-import { UiNode, signal, type JSXNode } from "@oh-my-pi/pi-tui";
+import { UiNode, nativeSupports, signal, type JSXNode } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/tools/details/renderer";
 import type { ToolDefinition } from "@oh-my-pi/pi-coding-agent";
@@ -9,6 +9,14 @@ import { message } from "./messages";
 export const clean = (value: string): string => replaceTabs(sanitizeText(value));
 type Tone = "muted" | "success" | "warning" | "error";
 type ToolRenderResult = Parameters<NonNullable<ToolDefinition["renderResult"]>>[0];
+
+/** Plain prose in OMP's native sans face, without interpreting external text as markup. */
+function prose(value: string): UiNode {
+  return new UiNode("md", {
+    text: clean(value).replace(/[!-/:-@[-`{-~]/g, char => `&#${char.charCodeAt(0)};`)
+      .replace(/^ +/gm, spaces => "&#32;".repeat(spaces.length)).replace(/\n/g, "  \n"),
+  });
+}
 
 export function awayStatus(label: string, tone: Tone = "muted", icon?: string): UiNode {
   return new UiNode("row", {
@@ -32,11 +40,8 @@ export function awayBlock(
   });
 }
 
-function endCallBody(label: string, tone: Tone, detail: string, language: Language, icon?: string): UiNode {
-  return new UiNode("col", {
-    gap: "sm", role: "away.end-call",
-    children: [awayStatus(message(language, label), tone, icon), new UiNode("text", { text: message(language, detail), wrap: "word" })],
-  });
+function endCallBody(label: string, language: Language): UiNode {
+  return prose(message(language, label));
 }
 
 export function createEndCallRenderers(language: () => Language = () => "en") {
@@ -46,17 +51,15 @@ export function createEndCallRenderers(language: () => Language = () => "en") {
       const waiting = options.executionStarted === false;
       return endCallBody(
         options.cancelled ? "Cancelled" : waiting ? "Waiting to end call" : "Ending call",
-        "muted",
-        options.cancelled ? "Call termination was not confirmed." : waiting ? "Waiting for execution. Audio has not been stopped." : "Stopping handset audio and live mode…",
-        language(), options.cancelled ? "x" : undefined,
+        language(),
       );
     },
     renderResult(result: ToolRenderResult, options: RenderResultOptions) {
-      if (options.isPartial) return endCallBody("Ending call", "muted", "Stopping handset audio and live mode…", language());
-      if (result.isError) return endCallBody("Could not end call", "error", "The call may still be active. Check live mode before retrying.", language());
+      if (options.isPartial) return endCallBody("Ending call", language());
+      if (result.isError) return endCallBody("Could not end call", language());
       return isRecord(result.details) && result.details.ended === true
-        ? endCallBody("Call ended", "success", "Audio stopped. This does not submit an answer or resolve a pending form.", language())
-        : endCallBody("No matching active call", "muted", "Nothing was ended in this session. Pending questions are unchanged.", language(), "info");
+        ? endCallBody("Call ended", language())
+        : endCallBody("No matching active call", language());
     },
   };
 }
@@ -84,22 +87,30 @@ export class CallMessage {
     }
     this.title = message(language, result ? "Voice discussion" : "Continue by voice");
     this.target = typeof data.title === "string" ? clean(data.title) : "Away";
-    this.summary = message(language, result ? "Discussion returned to the agent" : "Phone picked up · pickup is not an answer");
+    this.summary = message(language, result ? "Discussion received" : "Phone picked up");
     const detail = result ? data.voiceDiscussion : data.blockedWork;
     if (typeof detail === "string") this.detail = clean(detail);
     const id = result ? data.question : data.requestId;
     if (typeof id === "string") this.requestId = clean(id);
-    this.view = awayBlock({
-      role: "away.call-message", title: this.title, target: this.target, status: "done",
-      collapsed: () => !this.expanded(), onToggle: collapsed => this.expanded.set(!collapsed),
-    }, new UiNode("col", {
-      role: "away.receipt", gap: "sm",
-      children: () => [
-        ...(this.detail ? [new UiNode("text", { text: this.shownDetail(), wrap: "word" })] : []),
-        awayStatus(this.summary, "muted", this.result ? "check" : "info"),
-        ...(this.expanded() && this.requestId ? [new UiNode("text", { spans: [{ t: `${message(this.language, "Request")}: ${this.requestId}`, s: "muted" }], wrap: "word" })] : []),
-      ],
-    }));
+    // OMP styles direct prose sections of a tool body; a layout wrapper loses that typography.
+    const children = () => [
+      ...(this.detail ? [prose(this.shownDetail())] : []),
+      ...(this.expanded() && this.requestId ? [new UiNode("text", { spans: [{ t: `${message(this.language, "Request")}: `, s: "muted" }, { t: this.requestId, s: "mono muted" }], wrap: "word" })] : []),
+    ];
+    const disclosure = {
+      role: "away.call-message", collapsible: true,
+      collapsed: () => !this.expanded(), onToggle: (collapsed: boolean) => this.expanded.set(!collapsed),
+    };
+    this.view = nativeSupports("tool")
+      ? new UiNode("tool", {
+        ...disclosure, name: "away", title: this.title, target: this.target, targetKind: "text",
+        // This is a received event, not the state of the call or its question.
+        status: "done", note: this.summary, frame: "card", preview: "children", children,
+      })
+      : new UiNode("card", {
+        ...disclosure, head: [{ t: this.title, s: "strong" }, { t: ` · ${this.target}` }],
+        preview: { lines: 6 }, children: [children, awayStatus(this.summary, "muted", "info")],
+      });
   }
   setExpanded(expanded: boolean): void { this.expanded.set(expanded); }
   private shownDetail(): string {

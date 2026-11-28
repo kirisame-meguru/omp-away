@@ -41,7 +41,7 @@
     <string name="that_request_is_no_longer_pending">"That request is no longer pending."</string>
     <string name="request_awaiting_sync_reconnect_to_review_it">"Request awaiting sync. Reconnect to review it."</string>
     <string name="all_questions">"All questions"</string>
-    <string name="proposed_answer_not_confirmed_or_submitted">"Proposed answer · Not confirmed or submitted"</string>
+    <string name="proposed_answer_not_confirmed_or_submitted">"Draft answer"</string>
     <string name="no_current_proposal_from_the_desktop">"No current proposal from the desktop."</string>
     <string name="reconnect_to_review_the_current_proposed_answer">"Reconnect to review the current proposed answer."</string>
     <string name="notifications_are_off_pending_questions_still_appear_on_the_home">"Notifications are off. Pending questions still appear on the home screen."</string>
@@ -115,7 +115,7 @@
     <string name="your_answer">"Your answer"</string>
     <string name="notes">"Notes"</string>
     <string name="voice_call">"Voice call"</string>
-    <string name="voice_captions_not_a_submitted_answer">"Voice captions · Not a submitted answer"</string>
+    <string name="voice_captions_not_a_submitted_answer">"Captions"</string>
     <string name="view_questions_and_proposed_answer">"View questions and proposed answer"</string>
     <string name="speaker_on">"Speaker: on"</string>
     <string name="speaker_off">"Speaker: off"</string>
@@ -140,7 +140,7 @@
     <string name="answer_call">"Answer call"</string>
     <string name="decline">"Decline"</string>
     <string name="incoming_call">"Incoming call"</string>
-    <string name="unlock_to_review_the_question_answer_starts_a_voice_call">"Unlock to review the question. Answer starts a voice call; it does not submit an answer."</string>
+    <string name="unlock_to_review_the_question_answer_starts_a_voice_call">"Unlock to answer the call."</string>
     <string name="read_only_question_and_options">"Read-only question and options"</string>
     <string name="question_and_options_read_only">"Question and options · Read only"</string>
     <string name="pending_sync_reconnect_to_read_the_current_question_cached_choices">"Pending sync. Reconnect to read the current question; cached choices are unavailable."</string>

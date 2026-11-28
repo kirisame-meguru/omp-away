@@ -41,7 +41,7 @@
     <string name="that_request_is_no_longer_pending">"Этот запрос больше не ожидает ответа."</string>
     <string name="request_awaiting_sync_reconnect_to_review_it">"Запрос ожидает синхронизации. Подключитесь снова, чтобы просмотреть его."</string>
     <string name="all_questions">"Все вопросы"</string>
-    <string name="proposed_answer_not_confirmed_or_submitted">"Предлагаемый ответ · Не подтверждён и не отправлен"</string>
+    <string name="proposed_answer_not_confirmed_or_submitted">"Черновик ответа"</string>
     <string name="no_current_proposal_from_the_desktop">"С компьютера ещё не получен предлагаемый ответ."</string>
     <string name="reconnect_to_review_the_current_proposed_answer">"Подключитесь снова, чтобы просмотреть предлагаемый ответ."</string>
     <string name="notifications_are_off_pending_questions_still_appear_on_the_home">"Уведомления отключены. Ожидающие ответа вопросы по-прежнему отображаются на главном экране."</string>
@@ -115,7 +115,7 @@
     <string name="your_answer">"Ваш ответ"</string>
     <string name="notes">"Примечания"</string>
     <string name="voice_call">"Голосовой звонок"</string>
-    <string name="voice_captions_not_a_submitted_answer">"Субтитры звонка · Это не отправленный ответ"</string>
+    <string name="voice_captions_not_a_submitted_answer">"Субтитры"</string>
     <string name="view_questions_and_proposed_answer">"Просмотреть вопросы и предлагаемый ответ"</string>
     <string name="speaker_on">"Динамик: вкл."</string>
     <string name="speaker_off">"Динамик: выкл."</string>
@@ -140,7 +140,7 @@
     <string name="answer_call">"Ответить на звонок"</string>
     <string name="decline">"Отклонить"</string>
     <string name="incoming_call">"Входящий звонок"</string>
-    <string name="unlock_to_review_the_question_answer_starts_a_voice_call">"Разблокируйте устройство для просмотра вопроса. Кнопка ответа начинает голосовой звонок, но не отправляет ответ на вопрос."</string>
+    <string name="unlock_to_review_the_question_answer_starts_a_voice_call">"Разблокируйте устройство, чтобы ответить на звонок."</string>
     <string name="read_only_question_and_options">"Вопрос и варианты только для чтения"</string>
     <string name="question_and_options_read_only">"Вопрос и варианты · Только для чтения"</string>
     <string name="pending_sync_reconnect_to_read_the_current_question_cached_choices">"Ожидается синхронизация. Подключитесь снова, чтобы прочитать актуальный вопрос; сохранённые варианты недоступны."</string>
