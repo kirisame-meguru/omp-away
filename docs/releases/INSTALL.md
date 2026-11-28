@@ -102,6 +102,14 @@ python /absolute/path/to/omp-away-v1.0.5/install.py --omp /absolute/path/to/omp-
 
 The installer runs frozen Bun production installation, `uv sync --locked --no-dev --python 3.12.8` for tunnel and media, the actual `omp install /absolute/path/to/archive/plugin`, isolated Python helper imports and `omp plugin doctor`. Calls never provision dependencies dynamically.
 
+For native Tern presentation, add `--tern tern` to the installer command, or run
+`tern plugin link /absolute/path/to/archive/plugin/tern` separately. This installs
+only Away-scoped styles; other OMP panels are unchanged. Keep the linked directory.
+After stylesheet updates run `tern plugin reload omp-away`; remove the link with
+`tern plugin unlink omp-away`. Ordinary terminal rendering remains available
+without the stylesheet. Do not combine native-style installation with an isolated
+installer acceptance run.
+
 Before starting omp, configure `OMP_AWAY_TUNNEL_PYTHON` to the absolute `plugin/tunnel/.venv/bin/python` (Windows: `.venv/Scripts/python.exe`). The media helper is located automatically at `plugin/media/.venv`. Configure `OMP_AWAY_URL` with your HTTPS relay origin, `OMP_AWAY_TOKEN_FILE` with the protected desktop credential path, and `OMP_AWAY_STATE_DIR` with the existing private state directory. Keep all of these outside the distribution. Do not display the values in shared logs. Complete the normal encrypted pairing flow.
 
 For a **clean isolated acceptance install**, use a fresh retained archive extraction and a nonexistent test home; pass the exact pinned omp binary:

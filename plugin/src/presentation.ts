@@ -28,10 +28,32 @@ export function awayStatus(label: string, tone: Tone = "muted", icon?: string): 
   });
 }
 
+export function pairingExpiry(expiresAt: number, language: Language): UiNode {
+  const remaining = signal(Math.max(0, Math.ceil((expiresAt - Date.now()) / 60_000)));
+  const relative = new Intl.RelativeTimeFormat(language, { numeric: "always" });
+  const view = new UiNode("text", {
+    role: "away.status",
+    spans: () => [{ t: remaining() === 0 ? message(language, "Expired")
+      : `${language === "ru" ? "Истекает" : "Expires"} ${relative.format(remaining(), "minute")}`, s: "muted" }],
+  });
+  const timer = setInterval(() => {
+    remaining.set(Math.max(0, Math.ceil((expiresAt - Date.now()) / 60_000)));
+    if (remaining() === 0) clearInterval(timer);
+  }, 1000);
+  timer.unref();
+  view.onDispose(() => clearInterval(timer));
+  return view;
+}
+
 export function awayBlock(
   props: { role: string; title: string; target?: string; status: "pending" | "done" | "error" | "cancelled"; collapsed?: boolean | (() => boolean); onToggle?: (collapsed: boolean) => void },
   children: JSXNode,
 ): UiNode {
+  if (nativeSupports("tool")) return new UiNode("tool", {
+    role: props.role, name: "away", title: props.title, target: props.target,
+    targetKind: "text", status: props.status, frame: "card", preview: "children",
+    collapsed: props.collapsed ?? false, onToggle: props.onToggle, children,
+  });
   return new UiNode("card", {
     role: props.role,
     head: [{ t: props.title, s: "strong" }, ...(props.target ? [{ t: ` · ${props.target}` }] : [])],
@@ -65,6 +87,28 @@ export function createEndCallRenderers(language: () => Language = () => "en") {
 }
 
 export const endCallRenderers = createEndCallRenderers();
+
+export function createCallRenderers(language: () => Language = () => "en") {
+  const body = (label: string) => prose(message(language(), label));
+  return {
+    mergeCallAndResult: true,
+    renderCall(_args: unknown, options: RenderResultOptions) {
+      return body(options.cancelled ? "Cancelled" : options.executionStarted === false ? "Waiting to call" : "Calling phone");
+    },
+    renderResult(result: ToolRenderResult, options: RenderResultOptions) {
+      if (options.cancelled) return body("Cancelled");
+      if (options.isPartial) return body("Calling phone");
+      if (result.isError) return body("Could not call phone");
+      const labels: Record<string, string> = {
+        armed: "Ready to call with the next question",
+        answered: "Phone picked up", declined: "Call declined",
+        missed: "Missed call", closed: "Question closed", unavailable: "Phone unavailable",
+      };
+      const outcome = isRecord(result.details) ? result.details.outcome : undefined;
+      return body(typeof outcome === "string" ? labels[outcome] ?? "Call status unavailable" : "Call status unavailable");
+    },
+  };
+}
 
 /** The context envelope is model input, never transcript UI. */
 export class CallMessage {
@@ -123,15 +167,16 @@ export class CallMessage {
 export class PairingComparison {
   readonly view: UiNode;
   constructor(readonly emoji: string, readonly code: string, readonly decide: (accept: boolean, code: string) => void, readonly language: Language = "en") {
-    this.view = awayBlock({ role: "away.pairing.compare", title: message(language, "Pair phone"), target: message(language, "Verify device"), status: "pending" }, [
+    const panel = awayBlock({ role: "away.pairing.compare", title: message(language, "Pair phone"), status: "pending" }, [
       new UiNode("text", { text: message(language, "Compare all 12 emojis, in order, with your phone."), wrap: "word" }),
       new UiNode("text", { text: clean(emoji), role: "away.comparison", wrap: "word" }),
-      new UiNode("text", { spans: [{ t: message(language, "Only approve if every emoji matches. Expires in 2 minutes."), s: "muted" }], wrap: "word" }),
+      pairingExpiry(Date.now() + 120_000, language),
       new UiNode("row", { role: "away.footer", gap: "sm", wrap: true, children: [
         new UiNode("button", { role: "omp.btn", text: message(language, "Deny"), variant: "quiet", size: "sm", actions: { click: "deny" }, onAction: (act: string) => { if (act === "deny") decide(false, code); } }),
         new UiNode("button", { role: "omp.btn", text: message(language, "All 12 match"), size: "sm", actions: { click: "approve" }, onAction: (act: string) => { if (act === "approve") decide(true, code); } }),
       ] }),
-      new UiNode("text", { text: `${message(language, "Match")}: /away approve ${code}\n${message(language, "Mismatch")}: /away deny ${code}`, wrap: "word" }),
+      () => nativeSupports("tool") ? null : new UiNode("text", { text: `${message(language, "Match")}: /away approve ${code}\n${message(language, "Mismatch")}: /away deny ${code}`, wrap: "word" }),
     ]);
+    this.view = new UiNode("col", { role: "away.pairing.widget", children: panel });
   }
 }

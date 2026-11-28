@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, test, vi } from "bun:test";
 import { UiNode } from "@oh-my-pi/pi-tui";
 import { setNativeRenderingForTest } from "@oh-my-pi/pi-tui/host";
 import { getBlob } from "@oh-my-pi/pi-tui/native/blobs";
-import { CallMessage, PairingComparison, createEndCallRenderers } from "../src/presentation";
+import { CallMessage, PairingComparison, pairingExpiry, createCallRenderers, createEndCallRenderers } from "../src/presentation";
 import { PairingQr } from "../src/runtime/pairing-qr";
 
 function nodes(node: UiNode): UiNode[] {
@@ -11,6 +11,21 @@ function nodes(node: UiNode): UiNode[] {
 function text(node: UiNode): string {
   return nodes(node).map(n => JSON.stringify(n.props())).join("\n");
 }
+
+test("pairing countdown updates, pluralizes, and expires", () => {
+  vi.useFakeTimers();
+  const countdown = pairingExpiry(Date.now() + 120_000, "en");
+  try {
+    expect(text(countdown)).toContain("Expires in 2 minutes");
+    vi.advanceTimersByTime(60_000);
+    expect(text(countdown)).toContain("Expires in 1 minute");
+    vi.advanceTimersByTime(60_000);
+    expect(text(countdown)).toContain("Expired");
+  } finally {
+    countdown.dispose();
+    vi.useRealTimers();
+  }
+});
 
 test("call messages retain card fallback and disclosure without a misleading completion badge", () => {
   const detail = "x".repeat(300);
@@ -88,6 +103,40 @@ test("end-call phases use native nodes, including errors and pending execution",
   }
 });
 
+test("call initiation renders every outcome without model instructions", () => {
+  const renderers = createCallRenderers();
+  const options = { expanded: false, isPartial: false };
+  for (const [outcome, label] of Object.entries({
+    armed: "Ready to call with the next question", answered: "Phone picked up",
+    declined: "Call declined", missed: "Missed call", closed: "Question closed",
+    unavailable: "Phone unavailable", unknown: "Call status unavailable",
+  })) {
+    const view = renderers.renderResult({ content: [{ type: "text", text: "internal instructions" }], details: { outcome } }, options);
+    expect(view.kind).toBe("md");
+    expect(text(view)).toContain(label);
+    expect(text(view)).not.toContain("internal instructions");
+  }
+  expect(text(renderers.renderCall({}, options))).toContain("Calling phone");
+  expect(text(renderers.renderCall({}, { ...options, executionStarted: false }))).toContain("Waiting to call");
+  expect(text(renderers.renderCall({}, { ...options, cancelled: true }))).toContain("Cancelled");
+  expect(text(renderers.renderResult({ content: [], isError: true }, options))).toContain("Could not call phone");
+  expect(text(renderers.renderResult({ content: [] }, options))).toContain("Call status unavailable");
+  expect(text(renderers.renderResult({ content: [] }, { ...options, isPartial: true }))).toContain("Calling phone");
+});
+
+test("native comparison has one semantic panel and no raw approval commands", () => {
+  setNativeRenderingForTest(true);
+  try {
+    const view = new PairingComparison("synthetic comparison", "abcdef123456", () => {}).view;
+    expect(view.props()).toHaveProperty("role", "away.pairing.widget");
+    expect(nodes(view).filter(node => node.kind === "tool")).toHaveLength(1);
+    expect(nodes(view).filter(node => node.kind === "card")).toHaveLength(0);
+    expect(text(view)).not.toContain("/away approve");
+  } finally {
+    setNativeRenderingForTest(false);
+  }
+});
+
 test("comparison actions remain bound to their comparison code", () => {
   const answers: [boolean, string][] = [];
   const view = new PairingComparison("🐶".repeat(12), "abcdef123456", (accept, code) => answers.push([accept, code])).view;
@@ -110,6 +159,7 @@ test("pairing QR preserves native image, cancellation, and safe terminal fallbac
     const image = nodes(qr.view).find(node => node.kind === "image")!;
     expect(image).toBeDefined();
     const imageProps = image.props();
+    expect(imageProps).not.toHaveProperty("max");
     if (!("blob" in imageProps) || typeof imageProps.blob !== "string") throw new Error("QR image has no blob");
     expect(getBlob(imageProps.blob)).toBeDefined();
     expect(text(qr.view)).not.toContain(payload);

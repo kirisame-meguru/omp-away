@@ -1,0 +1,40 @@
+[data-role^='away.'] .sf-text,
+[data-role^='away.'] .sf-md,
+[data-role='away.status'],
+[data-role='omp.tool.away_call'] .sf-md,
+[data-role='omp.tool.away_end_call'] .sf-md {
+    font-family: var(--sans);
+}
+
+.sf-tool[data-role^='away.'] > .sf-tool-body,
+.sf-tool[data-role='omp.tool.away_call'] > .sf-tool-body,
+.sf-tool[data-role='omp.tool.away_end_call'] > .sf-tool-body {
+    border: 1px solid var(--l2);
+    border-radius: var(--r-card);
+    background: var(--code-bg);
+    padding: 12px 14px;
+    margin-top: 8px;
+}
+
+[data-role='away.pairing.widget'] {
+    padding-bottom: 20px;
+    min-width: 0;
+}
+
+.sf-tool[data-role^='away.pairing.'] > .sf-tool-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    text-align: center;
+}
+
+[data-role^='away.pairing.'] [data-role='away.footer'] {
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+[data-role='away.pairing.image'] {
+    max-width: 100%;
+    flex-shrink: 0;
+}

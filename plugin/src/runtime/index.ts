@@ -134,29 +134,23 @@ export async function openAdmin(ctx:ExtensionContext, isCurrent:()=>boolean, idl
 				try {
 					const payload=await runtime.pair();
 					if (!current() || !idle() || epoch!==nextPair) return;
+					expires=Date.now()+600_000;
 					if (args==="pair clipboard") {
 						await resources.copy(payload,python);
 						if (!current() || !idle() || epoch!==nextPair) return;
 					} else {
-						let availableRows=()=>0;
-						const qr=new PairingQr(payload,()=>availableRows(),()=>{
+						const deadline = expires;
+						ctx.ui.setWidget("omp-away-pairing-qr",tui=>new PairingQr(payload,()=>tui.size().rows,()=>{
 							if (epoch===nextPair) cancelPairing();
-						},notifications.language);
-						ctx.ui.setWidget("omp-away-pairing-qr",tui=>{
-							availableRows=()=>tui.size().rows;
-							return qr.view;
-						});
+						},notifications.language,deadline).view);
 					}
-					expires=Date.now()+600_000;
 					expiryTimer=setTimeout(()=>{
 						if (epoch!==nextPair) return;
 						cancelEnrollment();
 						notify("Away pairing expired. Run /away pair for a new QR.","warning");
-					},600_000);
+					},Math.max(0,expires-Date.now()));
 					expiryTimer.unref();
-					notify(args==="pair clipboard"
-						? "Away enrollment copied. Paste only into your phone's pairing screen. Compare all 12 emojis here and on the phone."
-						: "Scan the QR with Away on your phone, then compare all 12 emojis. Clipboard alternative: /away pair clipboard.");
+					if (args==="pair clipboard") notify("Pairing code copied. Paste into Away on your phone. Expires in 10 minutes.");
 				} catch {
 					if (epoch===nextPair) cancelEnrollment();
 					notify(args==="pair clipboard"

@@ -112,6 +112,8 @@ class ReleaseTests(unittest.TestCase):
                 'media/pyproject.toml': '', 'media/uv.lock': '', 'media/peer.py': '# peer',
                 'media/opening.md': 'Synthetic opening instructions',
                 'media/diagnostics.json': 'private test fixture',
+                'tern/plugin.toml': 'schema = 1', 'tern/window.luau': '-- stylesheet only',
+                'tern/away.css': "[data-role='away.status'] { font-family: var(--sans); }",
             }
             for name, content in files.items():
                 target = root / 'plugin' / name
@@ -140,6 +142,8 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(archive.read('plugin/media/opening.md').decode(),
                                  files['media/opening.md'])
                 self.assertNotIn('plugin/media/diagnostics.json', archive.namelist())
+                for name in ('plugin.toml', 'window.luau', 'away.css'):
+                    self.assertEqual(archive.read('plugin/tern/' + name).decode(), files['tern/' + name])
 
 
 class HostTests(unittest.TestCase):

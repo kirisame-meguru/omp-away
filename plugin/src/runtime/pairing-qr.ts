@@ -2,7 +2,7 @@ import { UiNode, nativeSupports } from "@oh-my-pi/pi-tui";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { encodeQr, qrHalfBlocks } from "@oh-my-pi/pi-coding-agent/ui/transcript/figures/qr";
-import { awayBlock, awayStatus } from "../presentation";
+import { awayBlock, pairingExpiry } from "../presentation";
 import type { Language } from "../language";
 import { message } from "../messages";
 
@@ -16,7 +16,7 @@ export class PairingQr {
 	private readonly lines: string[];
 	private readonly minWidth: number;
 
-	constructor(payload: string, private readonly rows: () => number, cancel: () => void, readonly language: Language = "en") {
+	constructor(payload: string, private readonly rows: () => number, cancel: () => void, readonly language: Language = "en", expiresAt = Date.now() + 600_000) {
 		const qr = encodeQr(payload, "M");
 		this.lines = qrHalfBlocks(qr, "dark").map(line => `\x1b[47m\x1b[30m${line}\x1b[0m`);
 		this.minWidth = this.lines.reduce((width, line) => Math.max(width, visibleWidth(line)), 0);
@@ -28,19 +28,19 @@ export class PairingQr {
 		const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><path fill="white" d="M0 0h${size}v${size}H0z"/><path fill="black" d="${path}"/></svg>`;
 		const image = new UiNode("image", {
 			blob: registerBlob(new TextEncoder().encode(svg), "image/svg+xml"),
-			alt: message(language, "Away pairing QR"), w: 220, h: 220, max: { w: 220, h: "12lines" },
+			alt: message(language, "Away pairing QR"), role: "away.pairing.image", w: 220, h: 220,
 		});
 		const terminal = new UiNode("canvas", { paint: (width: number) => this.render(width) });
-		const native = awayBlock({ role: "away.pairing.qrcode", title: message(language, "Pair phone"), target: "Away", status: "pending" }, [
-			new UiNode("text", { text: message(language, "Scan with Away on your phone, then compare all 12 emojis."), wrap: "word" }),
+		const native = awayBlock({ role: "away.pairing.qrcode", title: message(language, "Pair phone"), status: "pending" }, [
+			new UiNode("text", { text: message(language, "Scan with Away on your phone"), wrap: "word" }),
 			image,
-			new UiNode("text", { spans: [{ t: message(language, "Clipboard alternative: /away pair clipboard"), s: "muted" }], wrap: "word" }),
-			new UiNode("row", { role: "away.footer", wrap: true, gap: "sm", justify: "between", align: "center", children: [
-				awayStatus(message(language, "Expires in 10 minutes")),
+			new UiNode("text", { spans: [{ t: language === "ru" ? "или · " : "or · ", s: "muted" }, { t: "/away pair clipboard", s: "mono muted" }], wrap: "word" }),
+			new UiNode("row", { role: "away.footer", wrap: true, gap: "sm", justify: "center", align: "center", children: [
+				pairingExpiry(expiresAt, language),
 				new UiNode("button", { role: "omp.btn", text: message(language, "Cancel pairing"), variant: "quiet", size: "sm", actions: { click: "cancel-pair" }, onAction: (act: string) => { if (act === "cancel-pair") cancel(); } }),
 			] }),
 		]);
-		this.view = new UiNode("col", { children: () => nativeSupports("image") ? native : terminal });
+		this.view = new UiNode("col", { role: "away.pairing.widget", children: () => nativeSupports("image") ? native : terminal });
 	}
 
 	render(width: number): string[] {

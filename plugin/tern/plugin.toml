@@ -1,0 +1,7 @@
+schema = 1
+id = "omp-away"
+name = "OMP Away"
+version = "0.1.0"
+description = "Native Away presentation"
+window = "window.luau"
+styles = ["away.css"]

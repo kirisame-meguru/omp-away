@@ -235,14 +235,15 @@ def build_plugin(output, tag, epoch):
         # Build the existing pinned SDK in a disposable source copy, never mutate plugin/.
         command(['bun', 'install', '--frozen-lockfile'], cwd=plugin)
         command(['bun', 'media/build-sdk.ts'], cwd=plugin)
-        for name in ('src/index.ts', 'src/media/live-sdk.generated.mjs', 'tunnel/uv.lock', 'media/uv.lock'):
+        for name in ('src/index.ts', 'src/media/live-sdk.generated.mjs', 'tunnel/uv.lock', 'media/uv.lock',
+                     'tern/plugin.toml', 'tern/window.luau', 'tern/away.css'):
             if not (plugin / name).is_file():
                 raise ValueError('plugin package is incomplete: ' + name)
         shutil.copyfile(ROOT / 'tools/release/install_plugin.py', stage / 'install.py')
         shutil.copyfile(ROOT / 'docs/releases/INSTALL.md', stage / 'INSTALL.md')
         # Explicit distribution roots exclude node_modules, venvs, tests and machine config.
         names = ['install.py', 'INSTALL.md', 'plugin/package.json', 'plugin/bun.lock']
-        for sub in ('src', 'prompts', 'tunnel/omp_away_tunnel'):
+        for sub in ('src', 'prompts', 'tunnel/omp_away_tunnel', 'tern'):
             names.extend(p.relative_to(stage).as_posix() for p in (plugin / sub).rglob('*')
                          if p.is_file() and '__pycache__' not in p.parts)
         for sub in ('tunnel', 'media'):

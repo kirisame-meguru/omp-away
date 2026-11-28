@@ -31,11 +31,15 @@ def main():
                         help='extracted archive root (contains plugin/)')
     parser.add_argument('--omp', default='omp', help='path to stock omp 19.1.0')
     parser.add_argument('--isolated-home', type=Path, help='new empty home for clean install acceptance')
+    parser.add_argument('--tern', help='Tern executable; also link the native Away stylesheet')
     args = parser.parse_args()
+    if args.tern and args.isolated_home:
+        raise ValueError('install native styles separately after isolated acceptance')
     root = args.root.resolve()
     for name in ('package.json', 'bun.lock', 'src/index.ts', 'src/media/live-sdk.generated.mjs',
                  'src/media/prompts/away-call.md', 'src/prompts/translate.md',
-                 'tunnel/uv.lock', 'media/uv.lock', 'media/peer.py', 'media/opening.md'):
+                 'tunnel/uv.lock', 'media/uv.lock', 'media/peer.py', 'media/opening.md',
+                 'tern/plugin.toml', 'tern/window.luau', 'tern/away.css'):
         if not (root / 'plugin' / name).is_file():
             raise ValueError('extract the complete verified plugin archive first')
     env = os.environ.copy()
@@ -54,6 +58,8 @@ def main():
         python = root / 'plugin' / helper / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
         subprocess.run([str(python), '-I', '-c', 'import ' + module], env=env, check=True)
     subprocess.run([args.omp, 'plugin', 'doctor'], cwd=root / 'plugin', env=env, check=True)
+    if args.tern:
+        subprocess.run([args.tern, 'plugin', 'link', str(root / 'plugin/tern')], env=env, check=True)
     print('Plugin linked. Keep the extracted directory; it is the installed source, not a temporary installer.')
     print('Set OMP_AWAY_TUNNEL_PYTHON to the absolute plugin/tunnel/.venv interpreter before starting omp.')
 

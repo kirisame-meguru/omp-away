@@ -8,7 +8,7 @@ import { type Admin, gatewayConfigured, openAdmin } from "./runtime";
 import { awaySuggestions } from "./runtime/commands";
 import { connectAsyncQuestions, type AsyncAskConnection } from "./runtime/async-ask";
 import { AwayNotifications } from "./runtime/notifications";
-import { CallMessage, clean, createEndCallRenderers } from "./presentation";
+import { CallMessage, clean, createCallRenderers, createEndCallRenderers } from "./presentation";
 import { message } from "./messages";
 
 export type Values = Record<string, string | number | boolean | string[]>;
@@ -339,6 +339,7 @@ export default function away(pi: ExtensionAPI): void {
 		description: "Optional: ring the user's paired Away phone like an incoming phone call so they can discuss a pending question by voice. Ordinary questions only appear as phone notifications that can be answered by touch; use this only when a live voice conversation is genuinely useful or urgent. A call always belongs to a pending question: pass `questionId` from an `ask_async` question that is still pending, or `nativeAsk: true` to ring for the native `ask` you invoke next. Because native `ask` blocks, emit `away_call` with `nativeAsk: true` immediately before `ask` in the same response; the arm lapses when the turn ends. For `questionId`, this waits up to 45 seconds and reports answered, declined, missed or closed. Never ring repeatedly for the same question after a decline or miss.",
 		parameters: callParameters,
 		approval: "write",
+		...createCallRenderers(language),
 		async execute(_id, params, signal, _update, ctx) {
 			signal?.throwIfAborted();
 			if ((params.questionId === undefined) === (params.nativeAsk !== true)) throw Error("Pass exactly one of questionId or nativeAsk: true.");
